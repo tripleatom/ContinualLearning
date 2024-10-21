@@ -1,0 +1,4 @@
+*.png
+__pycache__
+build
+cl_project.egg-infor
