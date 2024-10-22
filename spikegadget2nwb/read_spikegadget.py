@@ -61,6 +61,7 @@ def initiate_nwb(rec_file, nwb_path, metadata=None):
 
     xcoord = np.array(channel_map['xcoord'], dtype=float)
     ycoord = np.array(channel_map['ycoord'], dtype=float)
+    sh = np.array(channel_map['sh'], dtype=int)
 
     # impedance_table = pd.read_csv(impedance_path)
     # impedance = impedance_table['Impedance Magnitude at 1000 Hz (ohms)'].to_numpy(
@@ -74,26 +75,32 @@ def initiate_nwb(rec_file, nwb_path, metadata=None):
         name="label", description="label of electrode")
     
     electrode_location = metadata.get("electrode_location", None)
-
-    nchannels = metadata.get("n_channels", 128)
-
+    nchannels_per_shank = metadata.get("n_channels_per_shank", 32)
+    nshanks = metadata.get("n_shanks", 4)
     electrode_counter = 0
-    electrode_group = nwbfile.create_electrode_group(
-        name="shank0",
-        description="electrode group",
-        device=PL_device,
-        location=electrode_location,
-    )
-    # add electrodes to the electrode table
-    for ich in range(nchannels):
+    n_electrodes = nchannels_per_shank * nshanks
+
+    electrode_groups = []
+    for ish in range(nshanks):
+        electrode_group = nwbfile.create_electrode_group(
+            name="shank{}".format(ish),
+            description="electrode group for shank {}".format(ish),
+            device=PL_device,
+            location=electrode_location,
+        )
+        electrode_groups.append(electrode_group)
+
+    for ich in range(n_electrodes):
+        # create an electrode group for this shank
+        ishank = sh[ich]
+        # add electrodes to the electrode table
+
         nwbfile.add_electrode(
-            group=electrode_group,
-            label="elec{}".format(ich),
+            group=electrode_groups[ishank],
+            label="shank{}elec{}".format(ishank, ich),
+            location=electrode_location,
             rel_x=float(xcoord[ich]),
             rel_y=float(ycoord[ich]),
-            rel_z=0.0,
-            location=electrode_location,
-            # imp=float(impedance_reordered[ich])
         )
         electrode_counter += 1
 
@@ -133,7 +140,7 @@ def initiate_nwb(rec_file, nwb_path, metadata=None):
 
     #     nwbfile.add_acquisition(digin_series)
 
-    print('initiating nwb file...')
+    print('writing nwb file...')
     with NWBHDF5IO(nwb_path, "w") as io:
         io.write(nwbfile)
 
@@ -188,7 +195,8 @@ if __name__ == "__main__":
     initiate_nwb(rec_file, nwb_path,
                  metadata={'device_type': '4shank16',
                            "session_desc": session_description,
-                           "n_channels": 128,
+                           'n_shanks': 4,
+                           'n_channels_per_shank': 32,
                            "electrode_location": "V1", })
 
     # for i, rhs_file in enumerate(rhs_files[1:]):

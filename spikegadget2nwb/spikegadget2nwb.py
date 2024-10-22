@@ -9,7 +9,7 @@ exp_date = "20241004"
 exp_time = "153555"
 session_description = subject_id + '_' + exp_date + '_' + exp_time + '.rec'
 # ephys_folder = get_ephys_folder()
-ephys_folder = Path(r"\\10.129.151.108\xieluanlabs\xl_cl\rf_reconstruction\rf_recons")
+ephys_folder = Path(r"D:\cl\rf_reconstruction\head_fixed")
 folder = ephys_folder / session_description
 
 rec_files = sorted(folder.glob('*.rec'), key=lambda x: os.path.getmtime(x))
@@ -22,7 +22,8 @@ nwb_path = folder / Path(session_description + '.nwb')
 initiate_nwb(rec_file, nwb_path,
              metadata={'device_type': '4shank16',
                        "session_desc": session_description,
-                       "n_channels": 128,
+                       "n_shanks": 4,
+                       "n_channels_per_shank": 32,
                        "electrode_location": "V1", })
 
 if len(rec_files) == 1:
