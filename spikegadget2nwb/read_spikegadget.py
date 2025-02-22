@@ -13,22 +13,6 @@ import platform
 import os
 
 
-def get_ephys_folder():
-
-    pf = platform.system()
-
-    if pf == 'Darwin':
-        NotImplementedError('MacOS is not supported yet!')
-    elif pf == 'Windows':
-        ephys_folder = Path(r'\\10.129.151.108\xieluanlabs\xl_cl\ephys')
-    elif pf == 'Linux':
-        NotImplementedError('Linux is not supported yet!')
-    if not ephys_folder.exists():
-        raise ValueError('The folder does not exist!')
-
-    return ephys_folder
-
-
 def get_rec_timestamp(rec_file: Path):
     match = re.search(r"_(\d{8})_(\d{6})", rec_file.name)
 
@@ -191,14 +175,38 @@ def append_nwb(nwb_path, rec_file, ishank=0, metadata=None):
     io.write(nwb_obj_)
     io.close()
 
+def get_session_description(rec_folder):
+    """
+    Extract session description from recording folder path using different methods.
+    
+    Args:
+        rec_folder (str): Path to recording folder
+        
+    Returns:
+        str: Session description
+    """
+    # Method 1: Using regex to match the pattern before .rec
+    pattern = r'[\\\/]([^\\\/]+)\.rec$'
+    match = re.search(pattern, rec_folder)
+    if match:
+        return match.group(1)
+    
+    # Method 2: Using os.path to get basename and remove extension
+    basename = os.path.basename(rec_folder)
+    return os.path.splitext(basename)[0]
+
 
 if __name__ == "__main__":
-    subject_id = "CnL22"
-    exp_date = "20241113"
-    exp_time = "155342"
-    session_description = subject_id + '_' + exp_date + '_' + exp_time + '.rec'
-    ephys_folder = Path(r"\\10.129.151.108\xieluanlabs\xl_cl\rf_reconstruction\head_fixed")
-    rec_folder = ephys_folder / session_description
+    device_type = '4shank16'
+    n_shank = 4
+
+
+    rec_folder = r"D:\cl\ephys\CnL22_20250216_212206.rec"
+    session_description = get_session_description(rec_folder)
+
+    if not rec_folder.exists():
+        print(f"Folder {rec_folder} does not exist, exiting")
+        exit()
 
     folders = sorted(rec_folder.glob('*.mountainsort'),
                      key=lambda x: os.path.getmtime(x))
@@ -211,13 +219,13 @@ if __name__ == "__main__":
     # impedance_file = subject_folder / \
     #     Path(subject_id + '_' + exp_date + '.csv')
 
-    n_shank = 4
+
     for ish in range(n_shank):
         nwb_path = rec_folder / Path(session_description + f'sh{ish}.nwb')
         print(f"Creating NWB file {nwb_path.name}")
 
         initiate_nwb(rec_file0, nwb_path, ishank=ish,
-                     metadata={'device_type': '4shank16',
+                     metadata={'device_type': device_type,
                                "session_desc": session_description,
                                "n_channels_per_shank": 32,
                                "electrode_location": "V1", })
@@ -229,4 +237,4 @@ if __name__ == "__main__":
         for i, rec_file in enumerate(rec_files[1:]):
             print(f"Appending file {rec_file.name} to {nwb_path.name}")
             append_nwb(nwb_path, rec_file, ishank=ish,
-                       metadata={'device_type': '4shank16'})
+                       metadata={'device_type': device_type})

@@ -1,14 +1,16 @@
-from read_spikegadget import get_ephys_folder
 from pathlib import Path
 from read_spikegadget import initiate_nwb, append_nwb
 import os
 
 
-subject_id = "CnL22"
-exp_date = "20241030"
-exp_time = "233456"
-device_type = '4shank32'
-ephys_folder = Path(r"D:\cl\ephys")
+subject_id = "CnL15"
+exp_date = "20250109"
+exp_time = "170329"
+device_type = '4shank16'
+ephys_folder = Path(r"/Volumes/xieluanlabs/xl_cl/ephys")
+
+n_shank = 4
+
 session_description = subject_id + '_' + exp_date + '_' + exp_time + '.rec'
 
 rec_folder = ephys_folder / session_description
@@ -24,7 +26,7 @@ rec_file0 = rec_files[0]
 # impedance_file = subject_folder / \
 #     Path(subject_id + '_' + exp_date + '.csv')
 
-n_shank = 4
+
 for ish in range(n_shank):
     nwb_path = rec_folder / Path(session_description + f'sh{ish}.nwb')
     print(f"Creating NWB file {nwb_path.name}")
