@@ -3,29 +3,52 @@ import numpy as np
 import spikeinterface.preprocessing as spre
 import re
 
-def parse_session_info(rec_folder):
-    """
-    Extract animal ID and session ID from recording folder path.
+import re
+import os
+
+import os
+import re
+
+def parse_session_info(rec_folder: str) -> tuple:
+    r"""
+    Extract animal ID, session ID, and folder name from a recording folder path.
     
+    Supports folder names such as:
+      1. \\10.129.151.108\xieluanlabs\xl_cl\ephys\CnL14_20240915_161250.rec
+      2. \\10.129.151.108\xieluanlabs\xl_cl\rf_reconstruction\head_fixed\CNL35\CNL35_250305_191757
+
     Args:
-        rec_folder (str): Path to recording folder
+        rec_folder (str): Path to the recording folder.
         
     Returns:
-        tuple: (animal_id, session_id)
+        tuple: (animal_id, session_id, folder_name)
     """
-    # Method 1: Using regex to match specific pattern
-    pattern = r'([A-Za-z]+\d+)_(\d{8}_\d{6})\.rec$'
-    match = re.search(pattern, rec_folder)
+    # Get the basename (folder name) and remove any trailing path separators
+    basename = os.path.basename(rec_folder.rstrip("\\/"))
+    
+    # Regex pattern:
+    # - ([A-Za-z]+\d+): captures animal ID (e.g., CnL14 or CNL35)
+    # - _(\d{6,8}_\d{6}): captures session ID (date_time, e.g., 250305_191757)
+    # - (?:\.rec)?$ : optionally matches a trailing '.rec'
+    pattern = r'([A-Za-z]+\d+)_(\d{6,8}_\d{6})(?:\.rec)?$'
+    match = re.search(pattern, basename)
     if match:
-        return match.group(1), match.group(2)
+        animal_id = match.group(1)
+        session_id = match.group(2)
+        folder_name = f"{animal_id}_{session_id}"
+        return animal_id, session_id, folder_name
     
-    # Method 2: Extract from basename using regex
-    basename = rec_folder.split('\\')[-1].replace('.rec', '')
-    parts = basename.split('_')
-    if len(parts) >= 3:
-        return parts[0], '_'.join(parts[1:])
-    
-    return None, None
+    # Fallback: remove '.rec' if present, then split by underscore
+    cleaned = basename.replace('.rec', '')
+    parts = cleaned.split('_')
+    if len(parts) >= 2:
+        animal_id = parts[0]
+        session_id = '_'.join(parts[1:])
+        folder_name = f"{animal_id}_{session_id}"
+        return animal_id, session_id, folder_name
+
+    raise ValueError("Recording folder name doesn't match the expected format.")
+
 
 def get_bad_ch_id(rec, folder, ish,  load_if_exists=True):
     # folder: parent folder for nwb file
