@@ -9,10 +9,9 @@ from scipy.signal import find_peaks
 from rf_func import find_stim_index
 from spikeinterface.extractors import PhySortingExtractor
 
-animal_id = 'LGN01'
-session_id = '20241204_164306'
-ishs = ['0']
-# ishs = ['0', '1', '2', '3']
+animal_id = 'CnL22'
+session_id = '20241113_155342'
+ishs = ['0', '1', '2', '3']
 
 dot_time = 0.2 # each stimulus last for 0.2s
 trial_dur = 480 # each trial last for 480 s. 5*8 pixels, 60 repeats.
@@ -30,8 +29,7 @@ for i, dot in enumerate(dots_order):
     white_dots_stimuli[i, row, col] = 1
 
 
-start_time = 5365388 # ephys recording start time stamp
-end_time = 36528408
+
 
 rec_folder = rf"D:\cl\rf_reconstruction\head_fixed\{animal_id}_{session_id}.rec"
 
@@ -39,13 +37,16 @@ dio_folders = DIO.get_dio_folders(rec_folder)
 dio_folders = sorted(dio_folders, key=lambda x:x.name)
 
 pd_time, pd_state = DIO.concatenate_din_data(dio_folders, 1)
+start_time = pd_time[0]
 
 time_diff = np.diff(pd_time)/30000
 freq = 1./time_diff / 1000 # kHz
 
 minima_indices, _ = find_peaks(-freq, distance=500, height=-1)
-black_start = 6044083 # black dots start time stamp
-black_end = 20456037
+black_start = 97830201 # black dots start time stamp
+black_end = 112242129
+white_start = 112858619 # white dots start time stamp
+white_end = 127270571
 
 # get the local minima numbers between black_start and black_end
 black_minima_indices = minima_indices[(pd_time[minima_indices] > black_start) & (pd_time[minima_indices] < black_end)]
@@ -54,9 +55,6 @@ black_minima = np.insert(black_minima, 0, black_start)
 black_minima = np.append(black_minima, black_end)
 
 print('black minima number: ', len(black_minima))
-
-white_start = 21071020 # white dots start time stamp
-white_end = 35482975
 
 # get the local minima numbers between white_start and white_end
 white_minima_indices = minima_indices[(pd_time[minima_indices] > white_start) & (pd_time[minima_indices] < white_end)]
@@ -81,7 +79,10 @@ for ish in ishs:
         if not out_fig_folder.exists():
             out_fig_folder.mkdir(parents=True)
 
-        sorting = PhySortingExtractor(phy_folder)
+        # sorting = PhySortingExtractor(phy_folder)
+        sorting_anaylzer = load_sorting_analyzer(
+            Path(sorting_results_folder) / 'sorting_analyzer')
+        sorting = sorting_anaylzer.sorting
 
         unit_ids = sorting.unit_ids
         fs = sorting.sampling_frequency
@@ -101,7 +102,7 @@ for ish in ishs:
             ST  = []
             ST_white = []
             ST_black = []
-            prior_time = 0.2 # s
+            prior_time = 0.05 # s
             for spike in white_dot_spikes:
                 i_stimuli = find_stim_index(spike-prior_time*fs, white_minima)
                 if i_stimuli is None:
@@ -141,15 +142,15 @@ for ish in ishs:
             black_firing = np.zeros((40, 60))
 
             for i in range(40):
-                index = np.where(dots_order == i)[0]
-                white_start_times = white_minima[index] + delay * fs
+                indexes = np.where(dots_order == i)[0]
+                white_start_times = white_minima[indexes] + delay * fs
                 white_end_times = white_start_times + average_length * fs
                 for j in range(len(white_start_times)):
                     white_dot_spike = spikes[(spikes > white_start_times[j]) & (spikes < white_end_times[j])]
                     white_firing[i, j] = len(white_dot_spike) / average_length
 
 
-                black_start_times = black_minima[index] + delay * fs
+                black_start_times = black_minima[indexes] + delay * fs
                 black_end_times = black_start_times + average_length * fs
                 for j in range(len(black_start_times)):
                     black_dot_spike = spikes[(spikes > black_start_times[j]) & (spikes < black_end_times[j])]

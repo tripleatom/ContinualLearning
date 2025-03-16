@@ -6,7 +6,7 @@ import mplcursors
 from scipy.signal import find_peaks
 
 
-rec_folder = r"D:\cl\rf_reconstruction\head_fixed\LGN01_20241204_164306.rec"
+rec_folder = r"\\10.129.151.108\xieluanlabs\xl_cl\rf_reconstruction\head_fixed\CnL22_20241113_155342.rec"
 
 dio_folders = DIO.get_dio_folders(rec_folder)
 dio_folders = sorted(dio_folders, key=lambda x:x.name)
@@ -37,8 +37,10 @@ print('end time: ', pd_time[-1])
 # 1st: black dot
 # 2nd: white dot
 
-black_start = 6044083 # black dots start time stamp
-black_end = 20456037
+black_start = 97830201 # black dots start time stamp
+black_end = 112242129
+white_start = 112858619 # white dots start time stamp
+white_end = 127270571
 black_duration = (black_end - black_start)/30000
 black_duration
 
@@ -48,8 +50,7 @@ black_minima_indices
 
 print('black minima number: ', len(black_minima_indices))
 
-white_start = 21071020 # white dots start time stamp
-white_end = 35482975
+
 white_duration = (white_end - white_start)/30000
 white_duration
 

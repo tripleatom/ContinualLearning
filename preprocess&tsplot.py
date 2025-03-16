@@ -10,10 +10,10 @@ from spikegadget2nwb.preproc_func import get_bad_ch_id, rm_artifacts, parse_sess
 import numpy as np
 import os
 
+rec_folder = Path(r"\\10.129.151.108\xieluanlabs\xl_cl\rf_reconstruction\head_fixed\CNL36\CNL36_250305_194558")
 
-rec_folder = r"D:\cl\ephys\CnL22_20250216_212206.rec"
-animal_id, session_id = parse_session_info(rec_folder)
-
+rec_folder = Path(rec_folder)
+animal_id, session_id, folder_name = parse_session_info(str(rec_folder))
 ishs = ['0', '1', '2', '3']
 
 # ishs = ['0']
@@ -21,7 +21,7 @@ ishs = ['0', '1', '2', '3']
 rec_folder = Path(rec_folder)
 
 for ish in ishs:
-    nwb_folder = Path(rec_folder) / f'{animal_id}_{session_id}.recsh{ish}.nwb'
+    nwb_folder = rec_folder / f"{folder_name}sh{ish}.nwb"
     out_folder = Path('sortout') / animal_id / session_id / ish
     if not out_folder.exists():
         out_folder.mkdir(parents=True)

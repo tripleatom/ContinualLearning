@@ -12,16 +12,18 @@ import spikeinterface.preprocessing as sp
 import spikeinterface.widgets as sw
 import spikeinterface.exporters as sexp
 import mountainsort5 as ms5
+from spikeinterface import extract_waveforms
 
 from Timer import Timer
 from spikegadget2nwb.preproc_func import get_bad_ch_id, rm_artifacts, parse_session_info
 
 
-def main(rec_folder, threshold=3.5):
+def main(rec_folder, threshold=5.5):
     # Define recording folder and parse session info
     rec_folder = Path(rec_folder)
     animal_id, session_id, folder_name = parse_session_info(str(rec_folder))
-    shanks = ['0', '1', '2', '3']
+    # shanks = ['0', '1', '2', '3']
+    shanks = ['0']
 
     for shank in shanks:
         # Construct paths for NWB file and output folder
@@ -34,8 +36,7 @@ def main(rec_folder, threshold=3.5):
         print("Recording:", rec)
 
         # Preprocessing: bandpass filter
-        rec_filt = sp.bandpass_filter(
-            rec, freq_min=300, freq_max=6000, dtype="int32")
+        rec_filt = sp.bandpass_filter(rec, freq_min=300, freq_max=6000, dtype=np.float32)
 
         # Get bad channels and determine remaining channels
         bad_ch_id = get_bad_ch_id(rec, rec_folder, shank)
@@ -49,10 +50,9 @@ def main(rec_folder, threshold=3.5):
         rec_rm_artifacts = rm_artifacts(rec_filt, rec_folder, shank, bad_ch_id=bad_ch_id, chunk_size=chunk_size)
 
         # Apply common reference and whitening
-        rec_cr = sp.common_reference(
-            rec_rm_artifacts, reference="global", operator="median")
-        rec_whiten = sp.whiten(rec_cr, dtype="float32")
-        rec_preprocessed = rec_whiten
+        rec_cr = sp.common_reference(rec_rm_artifacts, reference="global", operator="median")
+        # rec_whiten = sp.whiten(rec_cr, dtype="float32")
+        recording_preprocessed: si.BaseRecording = sp.whiten(rec_cr)
 
         # Define sorting parameters
         detect_time_radius_msec = 0.4
@@ -62,13 +62,14 @@ def main(rec_folder, threshold=3.5):
         timer = Timer("ms5")
         print("Starting ms5 sorting...")
         sorting_params = ms5.Scheme1SortingParameters(
+            detect_sign=0,
             detect_time_radius_msec=detect_time_radius_msec,
             detect_threshold=threshold,
             npca_per_channel=npca_per_channel,
             npca_per_subdivision=npca_per_subdivision
         )
         sorting = ms5.sorting_scheme1(
-            recording=rec_preprocessed, sorting_parameters=sorting_params)
+            recording=recording_preprocessed, sorting_parameters=sorting_params)
         timer.report()
 
         # Create sorting results folder
@@ -92,39 +93,29 @@ def main(rec_folder, threshold=3.5):
         print("Sorting analyzer:", sorting_analyzer)
 
         # Compute metrics
-        sorting_analyzer.compute("random_spikes")
-        sorting_analyzer.compute("waveforms", ms_before=1.0, ms_after=2.0)
+
         try:
-            metrics = ["templates", "quality_metrics", "noise_levels",
-                       "amplitude_scalings", "template_metrics", "spike_amplitudes"]
-            sorting_analyzer.compute(metrics)
+            sorting_analyzer.compute("random_spikes")
+            sorting_analyzer.compute("waveforms", ms_before=2.0, ms_after=2.0)
+            sorting_analyzer.compute("templates", ms_before=2.0, ms_after=2.0)
+            sorting_analyzer.compute("spike_amplitudes")
+            wave_forms_folder = sort_out_folder / 'waveforms'
+            we = extract_waveforms(
+                rec_filt,
+                sorting, 
+                folder= wave_forms_folder,
+            )
 
-            # Export to phy (if possible)
-            try:
-                phy_output_folder = sort_out_folder / "phy"
-                sexp.export_to_phy(
-                    sorting_analyzer, output_folder=str(phy_output_folder))
-            except Exception as e:
-                print(f"Shank {shank} failed to export to phy: {e}")
-
-            # Plot and save unit summaries
             for unit_id in sorting.get_unit_ids():
                 sw.plot_unit_summary(sorting_analyzer, unit_id=unit_id)
-                plt.savefig(sort_out_folder / f"unit_summary_{unit_id}.png")
+                plt.savefig(sort_out_folder / f'unit_summary_{unit_id}.png')
                 plt.close()
-
+                
         except Exception as e:
-            print(
-                "Amplitude scaling computation failed, continuing with other metrics...")
-            for metric in ["templates", "quality_metrics", "noise_levels", "template_metrics", "spike_amplitudes"]:
-                try:
-                    sorting_analyzer.compute([metric])
-                except Exception as metric_err:
-                    print(f"Failed to compute {metric}: {metric_err}")
+            print(f"Error during metrics computation: {e}")
 
 
 if __name__ == "__main__":
-    threshold = 3.5
-    rec_folder = Path(
-        r"\\10.129.151.108\xieluanlabs\xl_cl\rf_reconstruction\head_fixed\CNL36\CNL36_250305_194558")
+    threshold = 5.5
+    rec_folder = Path(r"D:\cl\rf_reconstruction\freelymoving\CnL22_20241218_130546.rec")
     main(threshold=threshold, rec_folder=rec_folder)

@@ -3,9 +3,6 @@ import numpy as np
 import spikeinterface.preprocessing as spre
 import re
 
-import re
-import os
-
 import os
 import re
 
@@ -24,7 +21,11 @@ def parse_session_info(rec_folder: str) -> tuple:
         tuple: (animal_id, session_id, folder_name)
     """
     # Get the basename (folder name) and remove any trailing path separators
+    rec_folder = str(rec_folder)
     basename = os.path.basename(rec_folder.rstrip("\\/"))
+    
+    # Check if the original basename ends with ".rec"
+    has_rec = basename.endswith(".rec")
     
     # Regex pattern:
     # - ([A-Za-z]+\d+): captures animal ID (e.g., CnL14 or CNL35)
@@ -36,6 +37,8 @@ def parse_session_info(rec_folder: str) -> tuple:
         animal_id = match.group(1)
         session_id = match.group(2)
         folder_name = f"{animal_id}_{session_id}"
+        if has_rec:
+            folder_name += ".rec"
         return animal_id, session_id, folder_name
     
     # Fallback: remove '.rec' if present, then split by underscore
@@ -45,9 +48,12 @@ def parse_session_info(rec_folder: str) -> tuple:
         animal_id = parts[0]
         session_id = '_'.join(parts[1:])
         folder_name = f"{animal_id}_{session_id}"
+        if has_rec:
+            folder_name += ".rec"
         return animal_id, session_id, folder_name
 
     raise ValueError("Recording folder name doesn't match the expected format.")
+
 
 
 def get_bad_ch_id(rec, folder, ish,  load_if_exists=True):

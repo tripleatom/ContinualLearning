@@ -1,4 +1,7 @@
 setup.py
+cl_project.egg-info/._PKG-INFO
+cl_project.egg-info/._dependency_links.txt
+cl_project.egg-info/._top_level.txt
 cl_project.egg-info/PKG-INFO
 cl_project.egg-info/SOURCES.txt
 cl_project.egg-info/dependency_links.txt
@@ -6,6 +9,16 @@ cl_project.egg-info/top_level.txt
 process_func/DIO.py
 process_func/__init__.py
 process_func/readTrodesExtractedDataFile3.py
+rf_recon/STA.py
+rf_recon/STA_fm.py
+rf_recon/STA_new.py
+rf_recon/__init__.py
+rf_recon/concat_dio_amp.py
+rf_recon/concat_dio_freq.py
+rf_recon/pixel_ave.py
+rf_recon/read_DIN_mat.py
+rf_recon/rf_func.py
 spikegadget2nwb/__init__.py
+spikegadget2nwb/preproc_func.py
+spikegadget2nwb/read_intan.py
 spikegadget2nwb/read_spikegadget.py
-spikegadget2nwb/spikegadget2nwb.py

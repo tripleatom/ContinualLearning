@@ -225,8 +225,8 @@ def append_nwb(nwb_path: Path, append_intan_path: Path, ishank: int = 0,
 if __name__ == "__main__":
     # Define folder and file paths
     rhd_folder = Path(
-        r'\\10.129.151.108\xieluanlabs\xl_cl\rf_reconstruction\head_fixed\CNL36\CNL36_250305_194558')
-    impedance_file = r"\\10.129.151.108\xieluanlabs\xl_cl\rf_reconstruction\head_fixed\CNL36\CNL36.csv"
+        r'F:\RF_MAPPING\CnL22\CnL22_250307_141449')
+    impedance_file = None
     device_type = "4shank16intan"
     n_shank = 4
 

@@ -27,3 +27,24 @@ def average_array(arr, block_size, axis=0):
     # Move the axis back to its original position
     averaged_data = np.moveaxis(averaged_data, 0, axis)
     return averaged_data
+
+
+def moving_average(x, window_size=5):
+    """Simple moving average filter."""
+    return np.convolve(x, np.ones(window_size)/window_size, mode='same')
+
+def schmitt_trigger(signal, low_threshold, high_threshold):
+    """
+    Convert 'signal' into a binary 0/1 waveform using hysteresis:
+    - Goes HIGH if signal > high_threshold.
+    - Goes LOW if signal < low_threshold.
+    """
+    is_high = False
+    output = np.zeros_like(signal, dtype=float)
+    for i in range(len(signal)):
+        if not is_high and signal[i] > high_threshold:
+            is_high = True
+        elif is_high and signal[i] < low_threshold:
+            is_high = False
+        output[i] = 1.0 if is_high else 0.0
+    return output
