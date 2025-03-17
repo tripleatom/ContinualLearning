@@ -15,15 +15,15 @@ import mountainsort5 as ms5
 from spikeinterface import extract_waveforms
 
 from Timer import Timer
-from spikegadget2nwb.preproc_func import get_bad_ch_id, rm_artifacts, parse_session_info
+from rec2nwb.preproc_func import get_bad_ch_id, rm_artifacts, parse_session_info
 
 
 def main(rec_folder, threshold=5.5):
     # Define recording folder and parse session info
     rec_folder = Path(rec_folder)
     animal_id, session_id, folder_name = parse_session_info(str(rec_folder))
-    # shanks = ['0', '1', '2', '3']
-    shanks = ['0']
+    shanks = ['0', '1', '2', '3']
+    # shanks = ['0']
 
     for shank in shanks:
         # Construct paths for NWB file and output folder
@@ -117,5 +117,5 @@ def main(rec_folder, threshold=5.5):
 
 if __name__ == "__main__":
     threshold = 5.5
-    rec_folder = Path(r"D:\cl\rf_reconstruction\freelymoving\CnL22_20241218_130546.rec")
+    rec_folder = Path(r"D:\cl\ephys\CnL22_20250315_183154.rec")
     main(threshold=threshold, rec_folder=rec_folder)

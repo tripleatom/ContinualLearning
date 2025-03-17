@@ -7,7 +7,7 @@ import os
 import h5py
 from rf_func import find_stim_index, moving_average, schmitt_trigger
 from spikeinterface.extractors import PhySortingExtractor
-from spikegadget2nwb.preproc_func import parse_session_info
+from rec2nwb.preproc_func import parse_session_info
 
 # base_folder = r"\\10.129.151.108\xieluanlabs\xl_cl\rf_reconstruction\head_fixed\CnL22\250307"
 experiment_folder = r"/Volumes/xieluanlabs/xl_cl/rf_reconstruction/head_fixed/CnL22/250307"  # for mac

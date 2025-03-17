@@ -6,7 +6,7 @@ from pathlib import Path
 import time
 import matplotlib.pyplot as plt
 from Timer import Timer
-from spikegadget2nwb.preproc_func import get_bad_ch_id, rm_artifacts, parse_session_info
+from rec2nwb.preproc_func import get_bad_ch_id, rm_artifacts, parse_session_info
 import numpy as np
 import os
 

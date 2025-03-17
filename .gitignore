@@ -1,5 +1,6 @@
 *.png
 __pycache__
 build
-cl_project.egg-infor
+cl_project.egg-info
 sortout
+._*
