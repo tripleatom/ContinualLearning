@@ -47,6 +47,7 @@ def main(rec_folder, threshold=5.5):
 
         # Remove artifacts using a chunk-based approach
         chunk_size = 900
+        # FIXME: the artifact problem is severe, don't directly set to 0, try to interpolate...
         rec_rm_artifacts = rm_artifacts(rec_filt, rec_folder, shank, bad_ch_id=bad_ch_id, chunk_size=chunk_size)
 
         # Apply common reference and whitening
@@ -117,5 +118,5 @@ def main(rec_folder, threshold=5.5):
 
 if __name__ == "__main__":
     threshold = 5.5
-    rec_folder = Path(r"D:\cl\ephys\CnL22_20250315_183154.rec")
+    rec_folder = Path(r"C:\STA_temp\250314\CnL36_250314_153505")
     main(threshold=threshold, rec_folder=rec_folder)

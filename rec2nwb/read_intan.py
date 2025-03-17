@@ -159,7 +159,7 @@ def initiate_nwb(intan_file: Path, nwb_path: Path, ishank: int = 0,
         nwbfile.add_acquisition(electrical_series)
 
     if '4' in stream_ids:
-        #todo: digital output is problematic, need to check
+        #TODO: digital output is problematic, need to check
         print("Found digital input channels...")
         # Note: The stream id used for digital input differs between initiate and append.
         recording = se.read_intan(intan_file, stream_id='4')

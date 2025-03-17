@@ -126,7 +126,7 @@ def initiate_nwb(rec_file, nwb_path, metadata=None, ishank=0):
 
     nwbfile.add_acquisition(electrical_series)
 
-    # todo: add digital input
+    # TODO: add digital input
 
     # if '5' in stream_ids:
     #     recording = se.read_intan(intan_file, stream_id='5')

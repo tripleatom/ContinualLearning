@@ -10,7 +10,7 @@ from spikeinterface.extractors import PhySortingExtractor
 from rec2nwb.preproc_func import parse_session_info
 
 # base_folder = r"\\10.129.151.108\xieluanlabs\xl_cl\rf_reconstruction\head_fixed\CnL22\250307"
-experiment_folder = r"/Volumes/xieluanlabs/xl_cl/rf_reconstruction/head_fixed/CnL22/250307"  # for mac
+experiment_folder = r"/Volumes/xieluanlabs/xl_cl/rf_reconstruction/head_fixed/250305/CnL35"  # for mac
 experiment_folder = Path(experiment_folder)
 rec_folder = next((p for p in experiment_folder.iterdir() if p.is_dir()), None)
 print(rec_folder)
@@ -69,7 +69,7 @@ n_dots = n_col * n_row
 dot_time = t_trial
 trial_dur = n_col * n_row * n_trial * t_trial
 
-# todo: write dots_order in Stimdata
+# TODO: write dots_order in Stimdata
 current_dir = Path(__file__).parent
 dots_order = scipy.io.loadmat(current_dir / rf'order_{n_col}_{n_row}.mat')
 dots_order = dots_order['order'][0] - 1  # matlab index starts from 1
