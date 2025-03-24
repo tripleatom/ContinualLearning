@@ -11,6 +11,22 @@ from rec2nwb.preproc_func import parse_session_info
 from matplotlib.colors import Normalize, LinearSegmentedColormap
 import matplotlib.colors as mcolors
 
+def dereference(item, f):
+    """Recursively dereference an h5py item."""
+    if isinstance(item, h5py.Reference):
+        # Get the referenced data
+        data = f[item][()]
+        # If data is a single-element array, extract its value
+        if isinstance(data, np.ndarray) and data.size == 1:
+            return data.item()
+        return data
+    elif isinstance(item, np.ndarray):
+        # Recursively dereference elements if item is an array
+        return np.array([dereference(elem, f) for elem in item])
+    else:
+        return item
+    
+# animal_ids = ['CnL34', 'CnL35', 'CnL36']
 
 # base_folder = r"\\10.129.151.108\xieluanlabs\xl_cl\rf_reconstruction\head_fixed\CnL22\250307"
 experiment_folder = r"/Volumes/xieluanlabs/xl_cl/rf_reconstruction/head_fixed/250314/CnL22"  # for mac
@@ -45,23 +61,6 @@ animal_id, session_id, folder_name = parse_session_info(rec_folder)
 ishs = ['0', '1', '2', '3']
 # ishs = ['0']
 
-
-def dereference(item, f):
-    """Recursively dereference an h5py item."""
-    if isinstance(item, h5py.Reference):
-        # Get the referenced data
-        data = f[item][()]
-        # If data is a single-element array, extract its value
-        if isinstance(data, np.ndarray) and data.size == 1:
-            return data.item()
-        return data
-    elif isinstance(item, np.ndarray):
-        # Recursively dereference elements if item is an array
-        return np.array([dereference(elem, f) for elem in item])
-    else:
-        return item
-
-
 with h5py.File(Stimdata_file, 'r') as f:
     patternParams_group = f['Stimdata']['patternParams']
 
@@ -88,6 +87,8 @@ print("Spatial Frequency:", stim_spatialFreq)
 
 # Calculate the number of static gratings stimuli
 n_static_grating = np.shape(stim_orientation)[0]
+print(f"Number of static grating stimuli: {n_static_grating}")
+print(f"Number of rising edges: {len(rising_edges)}")
 static_grating_rising_edges = rising_edges[-n_static_grating:]
 
 
@@ -125,6 +126,8 @@ for ish in ishs:
         if not out_fig_folder.exists():
             out_fig_folder.mkdir(parents=True)
 
+            
+        #TODO: use curated data
         sorting_anaylzer = load_sorting_analyzer(
             Path(sorting_results_folder) / 'sorting_analyzer')
 
@@ -135,7 +138,6 @@ for ish in ishs:
         fs = sorting.sampling_frequency
         n_unit = len(unit_ids)
 
-        # TODO: calculate the tuning of each putative neuron
         for i, unit_id in enumerate(unit_ids):
             spike_train = sorting.get_unit_spike_train(unit_id)
 
@@ -186,6 +188,99 @@ for ish in ishs:
 
                         # Now assign these responses to our 4D array
                         response_array[i, j, k, :] = responses[idxs]
+
+            #TODO: calculate the metrics
+            #1. OSI
+            # 1) Average only over trials (axis=3)
+            mean_over_repeats = np.mean(response_array, axis=3)
+            # Now mean_over_repeats.shape = (n_orientation, n_phase, n_spatialFreq)
+
+            # 2) Find the (orientation, phase, spatialFreq) that gives the maximum mean response
+            #    We use unravel_index because mean_over_repeats is now 3D.
+            i_ori, i_phase, i_sf = np.unravel_index(
+                np.argmax(mean_over_repeats), 
+                mean_over_repeats.shape
+            )
+
+            # Preferred response
+            R_pref = mean_over_repeats[i_ori, i_phase, i_sf]
+
+            # 3) Identify the orthogonal orientation index
+            #    Assuming your orientations are evenly spaced and you want a 90° shift:
+            i_orth = (i_ori + (n_orientation // 2)) % n_orientation
+
+            # Response at orthogonal orientation (same phase & SF)
+            R_orth = mean_over_repeats[i_orth, i_phase, i_sf]
+
+            # 4) Compute OSI
+            OSI = (R_pref - R_orth) / (R_pref + R_orth)
+
+            # If you want the actual orientation in degrees:
+            pref_ori_deg = unique_orientation[i_ori]
+
+
+
+            #2. gOSI, global OSI
+            # --- 1) Find the "preferred" spatial frequency across orientation & phase ---
+            #     (You can change this logic if your experiment defines "preferred SF" differently.)
+            sf_means = np.mean(response_array, axis=(0,1,3))  # shape = (n_spatialFreq,)
+            i_best_sf = np.argmax(sf_means)
+            best_sf_value = unique_spatialFreq[i_best_sf]
+
+            # --- 2) For each orientation θ, compute Rθ = mean response at best SF (averaging repeats, phases) ---
+            #     (If you prefer to pick the best phase for each orientation, adjust accordingly.)
+            R_theta = np.mean(response_array[:, :, i_best_sf, :], axis=(1,2))  # shape = (n_orientation,)
+
+            # --- 3) Convert orientation from degrees to radians.  Typically, gOSI uses 2θ for orientation periodicity of 180°.
+            theta_radians = np.deg2rad(unique_orientation)  # shape = (n_orientation,)
+
+            # --- 4) Compute the complex vector sum for 2θ and take magnitude ---
+            #     numerator = Σ ( Rθ * e^{i2θ} )
+            #     denominator = Σ Rθ
+            numerator = np.sum(R_theta * np.exp(1j * 2 * theta_radians))
+            denominator = np.sum(R_theta)
+            gOSI = np.abs(numerator / denominator)
+
+            print(f"Best SF = {best_sf_value:.2f} cpd")
+            print(f"gOSI = {gOSI:.3f}")
+
+            #3. SFDI, spatial frequency discrimination index
+            # 1) Find the "preferred orientation" by averaging over phase, SF, repeats
+            mean_by_ori = np.mean(response_array, axis=(1,2,3))  # shape: (n_ori,)
+            i_ori_pref = np.argmax(mean_by_ori)
+
+            # 2) At that orientation, compute mean response for each SF (averaging over phase & repeats)
+            mean_ori_sf = np.mean(response_array[i_ori_pref, :, :, :], axis=(0,2))  # shape: (n_sf,)
+
+            # Identify the preferred SF index and Rmax, also find Rmin
+            i_sf_pref = np.argmax(mean_ori_sf)
+            R_max = mean_ori_sf[i_sf_pref]         # max across SF at that orientation
+            R_min = np.min(mean_ori_sf)            # min across SF at that orientation
+
+            # 3) Compute SSE: sum of squared errors at the preferred orientation across *all* SF
+            #    i.e., for each SF, compare each trial to that SF's mean
+            SSE = 0.0
+            for sf_idx in range(len(unique_spatialFreq)):
+                sf_mean = mean_ori_sf[sf_idx]  # average response for this SF
+                # all trials for this orientation & SF (flatten across phase & repeats)
+                all_trials_sf = response_array[i_ori_pref, :, sf_idx, :].flatten()
+                SSE += np.sum((all_trials_sf - sf_mean)**2)
+
+            # 4) Define N and M
+            N = response_array.shape[1] * response_array.shape[3] * response_array.shape[2]  
+            #         = n_phase * n_repeats * n_sf  (all trials at this orientation)
+            M = len(unique_spatialFreq)           # number of SF tested
+
+            # 5) Compute SFDI
+            SFDI = (R_max - R_min) / (R_max + R_min + SSE / (N - M))
+
+            print(f"Preferred orientation index = {i_ori_pref}")
+            print(f"Preferred SF index = {i_sf_pref}")
+            print(f"R_max = {R_max:.2f},  R_min = {R_min:.2f}")
+            print(f"SFDI = {SFDI:.3f}")
+
+            #4. response reliability
+
 
             overall_std = np.std(response_array)
 
@@ -284,6 +379,18 @@ for ish in ishs:
 
             ax.set_title(f"Unit {unit_id}")
             plt.tight_layout()
+            text_str = (
+                f"Preferred orientation: {pref_ori_deg:.1f}°\n"
+                f"SFDI = {SFDI:.2f}\n"
+                f"OSI = {OSI:.2f},  gOSI = {gOSI:.2f},  best SF = {best_sf_value:.2f} cpd"
+
+            )
+            fig.text(
+                0.5,    # x-position (fraction of figure width)
+                0.01,   # y-position (fraction of figure height)
+                text_str,
+                ha='center', va='bottom', fontsize=10
+            )
             out_file = out_fig_folder / f'unit_{unit_id}_fan_plot.png'
             plt.savefig(out_file, bbox_inches='tight')
             plt.close(fig)

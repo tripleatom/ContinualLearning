@@ -10,7 +10,7 @@ from spikeinterface.extractors import PhySortingExtractor
 from rec2nwb.preproc_func import parse_session_info
 
 # base_folder = r"\\10.129.151.108\xieluanlabs\xl_cl\rf_reconstruction\head_fixed\CnL22\250307"
-experiment_folder = r"/Volumes/xieluanlabs/xl_cl/rf_reconstruction/head_fixed/250305/CnL35"  # for mac
+experiment_folder = r"/Volumes/xieluanlabs/xl_cl/rf_reconstruction/head_fixed/250314/CnL34"  # for mac
 experiment_folder = Path(experiment_folder)
 rec_folder = next((p for p in experiment_folder.iterdir() if p.is_dir()), None)
 print(rec_folder)
@@ -29,9 +29,9 @@ with h5py.File(DIN_file, 'r') as f:
     # print("Top-level keys:", list(f.keys()))
 
     # Access the dataset or group named "recFile"
-    DIN = f["recFile"]
+    # DIN = f["recFile"]
     # Load the entire dataset into a NumPy array
-    DIN_data = DIN[:]
+    # DIN_data = DIN[:]
     # print("DIN_data shape:", DIN_data.shape)
 
     # Access the frequency parameters struct
@@ -50,20 +50,41 @@ ishs = ['0', '1', '2', '3']
 # ishs = ['0']
 
 # get stim data from mat file
-mat_data = scipy.io.loadmat(
-    Stimdata_file, struct_as_record=False, squeeze_me=True)
-stimdata = mat_data['Stimdata']
-black_on = stimdata.black_on
-black_off = stimdata.black_off
-white_on = stimdata.white_on
-white_off = stimdata.white_off
+# mat_data = scipy.io.loadmat(
+#     Stimdata_file, struct_as_record=False, squeeze_me=True)
+# stimdata = mat_data['Stimdata']
+# black_on = stimdata.black_on
+# black_off = stimdata.black_off
+# white_on = stimdata.white_on
+# white_off = stimdata.white_off
 
-n_col = stimdata.n_col
-n_row = stimdata.n_row
-n_trial = stimdata.n_trial  # trials for each color
-t_trial = stimdata.t_trial  # time for each trial, s
+# n_col = stimdata.n_col
+# n_row = stimdata.n_row
+# n_trial = stimdata.n_trial  # trials for each color
+# t_trial = stimdata.t_trial  # time for each trial, s
 
+with h5py.File(Stimdata_file, 'r') as f:
+    # Access the dataset for 'Stimdata'
+    stimdata = f["Stimdata"]
+    orientations = stimdata['orientations'][:]
+    spatialFreqs = stimdata['spatialFreqs'][:]
+    phases = stimdata['phases'][:]
+    # Extract the relevant fields from the nested array structure
+    black_on = stimdata['black_on'][0]
+    black_off = stimdata['black_off'][0]
+    white_on = stimdata['white_on'][0]
+    white_off = stimdata['white_off'][0]
+    n_col = stimdata['n_col'][0][0].astype(int)
+    n_row = stimdata['n_row'][0][0].astype(int)
+    n_trial_grating = 50
+    t_trial = stimdata['t_trial'][0][0]
+
+# n_rising_edges = len(rising_edges) - n_trial_grating * len(orientations) * len(spatialFreqs) * len(phases)
+n_rising_edges = 8960
+n_trial = (n_rising_edges//(n_col * n_row)//2).astype(int)
 print('repeats: ', n_trial)
+
+rising_edges = rising_edges[:int(n_rising_edges)]
 
 n_dots = n_col * n_row
 dot_time = t_trial

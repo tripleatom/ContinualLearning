@@ -226,7 +226,7 @@ def append_nwb(nwb_path: Path, append_intan_path: Path, ishank: int = 0,
 if __name__ == "__main__":
     # Define folder and file paths
     rhd_folder = Path(
-        r'C:\STA_temp\250314\CnL34_250315_180827')
+        r'C:\STA_temp\250320\CnL36_250320_180220')
     impedance_file = None
     device_type = "4shank16intan"
     n_shank = 4
@@ -248,7 +248,7 @@ if __name__ == "__main__":
                                "session_desc": session_description,
                                "n_channels_per_shank": 32,
                                "electrode_location": "V1", 
-                               "exp_desc": "rf + grating",}
+                               "exp_desc": "grating",}
                      )
 
         if len(rhd_files) == 1:

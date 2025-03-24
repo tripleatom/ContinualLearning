@@ -118,5 +118,5 @@ def main(rec_folder, threshold=5.5):
 
 if __name__ == "__main__":
     threshold = 5.5
-    rec_folder = Path(r"C:\STA_temp\250314\CnL36_250314_153505")
+    rec_folder = Path(r"C:\STA_temp\250320\CnL34_250320_155709")
     main(threshold=threshold, rec_folder=rec_folder)
