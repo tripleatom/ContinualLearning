@@ -22,7 +22,7 @@ def main(rec_folder, threshold=5.5):
     # Define recording folder and parse session info
     rec_folder = Path(rec_folder)
     animal_id, session_id, folder_name = parse_session_info(str(rec_folder))
-    shanks = ['0', '1', '2', '3']
+    shanks = ['1']
     # shanks = ['0']
 
     for shank in shanks:
@@ -36,7 +36,8 @@ def main(rec_folder, threshold=5.5):
         print("Recording:", rec)
 
         # Preprocessing: bandpass filter
-        rec_filt = sp.bandpass_filter(rec, freq_min=300, freq_max=6000, dtype=np.float32)
+        rec_filt = sp.bandpass_filter(
+            rec, freq_min=300, freq_max=6000, dtype=np.float32)
 
         # Get bad channels and determine remaining channels
         bad_ch_id = get_bad_ch_id(rec, rec_folder, shank)
@@ -46,12 +47,17 @@ def main(rec_folder, threshold=5.5):
         print("Remaining channel IDs:", remaining_ch)
 
         # Remove artifacts using a chunk-based approach
-        chunk_size = 900
+        chunk_time = 0.02
+        artifacts_thres = 6.0
         # FIXME: the artifact problem is severe, don't directly set to 0, try to interpolate...
-        rec_rm_artifacts = rm_artifacts(rec_filt, rec_folder, shank, bad_ch_id=bad_ch_id, chunk_size=chunk_size)
+        rec_rm_artifacts = rm_artifacts(
+            rec_filt, rec_folder, shank, bad_ch_id=bad_ch_id, 
+            chunk_time=chunk_time, threshold=artifacts_thres,
+            overwrite=True)
 
         # Apply common reference and whitening
-        rec_cr = sp.common_reference(rec_rm_artifacts, reference="global", operator="median")
+        rec_cr = sp.common_reference(
+            rec_rm_artifacts, reference="global", operator="median")
         # rec_whiten = sp.whiten(rec_cr, dtype="float32")
         recording_preprocessed: si.BaseRecording = sp.whiten(rec_cr)
 
@@ -103,20 +109,22 @@ def main(rec_folder, threshold=5.5):
             wave_forms_folder = sort_out_folder / 'waveforms'
             we = extract_waveforms(
                 rec_filt,
-                sorting, 
-                folder= wave_forms_folder,
+                sorting,
+                folder=wave_forms_folder,
             )
+            out_fig_folder = sort_out_folder / 'raw_units'
+            out_fig_folder.mkdir(parents=True, exist_ok=True)
 
             for unit_id in sorting.get_unit_ids():
                 sw.plot_unit_summary(sorting_analyzer, unit_id=unit_id)
-                plt.savefig(sort_out_folder / f'unit_summary_{unit_id}.png')
+                plt.savefig(out_fig_folder / f'unit_summary_{unit_id}.png')
                 plt.close()
-                
+
         except Exception as e:
             print(f"Error during metrics computation: {e}")
 
 
 if __name__ == "__main__":
     threshold = 5.5
-    rec_folder = Path(r"C:\STA_temp\250320\CnL34_250320_155709")
+    rec_folder = Path(r"\\10.129.151.108\xieluanlabs\xl_cl\rf_reconstruction\head_fixed\250320\CnL36\CnL36_250320_180220")
     main(threshold=threshold, rec_folder=rec_folder)

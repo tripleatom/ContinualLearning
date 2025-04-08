@@ -60,7 +60,9 @@ def get_ch_index_on_shank(ish: int, device_type: str) -> tuple:
     Return the channel indices on a given shank.
     Returns: (channel indices, x-coordinates, y-coordinates)
     """
-    mapping_file = f"mapping/{device_type}.csv"
+    script_dir = Path(__file__).resolve().parent
+    mapping_file = script_dir / "mapping" / f"{device_type}.csv"
+
     channel_map = pd.read_csv(mapping_file)
     xcoord = channel_map['xcoord'].astype(float).to_numpy()
     ycoord = channel_map['ycoord'].astype(float).to_numpy()
@@ -142,8 +144,7 @@ def initiate_nwb(intan_file: Path, nwb_path: Path, ishank: int = 0,
     stream_ids = get_stream_ids(intan_file)
     if '0' in stream_ids:
         print("Found amplifier channels...")
-        recording = se.read_intan(intan_file, stream_id='0')
-        channel_ids = [f"A-{i:03d}" for i in channel_index]
+        channel_ids = [f"D-{i:03d}" for i in channel_index]
         recording = se.read_intan(intan_file, stream_id='0')
         trace = recording.get_traces(channel_ids=channel_ids)
         electrical_series = ElectricalSeries(
@@ -158,20 +159,20 @@ def initiate_nwb(intan_file: Path, nwb_path: Path, ishank: int = 0,
         )
         nwbfile.add_acquisition(electrical_series)
 
-    if '4' in stream_ids:
-        #TODO: digital output is problematic, need to check
-        print("Found digital input channels...")
-        # Note: The stream id used for digital input differs between initiate and append.
-        recording = se.read_intan(intan_file, stream_id='4')
-        trace = recording.get_traces()
-        digin_series = TimeSeries(
-            name="DigInSeries",
-            data=H5DataIO(data=trace, maxshape=(None, trace.shape[1])),
-            starting_time=0.0,
-            rate=recording.get_sampling_frequency(),
-            unit="bit"
-        )
-        nwbfile.add_acquisition(digin_series)
+    # if '4' in stream_ids:
+    #     #TODO: digital output is problematic, need to check, reading intan DIN with matlab now.
+    #     print("Found digital input channels...")
+    #     # Note: The stream id used for digital input differs between initiate and append.
+    #     recording = se.read_intan(intan_file, stream_id='4')
+    #     trace = recording.get_traces()
+    #     digin_series = TimeSeries(
+    #         name="DigInSeries",
+    #         data=H5DataIO(data=trace, maxshape=(None, trace.shape[1])),
+    #         starting_time=0.0,
+    #         rate=recording.get_sampling_frequency(),
+    #         unit="bit"
+    #     )
+    #     nwbfile.add_acquisition(digin_series)
 
     print("Writing NWB file...")
     with NWBHDF5IO(nwb_path, "w") as io:
@@ -207,18 +208,18 @@ def append_nwb(nwb_path: Path, append_intan_path: Path, ishank: int = 0,
 
         device_type = metadata.get("device_type", "4shank16intan")
         channel_index, _, _ = get_ch_index_on_shank(ishank, device_type)
-        channel_ids = [f"A-{i:03d}" for i in channel_index]
+        channel_ids = [f"D-{i:03d}" for i in channel_index]
 
         rec_ephys = se.read_intan(append_intan_path, stream_id='0') \
                       .get_traces(channel_ids=channel_ids)
         _append_nwb_dset(
             nwb_obj.acquisition['ElectricalSeries'].data, rec_ephys, 0)
 
-        if '4' in stream_ids:
-            rec_digin = se.read_intan(append_intan_path, stream_id='4') \
-                          .get_traces()
-            _append_nwb_dset(
-                nwb_obj.acquisition['DigInSeries'].data, rec_digin, 0)
+        # if '4' in stream_ids:
+        #     rec_digin = se.read_intan(append_intan_path, stream_id='4') \
+        #                   .get_traces()
+        #     _append_nwb_dset(
+        #         nwb_obj.acquisition['DigInSeries'].data, rec_digin, 0)
 
         io.write(nwb_obj)
 
@@ -226,7 +227,7 @@ def append_nwb(nwb_path: Path, append_intan_path: Path, ishank: int = 0,
 if __name__ == "__main__":
     # Define folder and file paths
     rhd_folder = Path(
-        r'C:\STA_temp\250320\CnL36_250320_180220')
+        r'C:\STA_temp\250406\CnL22\CnL22_250406_002515')
     impedance_file = None
     device_type = "4shank16intan"
     n_shank = 4

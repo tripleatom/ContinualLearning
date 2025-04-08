@@ -10,7 +10,7 @@ from spikeinterface.extractors import PhySortingExtractor
 from rec2nwb.preproc_func import parse_session_info
 
 # base_folder = r"\\10.129.151.108\xieluanlabs\xl_cl\rf_reconstruction\head_fixed\CnL22\250307"
-experiment_folder = r"/Volumes/xieluanlabs/xl_cl/rf_reconstruction/head_fixed/250314/CnL34"  # for mac
+experiment_folder = r"/Volumes/xieluanlabs/xl_cl/rf_reconstruction/head_fixed/250405/CnL30"  # for mac
 experiment_folder = Path(experiment_folder)
 rec_folder = next((p for p in experiment_folder.iterdir() if p.is_dir()), None)
 print(rec_folder)
@@ -23,26 +23,10 @@ peaks_file = rec_folder / "peaks.mat"
 peaks_data = scipy.io.loadmat(peaks_file, struct_as_record=False, squeeze_me=True)
 rising_edges = peaks_data['locs']
 
-# Open the HDF5-based MAT file and load data
+# read digInFreq
 with h5py.File(DIN_file, 'r') as f:
-    # Show the top-level keys in the file
-    # print("Top-level keys:", list(f.keys()))
-
-    # Access the dataset or group named "recFile"
-    # DIN = f["recFile"]
-    # Load the entire dataset into a NumPy array
-    # DIN_data = DIN[:]
-    # print("DIN_data shape:", DIN_data.shape)
-
-    # Access the frequency parameters struct
-    freq_params = f["frequency_parameters"]
-    # Load the dataset for 'board_dig_in_sample_rate'
-    data = freq_params['board_dig_in_sample_rate'][:]
-    # If the data is stored as bytes, decode it (if necessary)
-    if isinstance(data, bytes):
-        data = data.decode('utf-8')
-    # Extract the digital input frequency from the nested array structure
-    digInFreq = data[0][0]
+    data = f["frequency_parameters"]['board_dig_in_sample_rate'][:]
+digInFreq = (data.decode('utf-8') if isinstance(data, bytes) else data)[0][0]
 
 
 animal_id, session_id, folder_name = parse_session_info(rec_folder)
@@ -76,11 +60,11 @@ with h5py.File(Stimdata_file, 'r') as f:
     white_off = stimdata['white_off'][0]
     n_col = stimdata['n_col'][0][0].astype(int)
     n_row = stimdata['n_row'][0][0].astype(int)
-    n_trial_grating = 50
     t_trial = stimdata['t_trial'][0][0]
+    n_trial = stimdata['n_trial'][0][0]
 
-# n_rising_edges = len(rising_edges) - n_trial_grating * len(orientations) * len(spatialFreqs) * len(phases)
-n_rising_edges = 8960
+n_rising_edges = len(rising_edges)
+# n_rising_edges = 8960
 n_trial = (n_rising_edges//(n_col * n_row)//2).astype(int)
 print('repeats: ', n_trial)
 
@@ -134,11 +118,12 @@ for ish in ishs:
         if not out_fig_folder.exists():
             out_fig_folder.mkdir(parents=True)
 
-        sorting_anaylzer = load_sorting_analyzer(
-            Path(sorting_results_folder) / 'sorting_analyzer')
+        # sorting_anaylzer = load_sorting_analyzer(
+        #     Path(sorting_results_folder) / 'sorting_analyzer')
 
-        # sorting = PhySortingExtractor(phy_folder)
-        sorting = sorting_anaylzer.sorting
+        sorting = PhySortingExtractor(phy_folder)
+        qualities = sorting.get_property('quality')
+        # sorting = sorting_anaylzer.sorting
 
         unit_ids = sorting.unit_ids
         fs = sorting.sampling_frequency
@@ -150,6 +135,7 @@ for ish in ishs:
         STA_white = np.zeros((n_unit, n_row, n_col))
 
         for i, unit_id in enumerate(unit_ids):
+            quality = qualities[i]
             # calculate STA for each unit
             spikes = sorting.get_unit_spike_train(unit_id)
             white_dot_spikes = spikes[(spikes > white_start) & (spikes < white_end)]
@@ -226,46 +212,72 @@ for ish in ishs:
             firing_white_all[i_unit, :, :] = white_firing_ave
 
         # %% plot
+        # Calculate angular extents (in degrees)
+        display_width_mm = 707
+        display_height_mm = 393
+        distance_mm = 570
+
+        x_min_deg = np.degrees(np.arctan((-display_width_mm/2) / distance_mm))
+        x_max_deg = np.degrees(np.arctan((display_width_mm/2) / distance_mm))
+        y_min_deg = np.degrees(np.arctan((-display_height_mm/2) / distance_mm))
+        y_max_deg = np.degrees(np.arctan((display_height_mm/2) / distance_mm))
+
         for i, unit_id in enumerate(unit_ids):
-
-            # Create a 2x3 grid of subplots
-            fig, axes = plt.subplots(2, 3, figsize=(
-                12, 8), constrained_layout=True)
-
-            # First row (Firing data)
-            im1 = axes[0, 0].imshow(firing_all[i], cmap='bwr')
+            fig, axes = plt.subplots(2, 3, figsize=(12, 8), constrained_layout=True)
+            
+            # Plot Firing data using visual angle extents
+            im1 = axes[0, 0].imshow(firing_all[i], cmap='bwr', 
+                                    extent=[x_min_deg, x_max_deg, y_min_deg, y_max_deg],
+                                    origin='lower')
             axes[0, 0].set_title('Firing white - Firing black')
-            fig.colorbar(
-                im1, ax=axes[0, 0], orientation='vertical', fraction=0.046, pad=0.04)
-
-            im2 = axes[0, 1].imshow(-firing_black_all[i], cmap='bwr')
+            axes[0, 0].set_xlabel('Horizontal angle (deg)')
+            axes[0, 0].set_ylabel('Vertical angle (deg)')
+            fig.colorbar(im1, ax=axes[0, 0], orientation='vertical', fraction=0.046, pad=0.04)
+            
+            im2 = axes[0, 1].imshow(-firing_black_all[i], cmap='bwr', 
+                                    extent=[x_min_deg, x_max_deg, y_min_deg, y_max_deg],
+                                    origin='lower')
             axes[0, 1].set_title('- Firing Black')
-            fig.colorbar(
-                im2, ax=axes[0, 1], orientation='vertical', fraction=0.046, pad=0.04)
-
-            im3 = axes[0, 2].imshow(firing_white_all[i], cmap='bwr')
+            axes[0, 1].set_xlabel('Horizontal angle (deg)')
+            axes[0, 1].set_ylabel('Vertical angle (deg)')
+            fig.colorbar(im2, ax=axes[0, 1], orientation='vertical', fraction=0.046, pad=0.04)
+            
+            im3 = axes[0, 2].imshow(firing_white_all[i], cmap='bwr', 
+                                    extent=[x_min_deg, x_max_deg, y_min_deg, y_max_deg],
+                                    origin='lower')
             axes[0, 2].set_title('Firing White')
-            fig.colorbar(im3, ax=axes[0, 2], orientation='vertical', fraction=0.046,
-                         pad=0.04, label='averaged firing rate for each pixel')
-
-            # Second row (STA data)
-            im4 = axes[1, 0].imshow(STA[i], cmap='bwr')
+            axes[0, 2].set_xlabel('Horizontal angle (deg)')
+            axes[0, 2].set_ylabel('Vertical angle (deg)')
+            fig.colorbar(im3, ax=axes[0, 2], orientation='vertical', fraction=0.046, pad=0.04,
+                        label='averaged firing rate for each pixel')
+            
+            # Plot STA data with angular extents
+            im4 = axes[1, 0].imshow(STA[i], cmap='bwr', 
+                                    extent=[x_min_deg, x_max_deg, y_min_deg, y_max_deg],
+                                    origin='lower')
             axes[1, 0].set_title('STA')
-            fig.colorbar(
-                im4, ax=axes[1, 0], orientation='vertical', fraction=0.046, pad=0.04)
-
-            im5 = axes[1, 1].imshow(STA_black[i], cmap='bwr')
+            axes[1, 0].set_xlabel('Horizontal angle (deg)')
+            axes[1, 0].set_ylabel('Vertical angle (deg)')
+            fig.colorbar(im4, ax=axes[1, 0], orientation='vertical', fraction=0.046, pad=0.04)
+            
+            im5 = axes[1, 1].imshow(STA_black[i], cmap='bwr', 
+                                    extent=[x_min_deg, x_max_deg, y_min_deg, y_max_deg],
+                                    origin='lower')
             axes[1, 1].set_title('STA Black')
-            fig.colorbar(
-                im5, ax=axes[1, 1], orientation='vertical', fraction=0.046, pad=0.04)
-
-            im6 = axes[1, 2].imshow(STA_white[i], cmap='bwr')
+            axes[1, 1].set_xlabel('Horizontal angle (deg)')
+            axes[1, 1].set_ylabel('Vertical angle (deg)')
+            fig.colorbar(im5, ax=axes[1, 1], orientation='vertical', fraction=0.046, pad=0.04)
+            
+            im6 = axes[1, 2].imshow(STA_white[i], cmap='bwr', 
+                                    extent=[x_min_deg, x_max_deg, y_min_deg, y_max_deg],
+                                    origin='lower')
             axes[1, 2].set_title('STA White')
-            fig.colorbar(im6, ax=axes[1, 2], orientation='vertical',
-                         fraction=0.046, pad=0.04, label='averaged stimuli gray scale')
-
-            # Set the overall title
-            fig.suptitle(f'Unit {unit_id}', fontsize=16)
-            plt.savefig(out_fig_folder /
-                        f'unit_{unit_id}_prior_time_{prior_time}_fr_{average_length}.png')
+            axes[1, 2].set_xlabel('Horizontal angle (deg)')
+            axes[1, 2].set_ylabel('Vertical angle (deg)')
+            fig.colorbar(im6, ax=axes[1, 2], orientation='vertical', fraction=0.046, pad=0.04,
+                        label='averaged stimuli gray scale')
+            
+            # Set overall figure title and save the plot
+            fig.suptitle(f'Unit {unit_id}: {quality}', fontsize=16)
+            plt.savefig(out_fig_folder / f'unit_{unit_id}_prior_time_{prior_time}_fr_{average_length}.png')
             plt.close()

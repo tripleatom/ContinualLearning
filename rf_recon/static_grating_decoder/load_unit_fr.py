@@ -27,7 +27,7 @@ def process_static_grating_responses(experiment_folder, overwrite=True):
       - Loads stimulus and timing information from MAT/HDF5 files,
       - Computes per-unit responses (organizes responses in a 5D array of shape 
         (n_units, n_orientation, n_phase, n_spatialFreq, n_repeats)),
-      - Saves the responses along with stimulus parameters and additional metadata 
+      - Saves the responses along with stimulus parameters, unit information, and additional metadata 
         into an NPZ file in the corresponding session folder.
     
     Parameters:
@@ -106,6 +106,7 @@ def process_static_grating_responses(experiment_folder, overwrite=True):
     
     all_units_responses = []
     unit_info = []
+    all_unit_qualities = []  # List to store unit qualities from all shanks
     
     # Construct session folder for sorting results (hard-coded base path)
     session_folder = Path(rf"/Volumes/xieluanlabs/xl_cl/code/sortout/{animal_id}/{session_id}")
@@ -134,7 +135,10 @@ def process_static_grating_responses(experiment_folder, overwrite=True):
             # Load sorting analyzer (optionally use curated data)
             sorting_anaylzer = load_sorting_analyzer(Path(sorting_results_folder) / 'sorting_analyzer')
             sorting = sorting_anaylzer.sorting
+            sorting = PhySortingExtractor(phy_folder)
             unit_ids = sorting.unit_ids
+            # Get the quality for all units in this sorting result
+            unit_qualities_this_sort = sorting.get_property('quality')
             fs = sorting.sampling_frequency
             
             for i, unit_id in enumerate(unit_ids):
@@ -164,17 +168,20 @@ def process_static_grating_responses(experiment_folder, overwrite=True):
                 
                 all_units_responses.append(response_array)
                 unit_info.append((ish, unit_id))
+                # Append unit quality from this shank's sorting result
+                all_unit_qualities.append(unit_qualities_this_sort[i])
     
     # Stack all unit responses into a single 5D array: (n_units, n_orientation, n_phase, n_spatialFreq, n_repeats)
     all_units_responses = np.stack(all_units_responses, axis=0)
     print("Final all_units_responses shape:", all_units_responses.shape)
     
-    # Save the data to an NPZ file in the session folder
+    # Save the data to an NPZ file in the session folder, including the combined unit qualities
     print(f"Saving data to {npz_file} (overwrite={overwrite})")
     np.savez(
         npz_file,
         all_units_responses=all_units_responses,
         unit_info=unit_info,
+        unit_qualities=all_unit_qualities,  # Combined unit qualities from all shanks
         stim_orientation=stim_orientation,
         stim_phase=stim_phase,
         stim_spatialFreq=stim_spatialFreq,
@@ -182,13 +189,13 @@ def process_static_grating_responses(experiment_folder, overwrite=True):
         unique_phase=unique_phase,
         unique_spatialFreq=unique_spatialFreq,
         static_grating_rising_edges=static_grating_rising_edges,
-        digInFreq=digInFreq
+        digInFreq=digInFreq,
     )
     print(f"Saved data to {npz_file}")
     return npz_file
 
 # Example call:
 if __name__ == '__main__':
-    experiment_folder = r"/Volumes/xieluanlabs/xl_cl/rf_reconstruction/head_fixed/250314/CnL22"
+    experiment_folder = r"/Volumes/xieluanlabs/xl_cl/rf_reconstruction/head_fixed/250320/CnL36"
     # Pass overwrite=True if you want to overwrite an existing file:
-    npz_path = process_static_grating_responses(experiment_folder, overwrite=False)
+    npz_path = process_static_grating_responses(experiment_folder, overwrite=True)
