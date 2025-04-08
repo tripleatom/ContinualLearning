@@ -13,5 +13,5 @@ This ensures that local functions are properly installed and available.
 - **`rec2nwb/`**  
   Contains scripts for converting SpikeGadgets recordings and Intan `.rhd` files into NWB format.
 
-- **`PL_processing/`**  
+- **`spikesorting/`**  
   Contains the spike sorting pipeline.
