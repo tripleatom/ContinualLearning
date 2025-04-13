@@ -3,20 +3,17 @@ from pathlib import Path
 from matplotlib import pyplot as plt
 import spikeinterface as si
 import spikeinterface.extractors as se
-import spikeinterface.exporters as sexp
 from spikeinterface import create_sorting_analyzer
-from spikeinterface.widgets import plot_sorting_summary
 from spikeinterface.extractors import PhySortingExtractor
 import numpy as np
 import spikeinterface.preprocessing as sp
 import spikeinterface.widgets as sw
-import shutil
 
 from rec2nwb.preproc_func import parse_session_info
 
 # Constants
 BASE_FOLDER = r"\\10.129.151.108\xieluanlabs\xl_cl"
-DATES = ['250405']
+DATES = ['250407']
 ANIMAL_IDS = ['CnL30']
 ISHS = ['0', '1', '2', '3']
 overwrite = False

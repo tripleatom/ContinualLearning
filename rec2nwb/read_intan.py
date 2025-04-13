@@ -262,7 +262,7 @@ if __name__ == "__main__":
     experiment_description = expeirment_description if expeirment_description else "None"
 
     device_type = "4shank16intan"
-    n_shank = 4
+    shanks = [2]
 
     session_description = os.path.basename(rhd_folder)
 
@@ -276,7 +276,7 @@ if __name__ == "__main__":
     bad_ch_ids = load_bad_ch(bad_file)
 
     # Process each shank: create an NWB file then append additional files if present
-    for ish in range(n_shank):
+    for ish in shanks:
         nwb_path = rhd_folder / f"{session_description}sh{ish}.nwb"
         # get the good channel ids from the first file and create the nwb file
         good_channel_ids = initiate_nwb(first_rhd_file, nwb_path, ishank=ish,

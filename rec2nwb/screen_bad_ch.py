@@ -42,7 +42,7 @@ def mannual_bad_ch_id(rhd_folder: Path,
             - For each screening segment, plot:
                 * ax_anno (left) shows channel IDs and formatted impedances.
                 * ax_main (center) shows the raw signal traces with vertical offsets.
-                * CheckButtons (right) allow marking bad channels.
+                * CheckButtons (right) allow marking/unmarking bad channels.
             - The bad channel status is carried forward to subsequent segments.
       3. Save the accumulated bad channel IDs to a file and return them.
     """
@@ -55,7 +55,6 @@ def mannual_bad_ch_id(rhd_folder: Path,
             with open(bad_file, "r") as f:
                 existing_bad = [line.strip() for line in f.readlines()]
             return existing_bad
-
 
     # This list will hold bad channel IDs from all shanks.
     all_bad_ch_ids = []
@@ -138,17 +137,19 @@ def mannual_bad_ch_id(rhd_folder: Path,
             
             # --- CheckButtons Setup ---
             # Initialize the persistent state into the segment.
-            # If a channel was already marked as bad, pre-check its box.
+            # Channels previously marked as bad will be pre-checked.
             seg_bad_flags = {cid: (cid in shank_bad) for cid in channel_ids}
             visibility = [seg_bad_flags[cid] for cid in channel_ids]
             check = CheckButtons(rax, channel_ids, visibility)
             
             # Callback to toggle channel bad status.
             def checkbox_callback(label):
-                # Once a channel is flagged as bad, we keep it bad.
-                seg_bad_flags[label] = True  
-                # Optionally, you can print the change.
-                print(f"Channel {label} marked as bad.")
+                # Toggle the state: if already bad, unmark it; otherwise mark it as bad.
+                seg_bad_flags[label] = not seg_bad_flags[label]
+                if seg_bad_flags[label]:
+                    print(f"Channel {label} marked as bad.")
+                else:
+                    print(f"Channel {label} unmarked; removed from bad channels.")
             check.on_clicked(checkbox_callback)
             
             # Display the interactive window.
@@ -157,10 +158,12 @@ def mannual_bad_ch_id(rhd_folder: Path,
             plt.show()
             plt.close(fig)
             
-            # Update persistent state: once bad, always keep it marked.
+            # Update persistent state: update shank_bad based on current seg_bad_flags.
             for cid, is_bad in seg_bad_flags.items():
                 if is_bad:
                     shank_bad.add(cid)
+                else:
+                    shank_bad.discard(cid)
                     
         # After processing all segments for this shank, record the bad channels.
         all_bad_ch_ids.extend(sorted(shank_bad))

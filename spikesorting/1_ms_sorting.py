@@ -12,18 +12,17 @@ import spikeinterface.preprocessing as sp
 import spikeinterface.widgets as sw
 import spikeinterface.exporters as sexp
 import mountainsort5 as ms5
-from spikeinterface import extract_waveforms
 
 from Timer import Timer
-from rec2nwb.preproc_func import get_bad_ch_id, rm_artifacts, parse_session_info
+from rec2nwb.preproc_func import rm_artifacts, parse_session_info
 
 
 def main(rec_folder, threshold=5.5):
     # Define recording folder and parse session info
     rec_folder = Path(rec_folder)
     animal_id, session_id, folder_name = parse_session_info(str(rec_folder))
-    shanks = ['1']
-    # shanks = ['0']
+    shanks = ['0', '1', '2', '3']
+    # shanks = ['2']
 
     for shank in shanks:
         # Construct paths for NWB file and output folder
@@ -39,19 +38,12 @@ def main(rec_folder, threshold=5.5):
         rec_filt = sp.bandpass_filter(
             rec, freq_min=300, freq_max=6000, dtype=np.float32)
 
-        # Get bad channels and determine remaining channels
-        bad_ch_id = get_bad_ch_id(rec, rec_folder, shank)
-        remaining_ch = np.array(
-            [ch for ch in rec.get_channel_ids() if ch not in bad_ch_id])
-        np.save(rec_folder / f"remaining_ch_sh{shank}.npy", remaining_ch)
-        print("Remaining channel IDs:", remaining_ch)
-
         # Remove artifacts using a chunk-based approach
         chunk_time = 0.02
         artifacts_thres = 6.0
         # FIXME: the artifact problem is severe, don't directly set to 0, try to interpolate...
         rec_rm_artifacts = rm_artifacts(
-            rec_filt, rec_folder, shank, bad_ch_id=bad_ch_id, 
+            rec_filt, rec_folder, shank,
             chunk_time=chunk_time, threshold=artifacts_thres,
             overwrite=True)
 
@@ -102,16 +94,13 @@ def main(rec_folder, threshold=5.5):
         # Compute metrics
 
         try:
-            sorting_analyzer.compute("random_spikes")
-            sorting_analyzer.compute("waveforms", ms_before=2.0, ms_after=2.0)
-            sorting_analyzer.compute("templates", ms_before=2.0, ms_after=2.0)
-            sorting_analyzer.compute("spike_amplitudes")
-            wave_forms_folder = sort_out_folder / 'waveforms'
-            we = extract_waveforms(
-                rec_filt,
-                sorting,
-                folder=wave_forms_folder,
-            )
+            sorting_analyzer.compute(['random_spikes', 'waveforms', 'noise_levels'])
+            sorting_analyzer.compute('templates')
+            _ = sorting_analyzer.compute('template_similarity')
+            _ = sorting_analyzer.compute('spike_amplitudes')
+            _ = sorting_analyzer.compute('correlograms')
+            _ = sorting_analyzer.compute('unit_locations')
+
             out_fig_folder = sort_out_folder / 'raw_units'
             out_fig_folder.mkdir(parents=True, exist_ok=True)
 
@@ -126,5 +115,5 @@ def main(rec_folder, threshold=5.5):
 
 if __name__ == "__main__":
     threshold = 5.5
-    rec_folder = Path(r"\\10.129.151.108\xieluanlabs\xl_cl\rf_reconstruction\head_fixed\250320\CnL36\CnL36_250320_180220")
+    rec_folder = Path(r"/Volumes/xieluanlabs/xl_cl/rf_reconstruction/head_fixed/250411/CnL34/CnL34_250411_154730")
     main(threshold=threshold, rec_folder=rec_folder)

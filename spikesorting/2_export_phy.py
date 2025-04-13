@@ -14,9 +14,9 @@ from rec2nwb.preproc_func import parse_session_info
 
 # Constants
 BASE_FOLDER = r"\\10.129.151.108\xieluanlabs\xl_cl"
-DATES = ['250405']
+DATES = ['250407']
 ANIMAL_IDS = ['CnL30']
-ISHS = [ '2', '3']
+ISHS = ['0', '1', '2', '3']
 
 for date in DATES:
     for animal_id in ANIMAL_IDS:

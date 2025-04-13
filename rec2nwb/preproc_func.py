@@ -61,7 +61,7 @@ def get_bad_ch_id(rec, folder, ish, load_if_exists=True):
     return bad_ch_id
 
 
-def rm_artifacts(rec_filtered, folder, ish, bad_ch_id=[], threshold=6, chunk_time=0.05, overwrite=False):
+def rm_artifacts(rec_filtered, folder, ish, threshold=6, chunk_time=0.05, overwrite=False):
     r"""
     Remove artifacts from the filtered recording.
 
