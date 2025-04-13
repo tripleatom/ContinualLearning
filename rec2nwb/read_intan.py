@@ -3,7 +3,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
-
+import sys
 import numpy as np
 import pandas as pd
 
@@ -12,7 +12,6 @@ import neo.rawio
 from pynwb import NWBFile, NWBHDF5IO
 from pynwb.ecephys import ElectricalSeries, TimeSeries
 from hdmf.backends.hdf5.h5_utils import H5DataIO
-
 
 def get_stream_ids(file_path: str) -> any:
     """
@@ -73,7 +72,8 @@ def get_ch_index_on_shank(ish: int, device_type: str) -> tuple:
 
 
 def initiate_nwb(intan_file: Path, nwb_path: Path, ishank: int = 0,
-                 impedance_path: str = None, metadata: dict = None) -> None:
+                 impedance_path: str = None, bad_ch_ids: list = None,
+                 metadata: dict = None) -> None:
     """
     Create and write an NWB file from an Intan recording.
     """
@@ -102,7 +102,6 @@ def initiate_nwb(intan_file: Path, nwb_path: Path, ishank: int = 0,
 
     print("Adding device...")
     channel_index, xcoord, ycoord = get_ch_index_on_shank(ishank, device_type)
-
     # Create a device and add electrode metadata
     device = nwbfile.create_device(
         name="--", description="--", manufacturer="--")
@@ -120,32 +119,44 @@ def initiate_nwb(intan_file: Path, nwb_path: Path, ishank: int = 0,
     impedance_sh = None
     if impedance_path is not None:
         impedance_table = pd.read_csv(impedance_path)
-        impedance = impedance_table['Impedance Magnitude at 1000 Hz (ohms)'].to_numpy(
-        )
+        impedance = impedance_table['Impedance Magnitude at 1000 Hz (ohms)'].to_numpy()
         impedance_sh = impedance[channel_index]
+        channel_name = impedance_table['Channel Name'].to_numpy()
+        channel_name_sh = channel_name[channel_index]
 
-    electrode_counter = 0
-    for i, ch in enumerate(channel_index):
-        imp_value = float(impedance_sh[i]) if impedance_sh is not None else 0.0
+    electrode_df = pd.DataFrame({
+        'channel_name': channel_name_sh,
+        'impedance': impedance_sh,
+        'x': xcoord,
+        'y': ycoord
+    })
+
+    # Remove bad channels from the DataFrame
+    electrode_df = electrode_df[~electrode_df['channel_name'].isin(bad_ch_ids)]
+
+    n_electrodes = len(electrode_df)
+    print(f"Number of good electrodes: {n_electrodes}")
+    # Loop through each row in electrode_df and add an electrode entry to the NWB file.
+    for idx, row in electrode_df.iterrows():
         nwbfile.add_electrode(
             group=electrode_group,
-            label=f"shank{ishank}elec{ch}",
+            label=f"shank{ishank}:{row['channel_name']}",
             location=electrode_location,
-            rel_x=float(xcoord[i]),
-            rel_y=float(ycoord[i]),
-            imp=imp_value,
+            rel_x=float(row['x']),
+            rel_y=float(row['y']),
+            imp=float(row['impedance']),
         )
-        electrode_counter += 1
 
     electrode_table_region = nwbfile.create_electrode_table_region(
-        list(range(electrode_counter)), "all electrodes"
+        list(range(n_electrodes)), "all electrodes"
     )
 
     stream_ids = get_stream_ids(intan_file)
     if '0' in stream_ids:
         print("Found amplifier channels...")
-        channel_ids = [f"D-{i:03d}" for i in channel_index]
+        channel_ids = electrode_df["channel_name"].tolist()
         recording = se.read_intan(intan_file, stream_id='0')
+
         trace = recording.get_traces(channel_ids=channel_ids)
         electrical_series = ElectricalSeries(
             name="ElectricalSeries",
@@ -159,9 +170,9 @@ def initiate_nwb(intan_file: Path, nwb_path: Path, ishank: int = 0,
         )
         nwbfile.add_acquisition(electrical_series)
 
-    # if '4' in stream_ids:
+    if '4' in stream_ids:
+        print("Found digital input channels...")
     #     #TODO: digital output is problematic, need to check, reading intan DIN with matlab now.
-    #     print("Found digital input channels...")
     #     # Note: The stream id used for digital input differs between initiate and append.
     #     recording = se.read_intan(intan_file, stream_id='4')
     #     trace = recording.get_traces()
@@ -173,10 +184,13 @@ def initiate_nwb(intan_file: Path, nwb_path: Path, ishank: int = 0,
     #         unit="bit"
     #     )
     #     nwbfile.add_acquisition(digin_series)
+        pass
 
     print("Writing NWB file...")
     with NWBHDF5IO(nwb_path, "w") as io:
         io.write(nwbfile)
+
+    return channel_ids
 
 
 def _append_nwb_dset(dset, data_to_append, append_axis: int) -> None:
@@ -196,7 +210,7 @@ def _append_nwb_dset(dset, data_to_append, append_axis: int) -> None:
     dset[tuple(slicer)] = data_to_append
 
 
-def append_nwb(nwb_path: Path, append_intan_path: Path, ishank: int = 0,
+def append_nwb(nwb_path: Path, append_intan_path: Path, channel_ids: list = None,
                metadata: dict = None) -> None:
     """
     Append additional Intan data to an existing NWB file.
@@ -207,9 +221,6 @@ def append_nwb(nwb_path: Path, append_intan_path: Path, ishank: int = 0,
         nwb_obj = io.read()
 
         device_type = metadata.get("device_type", "4shank16intan")
-        channel_index, _, _ = get_ch_index_on_shank(ishank, device_type)
-        channel_ids = [f"D-{i:03d}" for i in channel_index]
-
         rec_ephys = se.read_intan(append_intan_path, stream_id='0') \
                       .get_traces(channel_ids=channel_ids)
         _append_nwb_dset(
@@ -223,12 +234,33 @@ def append_nwb(nwb_path: Path, append_intan_path: Path, ishank: int = 0,
 
         io.write(nwb_obj)
 
+def load_bad_ch(bad_file: Path) -> list:
+    """
+    Load bad channels from a file.
+    """
+    if not bad_file.exists():
+        print(f"No bad channels file found at {bad_file}. Please run the screening script.")
+        sys.exit(1)
+    with open(bad_file, "r") as f:
+        bad_channels = [line.strip() for line in f.readlines()]
+    return bad_channels
+
+
 
 if __name__ == "__main__":
     # Define folder and file paths
-    rhd_folder = Path(
-        r'C:\STA_temp\250406\CnL22\CnL22_250406_002515')
-    impedance_file = None
+    rhd_folder_input = input("Please enter the full path to the RHD folder: ")
+    # rhd_folder_input = '/Volumes/xieluanlabs/xl_cl/rf_reconstruction/head_fixed/20250411/CnL36/CnL36_250412_200459'
+    rhd_folder = Path(rhd_folder_input)
+    impedance_path = input("Please enter the full path to the impedance file: ")
+    # impedance_path = '/Volumes/xieluanlabs/xl_cl/rf_reconstruction/head_fixed/20250411/CnL36/CnL36.csv'
+    # impedance_path = impedance_path.strip('"')
+    impedance_file = Path(impedance_path)
+
+    expeirment_description = input("Please enter the experiment description: ")
+    # expeirment_description = "static_grating"
+    experiment_description = expeirment_description if expeirment_description else "None"
+
     device_type = "4shank16intan"
     n_shank = 4
 
@@ -240,16 +272,21 @@ if __name__ == "__main__":
         raise FileNotFoundError("No .rhd files found in the specified folder.")
     first_rhd_file = rhd_files[0]
 
+    bad_file = Path(rhd_folder) / "bad_channels.txt"
+    bad_ch_ids = load_bad_ch(bad_file)
+
     # Process each shank: create an NWB file then append additional files if present
     for ish in range(n_shank):
         nwb_path = rhd_folder / f"{session_description}sh{ish}.nwb"
-        initiate_nwb(first_rhd_file, nwb_path, ishank=ish,
+        # get the good channel ids from the first file and create the nwb file
+        good_channel_ids = initiate_nwb(first_rhd_file, nwb_path, ishank=ish,
                      impedance_path=impedance_file,
+                     bad_ch_ids=bad_ch_ids,
                      metadata={'device_type': device_type,
                                "session_desc": session_description,
                                "n_channels_per_shank": 32,
                                "electrode_location": "V1", 
-                               "exp_desc": "grating",}
+                               "exp_desc": experiment_description,}
                      )
 
         if len(rhd_files) == 1:
@@ -259,5 +296,5 @@ if __name__ == "__main__":
 
         for rhd_file in rhd_files[1:]:
             print(f"Appending file {rhd_file.name} to {nwb_path.name}")
-            append_nwb(nwb_path, rhd_file, ishank=ish,
+            append_nwb(nwb_path, rhd_file, channel_ids=good_channel_ids,
                        metadata={'device_type': device_type})
