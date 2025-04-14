@@ -115,5 +115,5 @@ def main(rec_folder, threshold=5.5):
 
 if __name__ == "__main__":
     threshold = 5.5
-    rec_folder = Path(r"/Volumes/xieluanlabs/xl_cl/rf_reconstruction/head_fixed/250411/CnL34/CnL34_250411_154730")
+    rec_folder = Path(r"\\10.129.151.108\xieluanlabs\xl_cl\rf_reconstruction\head_fixed\250411\CnL36\CnL36_250412_170907")
     main(threshold=threshold, rec_folder=rec_folder)

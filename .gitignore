@@ -1,4 +1,3 @@
-*.png
 __pycache__
 build
 cl_project.egg-info
@@ -6,3 +5,5 @@ sortout
 ._*
 *.ipynb
 .DS_Store
+vr_kinematic
+rf_recon/visual_stim
