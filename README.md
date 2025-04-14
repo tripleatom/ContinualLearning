@@ -11,7 +11,7 @@ This ensures that local functions are properly installed and available.
 ## Folder Structure
 
 - **`rec2nwb/`**  
-  - `screen_bad_ch.py1`  
+  - `screen_bad_ch.py`  
     Contains functions for visualizing and removing bad channels from the recording.
     ![remove bad channels](images/bad_channel.png "remove bad channels")
   - `read_intan.py`, convert .rhd files to .nwb files.
