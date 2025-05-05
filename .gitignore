@@ -7,3 +7,4 @@ sortout
 .DS_Store
 vr_kinematic
 rf_recon/visual_stim
+*.json

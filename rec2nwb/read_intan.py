@@ -1,4 +1,3 @@
-import os
 import re
 from datetime import datetime
 from pathlib import Path
@@ -6,12 +5,12 @@ from uuid import uuid4
 import sys
 import numpy as np
 import pandas as pd
-
 import spikeinterface.extractors as se
 import neo.rawio
 from pynwb import NWBFile, NWBHDF5IO
 from pynwb.ecephys import ElectricalSeries, TimeSeries
 from hdmf.backends.hdf5.h5_utils import H5DataIO
+from rec2nwb.preproc_func import get_or_set_device_type
 
 def get_stream_ids(file_path: str) -> any:
     """
@@ -219,8 +218,6 @@ def append_nwb(nwb_path: Path, append_intan_path: Path, channel_ids: list = None
     stream_ids = get_stream_ids(append_intan_path)
     with NWBHDF5IO(nwb_path, "a") as io:
         nwb_obj = io.read()
-
-        device_type = metadata.get("device_type", "4shank16intan")
         rec_ephys = se.read_intan(append_intan_path, stream_id='0') \
                       .get_traces(channel_ids=channel_ids)
         _append_nwb_dset(
@@ -248,53 +245,60 @@ def load_bad_ch(bad_file: Path) -> list:
 
 
 if __name__ == "__main__":
-    # Define folder and file paths
-    rhd_folder_input = input("Please enter the full path to the RHD folder: ")
-    # rhd_folder_input = '/Volumes/xieluanlabs/xl_cl/rf_reconstruction/head_fixed/20250411/CnL36/CnL36_250412_200459'
-    rhd_folder = Path(rhd_folder_input)
-    impedance_path = input("Please enter the full path to the impedance file: ")
-    # impedance_path = '/Volumes/xieluanlabs/xl_cl/rf_reconstruction/head_fixed/20250411/CnL36/CnL36.csv'
-    # impedance_path = impedance_path.strip('"')
-    impedance_file = Path(impedance_path)
+    # Inputs
+    rhd_folder = Path(input("Please enter the full path to the RHD folder: ").strip())
+    impedance_file = Path(input("Please enter the full path to the impedance file: ").strip())
+    electrode_location = input("Please enter the electrode location: ").strip()
+    exp_desc = input("Please enter the experiment description: ").strip() or "None"
+    animal_id = rhd_folder.parent.parent.name
+    device_type = get_or_set_device_type(animal_id)
+    raw = input("Please enter the shank numbers (e.g. 0,1,2,3 or [0,1,2,3]): ")
+    # extract all integer substrings
+    shanks = [int(x) for x in re.findall(r'\d+', raw)]
+    print(shanks)
+    
+    session_description = rhd_folder.name
 
-    expeirment_description = input("Please enter the experiment description: ")
-    # expeirment_description = "static_grating"
-    experiment_description = expeirment_description if expeirment_description else "None"
+    # Gather all .rhd or .rhs files
+    data_files = sorted(
+        p for p in rhd_folder.iterdir()
+        if p.suffix.lower() in ('.rhd', '.rhs')
+    )
+    if not data_files:
+        raise FileNotFoundError("No .rhd or .rhs files found in the specified folder.")
+    first_file = data_files[0]
 
-    device_type = "4shank16intan"
-    shanks = [2]
-
-    session_description = os.path.basename(rhd_folder)
-
-    # Gather all .rhd files in the folder and sort them
-    rhd_files = sorted(rhd_folder.glob('*.rhd'))
-    if not rhd_files:
-        raise FileNotFoundError("No .rhd files found in the specified folder.")
-    first_rhd_file = rhd_files[0]
-
-    bad_file = Path(rhd_folder) / "bad_channels.txt"
+    # Load bad channels
+    bad_file = rhd_folder / "bad_channels.txt"
     bad_ch_ids = load_bad_ch(bad_file)
 
-    # Process each shank: create an NWB file then append additional files if present
+    # Process each shank
     for ish in shanks:
         nwb_path = rhd_folder / f"{session_description}sh{ish}.nwb"
-        # get the good channel ids from the first file and create the nwb file
-        good_channel_ids = initiate_nwb(first_rhd_file, nwb_path, ishank=ish,
-                     impedance_path=impedance_file,
-                     bad_ch_ids=bad_ch_ids,
-                     metadata={'device_type': device_type,
-                               "session_desc": session_description,
-                               "n_channels_per_shank": 32,
-                               "electrode_location": "V1", 
-                               "exp_desc": experiment_description,}
-                     )
 
-        if len(rhd_files) == 1:
-            print(
-                f"Only one file ({first_rhd_file.name}) found, skipping appending.")
+        # create the NWB from first file
+        good_ch = initiate_nwb(
+            first_file, nwb_path, ishank=ish,
+            impedance_path=impedance_file,
+            bad_ch_ids=bad_ch_ids,
+            metadata={
+                'device_type': device_type,
+                'session_desc': session_description,
+                'n_channels_per_shank': 32,
+                'electrode_location': electrode_location,
+                'exp_desc': exp_desc,
+            }
+        )
+
+        if len(data_files) == 1:
+            print(f"Only one file ({first_file.name}) found, skipping appending.")
             continue
 
-        for rhd_file in rhd_files[1:]:
-            print(f"Appending file {rhd_file.name} to {nwb_path.name}")
-            append_nwb(nwb_path, rhd_file, channel_ids=good_channel_ids,
-                       metadata={'device_type': device_type})
+        # append the rest
+        for f in data_files[1:]:
+            print(f"Appending {f.name} → {nwb_path.name}")
+            append_nwb(
+                nwb_path, f,
+                channel_ids=good_ch,
+                metadata={'device_type': device_type}
+            )

@@ -2,6 +2,77 @@ import os
 import re
 import numpy as np
 import spikeinterface.preprocessing as spre
+import json
+import tkinter as tk
+from pathlib import Path
+
+def choose_device_type(animal_id: str) -> str:
+    """
+    Pop up a small Tk window to let the user pick one of the
+    CSV‐stems inside ./mapping (ignores any files starting with ._).
+    Returns the chosen stem (string).
+    """
+    mapping_dir = Path(__file__).resolve().parent / "mapping"
+    if not mapping_dir.is_dir():
+        raise FileNotFoundError(f"Mapping folder not found: {mapping_dir}")
+
+    choices = sorted(
+        p.stem for p in mapping_dir.glob("*.csv")
+        if not p.name.startswith("._")
+    )
+    if not choices:
+        raise FileNotFoundError(f"No valid .csv files in {mapping_dir}")
+
+    root = tk.Tk()
+    root.title(f"Choose device type for {animal_id}")
+    root.geometry("300x150")
+    tk.Label(root, text="Device type:").pack(padx=10, pady=(10, 0))
+
+    var = tk.StringVar(value=choices[0])
+    tk.OptionMenu(root, var, *choices).pack(padx=10, pady=5)
+
+    def on_ok():
+        root.quit()
+
+    tk.Button(root, text="OK", command=on_ok).pack(pady=(0,10))
+
+    # center window
+    root.update_idletasks()
+    w, h = root.winfo_width(), root.winfo_height()
+    ws, hs = root.winfo_screenwidth(), root.winfo_screenheight()
+    root.geometry(f"{w}x{h}+{(ws-w)//2}+{(hs-h)//2}")
+
+    root.mainloop()
+    selection = var.get()
+    root.destroy()
+    return selection
+
+
+def get_or_set_device_type(animal_id: str) -> str:
+    """
+    Load (or create) device_types.json, return the device_type for this animal_id.
+    If missing, pop up chooser and write it back to JSON.
+    """
+    code_dir  = Path(__file__).resolve().parent
+    json_path = code_dir / "device_types.json"
+
+    # load existing map (or start fresh)
+    if json_path.exists():
+        device_map = json.loads(json_path.read_text())
+    else:
+        device_map = {}
+
+    # if we already know this animal, return it
+    if animal_id in device_map:
+        return device_map[animal_id]
+
+    # else, ask the user
+    dt = choose_device_type(animal_id)
+    device_map[animal_id] = dt
+    json_path.write_text(json.dumps(device_map, indent=4))
+    print(f"Saved {animal_id} → {dt} in {json_path}")
+    return dt
+
 
 def parse_session_info(rec_folder: str) -> tuple:
     r"""

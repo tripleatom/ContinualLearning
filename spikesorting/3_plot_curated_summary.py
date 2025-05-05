@@ -13,8 +13,8 @@ from rec2nwb.preproc_func import parse_session_info
 
 # Constants
 BASE_FOLDER = r"\\10.129.151.108\xieluanlabs\xl_cl"
-DATES = ['250407']
-ANIMAL_IDS = ['CnL30']
+DATES = ['250411', '250412']
+ANIMAL_IDS = ['CnL34', 'CnL36']
 ISHS = ['0', '1', '2', '3']
 overwrite = False
 

@@ -1,21 +1,93 @@
-## Installation
+# rec2nwb & Spikesorting Toolkit
 
-After cloning the repository, run the following command to install the package in editable mode:
+A lightweight pipeline for converting Intan (*.rhd*) and SpikeGadget (*.mda*) recordings into NWB files, screening bad channels, and running a Mountainsort‑based spike sorting workflow.
 
-```bash
-pip install -e .
+---
+
+## 📦 Installation
+
+1. Clone this repository:
+   ```bash
+   git clone https://github.com/tripleatom/code
+   cd code
+   ```
+2. Install in editable mode:
+   ```bash
+   pip install -e .
+   ```
+   This makes all local modules (e.g. rec2nwb) available on your `PYTHONPATH`.
+
+---
+
+## 🗂️ Data Organization
+
+Place your electrophysiology data under a top‑level `data/` directory, organized by date and animal:
+
+```
+data/
+└── 2025-05-06/             # experiment date (YYYY-MM-DD)
+    ├── MouseA/             # animal ID
+    │   ├── session1/       # recording folder
+    │   │   ├── *.rhd       # Intan files
+    │   │   └── *.mda       # SpikeGadget files
+    └── RatB/
+        └── session2/
+            ├── *.rhd
+            └── *.mda
 ```
 
-This ensures that local functions are properly installed and available.
+---
 
-## Folder Structure
+## 📁 Project Structure
 
-- **`rec2nwb/`**  
-  - `screen_bad_ch.py`  
-    Contains functions for visualizing and removing bad channels from the recording.
-    ![remove bad channels](images/bad_channel.png "remove bad channels")
-  - `read_intan.py`, convert .rhd files to .nwb files.
-  - `read_spikegadget.py`, convert .mda files from spikegadget to .nwb files.
+### `rec2nwb/`
 
-- **`spikesorting/`**  
-  Contains the spike sorting pipeline, including sorting with mountainsort, export to phy to manually curate the results.
+- **`screen_bad_ch.py`**  
+  Interactive GUI for reviewing traces, marking bad channels, and saving results.  
+  ![Bad channel screening](images/bad_channel.png)
+
+- **`read_intan.py`**  
+  Convert Intan `.rhd`/`.rhs` recordings to NWB.
+
+- **`read_spikegadget.py`**  
+  Convert SpikeGadget `.mda` recordings to NWB.
+
+### `spikesorting/`
+
+- Full spike‑sorting pipeline:
+  1. Run Mountainsort on NWB-extracted data.
+  2. Export to Phy for manual curation.
+  3. Re-import curated clusters back into NWB.
+
+---
+
+## ⚙️ Usage Examples
+
+### 1. Screen bad channels
+```bash
+python -m rec2nwb.screen_bad_ch   --data-folder data/2025-05-06/MouseA/session1   --impedance-file data/2025-05-06/MouseA/session1/impedance.csv
+```
+
+### 2. Convert Intan → NWB
+```bash
+python -m rec2nwb.read_intan   --input-folder data/2025-05-06/MouseA/session1   --output-file outputs/MouseA_session1.nwb
+```
+
+### 3. Run spike sorting
+```bash
+python -m spikesorting.run_sorting   --nwb-file outputs/MouseA_session1.nwb
+```
+
+---
+
+## 🙋‍♂️ Contributing
+
+1. Fork the repo & create a feature branch  
+2. Write tests & ensure all CI checks pass  
+3. Open a pull request describing your changes
+
+---
+
+## 📄 License
+
+MIT © Xiaorong Zhang / Luan Lab

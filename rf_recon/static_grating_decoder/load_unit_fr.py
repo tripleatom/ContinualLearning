@@ -196,6 +196,6 @@ def process_static_grating_responses(experiment_folder, overwrite=True):
 
 # Example call:
 if __name__ == '__main__':
-    experiment_folder = r"/Volumes/xieluanlabs/xl_cl/rf_reconstruction/head_fixed/250407/CnL30"
+    experiment_folder = r"/Volumes/xieluanlabs/xl_cl/rf_reconstruction/head_fixed/250412/CnL34"
     # Pass overwrite=True if you want to overwrite an existing file:
     npz_path = process_static_grating_responses(experiment_folder, overwrite=True)

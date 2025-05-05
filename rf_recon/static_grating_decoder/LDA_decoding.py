@@ -1,4 +1,3 @@
-import os
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
@@ -169,5 +168,5 @@ def visualize_lda_decoding(npz_file, cv_folds=5, random_state=42):
 
 # Example usage:
 if __name__ == '__main__':
-    npz_file_path = '/Volumes/xieluanlabs/xl_cl/code/sortout/CnL30/250407_153611/static_grating_responses.npz'
+    npz_file_path = '/Volumes/xieluanlabs/xl_cl/code/sortout/CNL36/250412_200459/static_grating_responses.npz'
     visualize_lda_decoding(npz_file_path)

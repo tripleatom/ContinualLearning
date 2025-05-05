@@ -24,7 +24,7 @@ def dereference(item, f):
         return item
 
 # Define experiment folder (adjust to your environment)
-experiment_folder = r"/Volumes/xieluanlabs/xl_cl/rf_reconstruction/head_fixed/250407/CnL30"  # for mac
+experiment_folder = r"/Volumes/xieluanlabs/xl_cl/rf_reconstruction/head_fixed/250412/CnL34"  # for mac
 experiment_folder = Path(experiment_folder)
 rec_folder = next((p for p in experiment_folder.iterdir() if p.is_dir()), None)
 print("Recording folder:", rec_folder)

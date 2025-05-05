@@ -17,17 +17,15 @@ from Timer import Timer
 from rec2nwb.preproc_func import rm_artifacts, parse_session_info
 
 
-def main(rec_folder, threshold=5.5):
+def main(rec_folder, threshold=5.5, shanks=[0]):
     # Define recording folder and parse session info
     rec_folder = Path(rec_folder)
     animal_id, session_id, folder_name = parse_session_info(str(rec_folder))
-    shanks = ['0', '1', '2', '3']
-    # shanks = ['2']
 
     for shank in shanks:
         # Construct paths for NWB file and output folder
         nwb_folder = rec_folder / f"{folder_name}sh{shank}.nwb"
-        out_folder = Path("sortout") / animal_id / session_id / shank
+        out_folder = Path("sortout") / animal_id / session_id / str(shank)
         out_folder.mkdir(parents=True, exist_ok=True)
 
         # Load recording from NWB file
@@ -115,5 +113,6 @@ def main(rec_folder, threshold=5.5):
 
 if __name__ == "__main__":
     threshold = 5.5
-    rec_folder = Path(r"\\10.129.151.108\xieluanlabs\xl_cl\rf_reconstruction\head_fixed\250411\CnL36\CnL36_250412_170907")
-    main(threshold=threshold, rec_folder=rec_folder)
+    rec_folder = Path(r"\\10.129.151.108\xieluanlabs\xl_cl\rf_reconstruction\head_fixed\250505\CnL38\CnL38_250505_102542")
+    shanks = [0, 1, 2, 3]
+    main(threshold=threshold, rec_folder=rec_folder, shanks=shanks)
