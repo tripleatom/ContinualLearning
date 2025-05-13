@@ -9,13 +9,13 @@ from rf_func import find_stim_index, moving_average, schmitt_trigger
 from spikeinterface.extractors import PhySortingExtractor
 from rec2nwb.preproc_func import parse_session_info
 
-# base_folder = r"\\10.129.151.108\xieluanlabs\xl_cl\rf_reconstruction\head_fixed\CnL22\250307"
-experiment_folder = r"/Volumes/xieluanlabs/xl_cl/rf_reconstruction/head_fixed/250405/CnL30"  # for mac
-experiment_folder = Path(experiment_folder)
-rec_folder = next((p for p in experiment_folder.iterdir() if p.is_dir()), None)
-print(rec_folder)
-Stimdata_file = next(experiment_folder.glob("*.mat"), None)
-print(Stimdata_file)
+rec_folder = Path(input("Please enter the full path to the recording folder: ").strip())
+stimdata_file = Path(input("Please enter the full path to the .mat file: ").strip())
+
+print(f"Recording folder: {rec_folder}")
+print(f"Stimulus data file: {stimdata_file}")
+
+print(stimdata_file)
 DIN_file = rec_folder / "DIN.mat"
 peaks_file = rec_folder / "peaks.mat"
 
@@ -47,12 +47,12 @@ ishs = ['0', '1', '2', '3']
 # n_trial = stimdata.n_trial  # trials for each color
 # t_trial = stimdata.t_trial  # time for each trial, s
 
-with h5py.File(Stimdata_file, 'r') as f:
+with h5py.File(stimdata_file, 'r') as f:
     # Access the dataset for 'Stimdata'
     stimdata = f["Stimdata"]
-    orientations = stimdata['orientations'][:]
-    spatialFreqs = stimdata['spatialFreqs'][:]
-    phases = stimdata['phases'][:]
+    # orientations = stimdata['orientations'][:]
+    # spatialFreqs = stimdata['spatialFreqs'][:]
+    # phases = stimdata['phases'][:]
     # Extract the relevant fields from the nested array structure
     black_on = stimdata['black_on'][0]
     black_off = stimdata['black_off'][0]
@@ -62,6 +62,8 @@ with h5py.File(Stimdata_file, 'r') as f:
     n_row = stimdata['n_row'][0][0].astype(int)
     t_trial = stimdata['t_trial'][0][0]
     n_trial = stimdata['n_trial'][0][0]
+    white_order = stimdata['white_order'][:].astype(int)
+    black_order = stimdata['black_order'][:].astype(int)
 
 n_rising_edges = len(rising_edges)
 # n_rising_edges = 8960
@@ -74,19 +76,21 @@ n_dots = n_col * n_row
 dot_time = t_trial
 trial_dur = n_col * n_row * n_trial * t_trial
 
-# TODO: write dots_order in Stimdata
-current_dir = Path(__file__).parent
-dots_order = scipy.io.loadmat(current_dir / rf'order_{n_col}_{n_row}.mat')
-dots_order = dots_order['order'][0] - 1  # matlab index starts from 1
+white_order = white_order - 1 # matlab index starts from 1
+black_order = black_order - 1 
 
 # generate the stimuli pattern in array
-black_dots_stimuli = np.ones((len(dots_order), n_row, n_col))
-white_dots_stimuli = np.zeros((len(dots_order), n_row, n_col))
+black_dots_stimuli = np.ones((len(black_order), n_row, n_col))
+white_dots_stimuli = np.zeros((len(white_order), n_row, n_col))
 
-for i, dot in enumerate(dots_order):
+for i, dot in enumerate(black_order):
     row = dot // n_col
     col = dot % n_col
     black_dots_stimuli[i, row, col] = 0
+
+for i, dot in enumerate(white_order):
+    row = dot // n_col
+    col = dot % n_col
     white_dots_stimuli[i, row, col] = 1
 
 
@@ -103,7 +107,7 @@ for ish in ishs:
     print(f'Processing {animal_id}/{session_id}/{ish}')
     # rec_folder = rf'\\10.129.151.108\xieluanlabs\xl_cl\code\sortout\{animal_id}\{session_id}\{ish}'
     # for mac
-    shank_folder = rf'/Volumes/xieluanlabs/xl_cl/code/sortout/{animal_id}/{session_id}/{ish}'
+    shank_folder = rf'//10.129.151.108/xieluanlabs/xl_cl/code/sortout/{animal_id}/{session_id}/{ish}'
     sorting_results_folders = []
     for root, dirs, files in os.walk(shank_folder):
         for dir_name in dirs:
@@ -184,15 +188,16 @@ for ish in ishs:
             black_firing = np.zeros((n_dots, n_trial))
 
             for i in range(n_dots):
-                indexes = np.arange(0, n_trial * n_dots, n_dots) + np.where(dots_order == i)[0] # indexes of the dot in the stimuli in each trial
-                white_start_times = white_rising[indexes] + delay * fs
+                white_indexes = np.arange(0, n_trial * n_dots, n_dots) + np.where(white_order == i)[0] # indexes of the dot in the stimuli in each trial
+                white_start_times = white_rising[white_indexes] + delay * fs
                 white_end_times = white_start_times + average_length * fs
                 for j in range(len(white_start_times)):
                     white_dot_spike = spikes[(spikes > white_start_times[j]) & (
                         spikes < white_end_times[j])]
                     white_firing[i, j] = len(white_dot_spike) / average_length
 
-                black_start_times = black_rising[indexes] + delay * fs
+                black_indexes = np.arange(0, n_trial * n_dots, n_dots) + np.where(black_order == i)[0] # indexes of the dot in the stimuli in each trial
+                black_start_times = black_rising[black_indexes] + delay * fs
                 black_end_times = black_start_times + average_length * fs
                 for j in range(len(black_start_times)):
                     black_dot_spike = spikes[(spikes > black_start_times[j]) & (

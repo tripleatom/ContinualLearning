@@ -7,13 +7,13 @@ from sklearn.manifold import TSNE
 import umap
 from load_unit_fr import process_static_grating_responses
 
-# Define the experiment folder and get the recording folder
-experiment_folder = r"/Volumes/xieluanlabs/xl_cl/rf_reconstruction/head_fixed/250320/CnL35"  # for mac
-grating_response_file = process_static_grating_responses(experiment_folder, overwrite=False)
-experiment_folder = Path(experiment_folder)
-rec_folder = next((p for p in experiment_folder.iterdir() if p.is_dir()), None)
+rec_folder = Path(input("Please enter the full path to the recording folder: ").strip())
+stimdata_file = Path(input("Please enter the full path to the .mat file: ").strip())
+grating_response_file = process_static_grating_responses(rec_folder, stimdata_file, overwrite=False)
+
 animal_id, session_id, folder_name = parse_session_info(rec_folder)
-session_folder = rf"/Volumes/xieluanlabs/xl_cl/code/sortout/{animal_id}/{session_id}"
+code_folder = Path(__file__).parent.parent.parent
+session_folder = code_folder / rf"sortout/{animal_id}/{session_id}"
 
 print("Loading data from:", grating_response_file)
 

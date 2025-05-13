@@ -24,12 +24,9 @@ def dereference(item, f):
         return item
 
 # Define experiment folder (adjust to your environment)
-experiment_folder = r"/Volumes/xieluanlabs/xl_cl/rf_reconstruction/head_fixed/250412/CnL34"  # for mac
-experiment_folder = Path(experiment_folder)
-rec_folder = next((p for p in experiment_folder.iterdir() if p.is_dir()), None)
-print("Recording folder:", rec_folder)
-Stimdata_file = next(experiment_folder.glob("static_grating*.mat"), None)
-print("Stimdata file:", Stimdata_file)
+rec_folder = Path(input("Please enter the full path to the recording folder: ").strip())
+stimdata_file = Path(input("Please enter the full path to the .mat file: ").strip())
+
 DIN_file = rec_folder / "DIN.mat"
 peaks_file = rec_folder / "peaks.mat"
 
@@ -51,7 +48,7 @@ animal_id, session_id, folder_name = parse_session_info(rec_folder)
 ishs = ['0', '1', '2', '3']  # list of shanks
 
 # Load stimulus parameters from MAT file
-with h5py.File(Stimdata_file, 'r') as f:
+with h5py.File(stimdata_file, 'r') as f:
     patternParams_group = f['Stimdata']['patternParams']
     # Orientation
     orientation_data = patternParams_group['orientation'][()]
@@ -95,7 +92,8 @@ all_shank_info = {}
 for ish in ishs:
     print(f'\nProcessing shank {ish} for {animal_id}/{session_id}')
     # Define the shank folder (adjust path as needed)
-    shank_folder = rf'/Volumes/xieluanlabs/xl_cl/code/sortout/{animal_id}/{session_id}/{ish}'
+    code_folder = Path(__file__).parent.parent.parent
+    shank_folder = code_folder / rf"sortout/{animal_id}/{session_id}/{ish}"
     sorting_results_folders = []
     for root, dirs, files in os.walk(shank_folder):
         for dir_name in dirs:
@@ -279,6 +277,6 @@ for ish in ishs:
     all_shank_info[ish] = unit_info_dict
 
 # Save all shank info into one NPZ file in the parent folder of the experiment folder.
-npz_out_path = experiment_folder / rf"/Volumes/xieluanlabs/xl_cl/code/sortout/{animal_id}/{session_id}/static_grating_tuning_metrics.npz"
+npz_out_path = code_folder / rf"sortout/{animal_id}/{session_id}/static_grating_tuning_metrics.npz"
 np.savez_compressed(npz_out_path, all_shank_info=all_shank_info)
 print(f"\nSaved all shank info to {npz_out_path}")

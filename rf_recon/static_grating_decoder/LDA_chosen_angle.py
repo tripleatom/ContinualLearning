@@ -178,5 +178,5 @@ def visualize_lda_decoding_chosen_angles(npz_file, chosen_angles=[45, 135], cv_f
 
 # Example usage:
 if __name__ == '__main__':
-    npz_file_path = '/Volumes/xieluanlabs/xl_cl/code/sortout/CnL30/250407_153611/static_grating_responses.npz'
+    npz_file_path = r'/Volumes/xieluanlabs/xl_cl/code/sortout/CnL30/250407_153611/static_grating_responses.npz'
     visualize_lda_decoding_chosen_angles(npz_file_path, chosen_angles=[45, 135])

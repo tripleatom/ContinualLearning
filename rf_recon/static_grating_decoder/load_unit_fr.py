@@ -19,7 +19,7 @@ def dereference(item, f):
     else:
         return item
 
-def process_static_grating_responses(experiment_folder, overwrite=True):
+def process_static_grating_responses(rec_folder, stimdata_file, overwrite=True):
     """
     Process static grating responses from an experiment folder.
     
@@ -38,16 +38,6 @@ def process_static_grating_responses(experiment_folder, overwrite=True):
     Returns:
       npz_file (Path): Path to the saved (or existing) NPZ file.
     """
-    # Convert to Path object
-    experiment_folder = Path(experiment_folder)
-    
-    # Get the recording folder (first subfolder)
-    rec_folder = next((p for p in experiment_folder.iterdir() if p.is_dir()), None)
-    print("Recording folder:", rec_folder)
-    
-    # Find the stimulus file and other MAT files
-    Stimdata_file = next(experiment_folder.glob("static_grating*.mat"), None)
-    print("Stimulus file:", Stimdata_file)
     DIN_file = rec_folder / "DIN.mat"
     peaks_file = rec_folder / "peaks.mat"
     
@@ -69,7 +59,7 @@ def process_static_grating_responses(experiment_folder, overwrite=True):
     ishs = ['0', '1', '2', '3']
     
     # Open the Stimdata file to get stimulus parameters
-    with h5py.File(Stimdata_file, 'r') as f:
+    with h5py.File(stimdata_file, 'r') as f:
         patternParams_group = f['Stimdata']['patternParams']
         
         # Process orientation, phase, spatialFreq
@@ -109,7 +99,8 @@ def process_static_grating_responses(experiment_folder, overwrite=True):
     all_unit_qualities = []  # List to store unit qualities from all shanks
     
     # Construct session folder for sorting results (hard-coded base path)
-    session_folder = Path(rf"/Volumes/xieluanlabs/xl_cl/code/sortout/{animal_id}/{session_id}")
+    code_folder = Path(__file__).parent.parent.parent
+    session_folder = code_folder / rf"sortout/{animal_id}/{session_id}"
     
     # Check if the output file already exists
     npz_file = session_folder / 'static_grating_responses.npz'
@@ -191,11 +182,15 @@ def process_static_grating_responses(experiment_folder, overwrite=True):
         static_grating_rising_edges=static_grating_rising_edges,
         digInFreq=digInFreq,
     )
-    print(f"Saved data to {npz_file}")
+    print("data saved")
     return npz_file
 
 # Example call:
 if __name__ == '__main__':
-    experiment_folder = r"/Volumes/xieluanlabs/xl_cl/rf_reconstruction/head_fixed/250412/CnL34"
+    rec_folder = Path(input("Please enter the full path to the recording folder: ").strip())
+    stimdata_file = Path(input("Please enter the full path to the .mat file: ").strip())
+
+    print(f"Recording folder: {rec_folder}")
+    print(f"Stimulus data file: {stimdata_file}")
     # Pass overwrite=True if you want to overwrite an existing file:
-    npz_path = process_static_grating_responses(experiment_folder, overwrite=True)
+    npz_path = process_static_grating_responses(rec_folder, stimdata_file, overwrite=True)

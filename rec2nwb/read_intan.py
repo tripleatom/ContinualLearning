@@ -250,7 +250,7 @@ if __name__ == "__main__":
     impedance_file = Path(input("Please enter the full path to the impedance file: ").strip())
     electrode_location = input("Please enter the electrode location: ").strip()
     exp_desc = input("Please enter the experiment description: ").strip() or "None"
-    animal_id = rhd_folder.parent.parent.name
+    animal_id = rhd_folder.parent.name
     device_type = get_or_set_device_type(animal_id)
     raw = input("Please enter the shank numbers (e.g. 0,1,2,3 or [0,1,2,3]): ")
     # extract all integer substrings
@@ -260,10 +260,11 @@ if __name__ == "__main__":
     session_description = rhd_folder.name
 
     # Gather all .rhd or .rhs files
+    # pick first .rhd or .rhs, exclude macOS system files like ._*
     data_files = sorted(
         p for p in rhd_folder.iterdir()
-        if p.suffix.lower() in ('.rhd', '.rhs')
-    )
+        if p.suffix.lower() in ('.rhd', '.rhs') and not p.name.startswith("._"))
+
     if not data_files:
         raise FileNotFoundError("No .rhd or .rhs files found in the specified folder.")
     first_file = data_files[0]

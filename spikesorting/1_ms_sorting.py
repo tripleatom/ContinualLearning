@@ -113,6 +113,8 @@ def main(rec_folder, threshold=5.5, shanks=[0]):
 
 if __name__ == "__main__":
     threshold = 5.5
-    rec_folder = Path(r"\\10.129.151.108\xieluanlabs\xl_cl\rf_reconstruction\head_fixed\250505\CnL38\CnL38_250505_102542")
-    shanks = [0, 1, 2, 3]
-    main(threshold=threshold, rec_folder=rec_folder, shanks=shanks)
+    shanks = [0, 1,2,3]
+    rec_folders = [Path(r"G:\rf\250508\CnL38\CnL38_250508_141119"),
+                   Path(r"G:\rf\250508\CnL38\CnL38_250508_143910") ]
+    for rec_folder in rec_folders:
+        main(threshold=threshold, rec_folder=rec_folder, shanks=shanks)

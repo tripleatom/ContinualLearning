@@ -2,6 +2,17 @@ import numpy as np
 import h5py
 import matplotlib.pyplot as plt
 
+def dereference(item, f):
+    """Recursively dereference an h5py item."""
+    if isinstance(item, h5py.Reference):
+        data = f[item][()]
+        if isinstance(data, np.ndarray) and data.size == 1:
+            return data.item()
+        return data
+    elif isinstance(item, np.ndarray):
+        return np.array([dereference(elem, f) for elem in item])
+    else:
+        return item
 
 def hex_offsets(n_points, radius=0.1):
     # Generate local offsets in hex layout

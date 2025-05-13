@@ -1,6 +1,6 @@
 import spikeinterface.preprocessing as sp
 import matplotlib.pyplot as plt
-from matplotlib.widgets import CheckButtons
+from matplotlib.widgets import CheckButtons, Button
 import numpy as np
 import pandas as pd
 from pathlib import Path
@@ -42,7 +42,7 @@ def mannual_bad_ch_id(
 
     # derive animal_id and session_id from folder structure
     # assumes: .../<animal_id>/<session_date>/<session_id_folder>
-    animal_id  = rhd_folder.parent.parent.name
+    animal_id  = rhd_folder.parent.name
     session_id = rhd_folder.name
     out_root   = Path("sortout") / animal_id / session_id
 
@@ -58,16 +58,25 @@ def mannual_bad_ch_id(
         out_folder = out_root / f"shank{ishank}"
         out_folder.mkdir(parents=True, exist_ok=True)
 
-        channel_index, _, _ = get_ch_index_on_shank(ishank, device_type)
+        recording = se.read_intan(first_file, stream_id='0')
+        # Bandpass filter to remove both low and high frequency noise
+        rec_filter = sp.bandpass_filter(recording, freq_min=300, freq_max=6000, dtype=np.float32)
+        fs         = recording.sampling_frequency
+
+        # Get channel indices and coordinates for this shank
+        channel_index, xcoord, ycoord = get_ch_index_on_shank(ishank, device_type)
         impedance_sh = impedance[channel_index]
         channel_ids   = channel_name[channel_index]
 
-        recording = se.read_intan(first_file, stream_id='0')
-        rec_filter = sp.bandpass_filter(recording, freq_min=300, freq_max=6000, dtype=np.float32)
-        fs         = recording.sampling_frequency
-        rec_cr     = sp.common_reference(rec_filter, reference='global', operator='median')
-        trace      = rec_cr.get_traces(channel_ids=channel_ids)
+        # Create groups for each shank
+        all_groups = []
+        for s in range(n_shank):
+            ch_idx, _, _ = get_ch_index_on_shank(s, device_type)
+            all_groups.append(channel_name[ch_idx].tolist())
 
+        # Apply common reference with shank-based groups
+        rec_cr     = sp.common_reference(rec_filter, reference='global', operator='median', groups=all_groups)
+        trace      = rec_cr.get_traces(channel_ids=channel_ids)
         segment_duration   = 3   # seconds per segment
         n_samples_segment  = int(segment_duration * fs)
         screening_duration = 30  # total seconds to screen
@@ -124,8 +133,26 @@ def mannual_bad_ch_id(
 
             check.on_clicked(checkbox_callback)
 
+            # Add a 'Finish' button to exit the loop
+            finish_ax = fig.add_axes([0.85, 0.9, 0.12, 0.05])
+            finish_button = Button(finish_ax, 'Finish')
+            finish_button.label.set_fontsize(10)
+
+            # Flag to check if the loop should be exited
+            exit_loop = {'flag': False}
+
+            def finish_callback(event):
+                print("Exiting screening loop.")
+                exit_loop['flag'] = True
+
+            finish_button.on_clicked(finish_callback)
+
             print(f"Reviewing shank {ishank}, segment {seg_start/fs:.1f}-{seg_end/fs:.1f}s.")
             plt.show()
+
+            # Check if the finish button was clicked
+            if exit_loop['flag']:
+                break
 
             # save figure after closing
             seg_label = f"{int(seg_start/fs)}-{int(seg_end/fs)}s"
@@ -134,13 +161,17 @@ def mannual_bad_ch_id(
             print(f"Saved screening image to: {img_path}")
             plt.close(fig)
 
-            # update bad set
+            # update bad set before breaking
             for cid, is_bad in seg_bad_flags.items():
                 if is_bad:
                     shank_bad.add(cid)
                 else:
                     shank_bad.discard(cid)
 
+            if exit_loop['flag']:
+                break
+
+        # Save bad channels for the current shank
         all_bad_ch_ids.extend(sorted(shank_bad))
         print(f"Shank {ishank} bad channels: {sorted(shank_bad)}")
 
@@ -156,13 +187,13 @@ def mannual_bad_ch_id(
 if __name__ == "__main__":
     # 1) figure out the animal_id from your folder structure:
     rhd_folder = Path(input("Enter full path to RHD folder: ").strip())
-    # e.g. /…/CoI06/250504/CoI06_250504_205955
+    # e.g. /…/250504/CoI06/CoI06_250504_205955
     impedance_path   = input("Please enter the full path to the impedance file: ").strip()
     impedance_file   = Path(impedance_path)
     print("Using impedance file:", impedance_file)
 
     # animal_id might be two levels up:
-    animal_id = rhd_folder.parent.parent.name
+    animal_id = rhd_folder.parent.name
 
     # 2) get (or choose) the device_type
     device_type = get_or_set_device_type(animal_id)
@@ -170,10 +201,10 @@ if __name__ == "__main__":
     # 3) get the number of shanks
     n_shank = int(input("Enter the number of shanks: ").strip())
 
-    # pick first .rhd or .rhs
+    # pick first .rhd or .rhs, exclude macOS system files like ._*
     data_files = sorted(
         p for p in rhd_folder.iterdir()
-        if p.suffix.lower() in ('.rhd', '.rhs')
+        if p.suffix.lower() in ('.rhd', '.rhs') and not p.name.startswith("._")
     )
     if not data_files:
         raise FileNotFoundError("No .rhd or .rhs files found.")
