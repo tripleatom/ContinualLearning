@@ -150,9 +150,12 @@ def mannual_bad_ch_id(
             print(f"Reviewing shank {ishank}, segment {seg_start/fs:.1f}-{seg_end/fs:.1f}s.")
             plt.show()
 
-            # Check if the finish button was clicked
-            if exit_loop['flag']:
-                break
+            # update bad set before checking if we should break
+            for cid, is_bad in seg_bad_flags.items():
+                if is_bad:
+                    shank_bad.add(cid)
+                else:
+                    shank_bad.discard(cid)
 
             # save figure after closing
             seg_label = f"{int(seg_start/fs)}-{int(seg_end/fs)}s"
@@ -161,13 +164,7 @@ def mannual_bad_ch_id(
             print(f"Saved screening image to: {img_path}")
             plt.close(fig)
 
-            # update bad set before breaking
-            for cid, is_bad in seg_bad_flags.items():
-                if is_bad:
-                    shank_bad.add(cid)
-                else:
-                    shank_bad.discard(cid)
-
+            # Check if the finish button was clicked
             if exit_loop['flag']:
                 break
 
@@ -188,11 +185,11 @@ if __name__ == "__main__":
     # 1) figure out the animal_id from your folder structure:
     rhd_folder = Path(input("Enter full path to RHD folder: ").strip())
     # e.g. /…/250504/CoI06/CoI06_250504_205955
-    impedance_path   = input("Please enter the full path to the impedance file: ").strip()
+    impedance_path   = input("Please enter the full path to the impedance file: ").strip().strip('"')
     impedance_file   = Path(impedance_path)
     print("Using impedance file:", impedance_file)
 
-    # animal_id might be two levels up:
+    # animal_id might be two levels up
     animal_id = rhd_folder.parent.name
 
     # 2) get (or choose) the device_type

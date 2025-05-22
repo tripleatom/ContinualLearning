@@ -9,8 +9,8 @@ from rf_func import find_stim_index, moving_average, schmitt_trigger
 from spikeinterface.extractors import PhySortingExtractor
 from rec2nwb.preproc_func import parse_session_info
 
-rec_folder = Path(input("Please enter the full path to the recording folder: ").strip())
-stimdata_file = Path(input("Please enter the full path to the .mat file: ").strip())
+rec_folder = Path(input("Please enter the full path to the recording folder: ").strip().strip('"'))
+stimdata_file = Path(input("Please enter the full path to the .mat file: ").strip().strip('"'))
 
 print(f"Recording folder: {rec_folder}")
 print(f"Stimulus data file: {stimdata_file}")

@@ -114,7 +114,10 @@ def main(rec_folder, threshold=5.5, shanks=[0]):
 if __name__ == "__main__":
     threshold = 5.5
     shanks = [0, 1,2,3]
-    rec_folders = [Path(r"G:\rf\250508\CnL38\CnL38_250508_141119"),
-                   Path(r"G:\rf\250508\CnL38\CnL38_250508_143910") ]
+    rec_folders = [
+                    Path(r"G:\rf\250520\CnL39\CnL39_250520_213646"),
+                    Path(r"G:\rf\250520\CnL39\CnL39_250520_222119"),
+                    Path(r"G:\rf\250520\CnL30\CnL30_250521_105420"),
+                    Path(r"G:\rf\250520\CnL30\CnL30_250521_114006"),]
     for rec_folder in rec_folders:
         main(threshold=threshold, rec_folder=rec_folder, shanks=shanks)

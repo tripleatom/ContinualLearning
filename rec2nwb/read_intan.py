@@ -246,8 +246,8 @@ def load_bad_ch(bad_file: Path) -> list:
 
 if __name__ == "__main__":
     # Inputs
-    rhd_folder = Path(input("Please enter the full path to the RHD folder: ").strip())
-    impedance_file = Path(input("Please enter the full path to the impedance file: ").strip())
+    rhd_folder = Path(input("Please enter the full path to the RHD folder: ").strip().strip("'").strip('"'))
+    impedance_file = Path(input("Please enter the full path to the impedance file: ").strip().strip("'").strip('"'))
     electrode_location = input("Please enter the electrode location: ").strip()
     exp_desc = input("Please enter the experiment description: ").strip() or "None"
     animal_id = rhd_folder.parent.name

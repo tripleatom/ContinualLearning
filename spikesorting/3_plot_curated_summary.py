@@ -16,7 +16,7 @@ BASE_FOLDER = r"\\10.129.151.108\xieluanlabs\xl_spinal_cord_electrode\CoI"
 DATES = ['250505']
 # ANIMAL_IDS = ['CoI06', 'CoI07', 'CoI08', 'CoI09', 'CoI10']
 ANIMAL_IDS = ['CoI08both']
-ISHS = ['0', '1']
+ISHS = ['1', ]
 SORTOUT_FOLDER = Path(__file__).parents[1] / 'sortout'
 overwrite = False
 

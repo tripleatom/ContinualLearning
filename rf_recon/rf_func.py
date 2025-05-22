@@ -2,6 +2,14 @@ import numpy as np
 import h5py
 import matplotlib.pyplot as plt
 
+def sig_label(p):
+    if p<=0.0001: return '****'
+    if p<=0.001:  return '***'
+    if p<=0.01:   return '**'
+    if p<=0.05:   return '*'
+    return 'n.s.'
+
+
 def dereference(item, f):
     """Recursively dereference an h5py item."""
     if isinstance(item, h5py.Reference):
