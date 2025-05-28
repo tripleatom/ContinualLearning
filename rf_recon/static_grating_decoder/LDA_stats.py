@@ -16,7 +16,7 @@ def create_sphere_mesh(center, radius, resolution=30):
     return x, y, z
 
 # — PARAMETERS —
-npz_file   = Path(r'\\10.129.151.108\xieluanlabs\xl_cl\code\sortout\CnL39\250520_222119\static_grating_responses.npz')
+npz_file   = Path(r'\\10.129.151.108\xieluanlabs\xl_cl\code\sortout\CnL30\250521_114006\static_grating_responses.npz')
 animal_id = npz_file.parent.parent.name
 session_id = npz_file.parent.name
 

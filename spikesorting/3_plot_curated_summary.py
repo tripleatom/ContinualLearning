@@ -12,11 +12,12 @@ import spikeinterface.widgets as sw
 from rec2nwb.preproc_func import parse_session_info
 
 # Constants
-BASE_FOLDER = r"\\10.129.151.108\xieluanlabs\xl_spinal_cord_electrode\CoI"
-DATES = ['250505']
+# BASE_FOLDER = r"\\10.129.151.108\xieluanlabs\xl_spinal_cord_electrode\CoI"
+BASE_FOLDER = r"G:\rf"
+DATES = ['250520']
 # ANIMAL_IDS = ['CoI06', 'CoI07', 'CoI08', 'CoI09', 'CoI10']
-ANIMAL_IDS = ['CoI08both']
-ISHS = ['1', ]
+ANIMAL_IDS = ['CnL38']
+ISHS = ['0', '1', '2', '3', '4']
 SORTOUT_FOLDER = Path(__file__).parents[1] / 'sortout'
 overwrite = False
 

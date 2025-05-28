@@ -31,21 +31,7 @@ digInFreq = (data.decode('utf-8') if isinstance(data, bytes) else data)[0][0]
 
 animal_id, session_id, folder_name = parse_session_info(rec_folder)
 ishs = ['0', '1', '2', '3']
-# ishs = ['0']
 
-# get stim data from mat file
-# mat_data = scipy.io.loadmat(
-#     Stimdata_file, struct_as_record=False, squeeze_me=True)
-# stimdata = mat_data['Stimdata']
-# black_on = stimdata.black_on
-# black_off = stimdata.black_off
-# white_on = stimdata.white_on
-# white_off = stimdata.white_off
-
-# n_col = stimdata.n_col
-# n_row = stimdata.n_row
-# n_trial = stimdata.n_trial  # trials for each color
-# t_trial = stimdata.t_trial  # time for each trial, s
 
 with h5py.File(stimdata_file, 'r') as f:
     # Access the dataset for 'Stimdata'
@@ -61,16 +47,19 @@ with h5py.File(stimdata_file, 'r') as f:
     n_col = stimdata['n_col'][0][0].astype(int)
     n_row = stimdata['n_row'][0][0].astype(int)
     t_trial = stimdata['t_trial'][0][0]
-    n_trial = stimdata['n_trial'][0][0]
+    n_trial = stimdata['n_trial'][0][0].astype(int)
     white_order = stimdata['white_order'][:].astype(int)
     black_order = stimdata['black_order'][:].astype(int)
 
 n_rising_edges = len(rising_edges)
-# n_rising_edges = 8960
-n_trial = (n_rising_edges//(n_col * n_row)//2).astype(int)
+print('Number of rising edges: ', n_rising_edges)
+# n_trial = (n_rising_edges//(n_col * n_row)//2).astype(int)
 print('repeats: ', n_trial)
 
-rising_edges = rising_edges[:int(n_rising_edges)]
+# only get the rising edges for rf mapping
+n_stimuli = n_col * n_row * 2 * n_trial # each trial has n_col * n_row black and white dots
+print('Number of stimuli: ', n_stimuli)
+rising_edges = rising_edges[:int(n_stimuli)]  # only keep the rising edges for the trials
 
 n_dots = n_col * n_row
 dot_time = t_trial

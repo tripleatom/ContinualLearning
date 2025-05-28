@@ -183,9 +183,9 @@ def mannual_bad_ch_id(
 
 if __name__ == "__main__":
     # 1) figure out the animal_id from your folder structure:
-    rhd_folder = Path(input("Enter full path to RHD folder: ").strip())
+    rhd_folder = Path(input("Enter full path to RHD folder: ").strip().strip('"').strip("'"))
     # e.g. /…/250504/CoI06/CoI06_250504_205955
-    impedance_path   = input("Please enter the full path to the impedance file: ").strip().strip('"')
+    impedance_path   = input("Please enter the full path to the impedance file: ").strip().strip('"').strip("'")
     impedance_file   = Path(impedance_path)
     print("Using impedance file:", impedance_file)
 

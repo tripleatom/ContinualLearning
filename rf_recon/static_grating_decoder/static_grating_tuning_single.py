@@ -8,6 +8,9 @@ from rec2nwb.preproc_func import parse_session_info
 import scipy
 import os
 
+# Add z-noise threshold
+z_noise_threshold = 0.5  # Adjust this value as needed
+
 rec_folder = Path(input("Please enter the full path to the recording folder: ").strip().strip('"').strip("'"))
 stimdata_file = Path(input("Please enter the full path to the .mat file: ").strip().strip('"').strip("'"))
 
@@ -117,11 +120,21 @@ for ish in ishs:
                 mask = (stim_orientation == ori)
                 idxs = np.where(mask)[0]
                 response_array[i_ori, :] = responses[idxs]
-            
+                        
             # Calculate mean response and standard error for each orientation
             mean_response = np.mean(response_array, axis=1)
-            sem_response = np.std(response_array, axis=1) / np.sqrt(n_repeats)  # Standard Error of the Mean
-            
+            sem_response = np.std(response_array, axis=1) / np.sqrt(n_repeats)
+
+            # Z-score mean and SEM
+            mean_response_z = (mean_response - np.mean(mean_response)) / np.std(mean_response)
+            z_sem = sem_response / np.std(mean_response)
+            z_noise = np.mean(z_sem)  # average SEM in z-space
+
+            # Skip units with high z-noise
+            # if z_noise >= z_noise_threshold:
+            #     print(f"Skipping unit {unit_id} due to high z-noise: {z_noise:.2f}")
+            #     continue
+
             # Calculate gOSI (global OSI)
             R_theta = mean_response
             theta_radians = np.deg2rad(unique_orientation)
@@ -133,42 +146,34 @@ for ish in ishs:
             pref_ori_index = np.argmax(mean_response)
             pref_ori_deg = unique_orientation[pref_ori_index]
             
-            # Plot the tuning curve for each unit
+            # Plot the tuning curve
             fig, ax = plt.subplots(figsize=(10, 6))
-            ax.errorbar(unique_orientation, mean_response, yerr=sem_response,
-                       marker='o', linestyle='-', color='blue',
-                       capsize=5, capthick=1, elinewidth=1)
-            ax.set_xlabel('Orientation (degrees)', fontsize=12)
-            ax.set_ylabel('Mean Response (Hz)', fontsize=12)
-            ax.set_title(f"Unit {unit_id}: {quality}", fontsize=14)
-            ax.tick_params(labelsize=10)
-            ax.grid(True)
+            ax.errorbar(unique_orientation, mean_response_z, yerr=z_sem,
+                        marker='o', linestyle='-', color='royalblue',
+                        capsize=4, capthick=1, elinewidth=1.2, linewidth=2)
 
-            # Place annotation inside the plot area
-            text_str = f"gOSI: {gOSI:.2f}\nPreferred Angle: {pref_ori_deg:.1f}°"
-            ax.text(
-                0.02, 0.98, text_str,
-                transform=ax.transAxes,
-                fontsize=11,
-                va='top', ha='left',
-                bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.7)
-            )
+            ax.set_xlabel('Orientation (°)', fontsize=13)
+            ax.set_ylabel('Z-scored Firing Rate', fontsize=13)
+            ax.set_title(f"Unit {unit_id} ({quality}) | gOSI: {gOSI:.2f} | Pref: {pref_ori_deg:.1f}° | z-noise: {z_noise:.2f}", fontsize=14)
+            ax.tick_params(labelsize=11)
+            ax.set_xticks(unique_orientation)
+            ax.grid(True, linestyle='--', alpha=0.6)
 
-            # Tighten layout with custom margins
-            plt.subplots_adjust(left=0.10, right=0.98, top=0.92, bottom=0.10)
-
+            # Tight layout and save
+            plt.subplots_adjust(left=0.12, right=0.98, top=0.90, bottom=0.12)
             out_file = out_fig_folder / f'unit_{unit_id}_tuning_curve.png'
             plt.savefig(out_file, dpi=300, bbox_inches='tight')
             plt.close(fig)
             print(f"Saved tuning curve for unit {unit_id} to {out_file}")
-            
+
             # Save unit indices and metrics in the current shank's info dictionary
             unit_info_dict[str(unit_id)] = {
                 'mean_response': mean_response.tolist(),
                 'unique_orientation': unique_orientation.tolist(),
                 'gOSI': float(gOSI),
                 'pref_ori_index': int(pref_ori_index),
-                'pref_ori_deg': float(pref_ori_deg)
+                'pref_ori_deg': float(pref_ori_deg),
+                'z_noise': float(f"{z_noise:.2f}")  # Format to 2 decimal places
             }
     
     # After processing all sorting result folders for this shank, store its unit info

@@ -25,6 +25,9 @@ def main(rec_folder, threshold=5.5, shanks=[0]):
     for shank in shanks:
         # Construct paths for NWB file and output folder
         nwb_folder = rec_folder / f"{folder_name}sh{shank}.nwb"
+        if not nwb_folder.exists():
+            print(f"NWB file not found: {nwb_folder}")
+            continue
         out_folder = Path("sortout") / animal_id / session_id / str(shank)
         out_folder.mkdir(parents=True, exist_ok=True)
 
@@ -112,12 +115,12 @@ def main(rec_folder, threshold=5.5, shanks=[0]):
 
 
 if __name__ == "__main__":
-    threshold = 5.5
+    threshold = 4.5
     shanks = [0, 1,2,3]
     rec_folders = [
-                    Path(r"G:\rf\250520\CnL39\CnL39_250520_213646"),
-                    Path(r"G:\rf\250520\CnL39\CnL39_250520_222119"),
-                    Path(r"G:\rf\250520\CnL30\CnL30_250521_105420"),
-                    Path(r"G:\rf\250520\CnL30\CnL30_250521_114006"),]
+        Path(r"G:\rf\250527\CnL40\CnL40_250527_211716"),
+        Path(r"G:\rf\250527\CnL38\CnL38_250528_131637"),
+        Path(r"G:\rf\250527\CnL39\CnL39_250528_115442"),
+    ]
     for rec_folder in rec_folders:
         main(threshold=threshold, rec_folder=rec_folder, shanks=shanks)
