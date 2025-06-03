@@ -9,7 +9,7 @@ import pandas as pd
 
 def simulate_grating_lda(n_neurons=40, noise_std=1.0, n_trials_per_angle=750, plot_confusion=True):
     # --- Fixed parameters ---
-    angles = np.arange(0, 180 - 1e-3, 22.5)  # 0 to 180, step 22.5 -> 9 angles
+    angles = np.arange(0, 180 - 1e-3, 22.5)  # 0 to 180, step 22.5 -> 8 angles
     tuning_width = 40  # std of the Gaussian tuning
     np.random.seed(0)  # for reproducibility
 

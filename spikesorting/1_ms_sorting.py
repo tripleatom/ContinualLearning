@@ -62,7 +62,7 @@ def main(rec_folder, threshold=5.5, shanks=[0]):
         timer = Timer("ms5")
         print("Starting ms5 sorting...")
         sorting_params = ms5.Scheme1SortingParameters(
-            detect_sign=0,
+            detect_sign=0, # 0 for all, 1 for positive, -1 for negative
             detect_time_radius_msec=detect_time_radius_msec,
             detect_threshold=threshold,
             npca_per_channel=npca_per_channel,
@@ -115,12 +115,10 @@ def main(rec_folder, threshold=5.5, shanks=[0]):
 
 
 if __name__ == "__main__":
-    threshold = 4.5
-    shanks = [0, 1,2,3]
+    threshold = 3.5
+    shanks = [0,1,2,3]
     rec_folders = [
-        Path(r"G:\rf\250527\CnL40\CnL40_250527_211716"),
-        Path(r"G:\rf\250527\CnL38\CnL38_250528_131637"),
-        Path(r"G:\rf\250527\CnL39\CnL39_250528_115442"),
+        Path(r"\\10.129.151.108\xieluanlabs\xl_cl\rf_reconstruction\head_fixed\250520\CnL22\CnL22_250523_142619"),
     ]
     for rec_folder in rec_folders:
         main(threshold=threshold, rec_folder=rec_folder, shanks=shanks)

@@ -103,5 +103,5 @@ def visualize_lda_decoding_with_spheres(npz_file, cv_folds=5, random_state=42):
     return scores
 
 if __name__=='__main__':
-    npz = r'\\10.129.151.108\xieluanlabs\xl_cl\code\sortout\CnL30\250521_114006\static_grating_responses.npz'
+    npz = r'\\10.129.151.108\xieluanlabs\xl_cl\code\sortout\CnL22\250531_204108\static_grating_responses.npz'
     visualize_lda_decoding_with_spheres(npz)

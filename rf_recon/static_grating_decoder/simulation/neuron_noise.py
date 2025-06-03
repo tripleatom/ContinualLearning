@@ -4,8 +4,8 @@ from grating_lda import simulate_grating_lda
 
 
 # Sweep over neuron numbers and noise std values
-neuron_range = np.arange(10, 201, 10)
-noise_range = np.logspace(np.log10(0.1), np.log10(3.0), 20)
+neuron_range = np.arange(20, 121, 20)
+noise_range = np.logspace(np.log10(0.1), np.log10(3), 20)
 
 # Store accuracy values
 accuracy_matrix = np.zeros((len(neuron_range), len(noise_range)))
