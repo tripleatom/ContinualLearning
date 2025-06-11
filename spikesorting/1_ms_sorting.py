@@ -28,7 +28,7 @@ def main(rec_folder, threshold=5.5, shanks=[0]):
         if not nwb_folder.exists():
             print(f"NWB file not found: {nwb_folder}")
             continue
-        out_folder = Path("sortout") / animal_id / session_id / str(shank)
+        out_folder = Path("sortout") / animal_id / f"{animal_id}_{session_id}" / f"shank{shank}"
         out_folder.mkdir(parents=True, exist_ok=True)
 
         # Load recording from NWB file
@@ -115,10 +115,10 @@ def main(rec_folder, threshold=5.5, shanks=[0]):
 
 
 if __name__ == "__main__":
-    threshold = 3.5
+    threshold = 5.5
     shanks = [0,1,2,3]
     rec_folders = [
-        Path(r"\\10.129.151.108\xieluanlabs\xl_cl\rf_reconstruction\head_fixed\250520\CnL22\CnL22_250523_142619"),
+        Path(r"G:\rf\250527\CnL22\CnL22_250531_204108"),
     ]
     for rec_folder in rec_folders:
         main(threshold=threshold, rec_folder=rec_folder, shanks=shanks)
