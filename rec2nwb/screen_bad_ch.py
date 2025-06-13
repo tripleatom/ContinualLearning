@@ -8,6 +8,7 @@ from spikeinterface import extractors as se
 import os
 import shutil
 import re
+import json
 from rec2nwb.preproc_func import get_or_set_device_type
 
 
@@ -64,16 +65,57 @@ class BadChannelScreener:
         if self.recording_method != 'spikegadget':
             return
             
-        mda_folder = data_file.parent
+        # For .rec files, the parent directory is where we need the files
+        rec_folder = data_file.parent
         script_dir = Path(__file__).resolve().parent
         params_path = script_dir / "params.json"
         geom_path = script_dir / "geom.csv"
         
         if params_path.exists() and geom_path.exists():
-            shutil.copy2(params_path, mda_folder)
-            shutil.copy2(geom_path, mda_folder)
+            shutil.copy2(params_path, rec_folder)
+            shutil.copy2(geom_path, rec_folder)
         else:
             print("Warning: params.json or geom.csv not found. SpikeGadgets reading may fail.")
+
+    def _get_spikegadget_parts(self, base_rec_file: Path) -> list:
+        """
+        Get all parts of a SpikeGadgets recording.
+        
+        Args:
+            base_rec_file: The base .rec file (could be part1 or any part)
+            
+        Returns:
+            List of .rec files in order (part1, part2, part3, etc.)
+        """
+        rec_folder = base_rec_file.parent
+        base_name = base_rec_file.stem
+        
+        # Remove any existing part number from the base name
+        base_name_clean = re.sub(r'\.part\d+$', '', base_name)
+        
+        # Find all parts
+        rec_parts = []
+        
+        # Look for the file without part number (this is part 1)
+        part1_file = rec_folder / f"{base_name_clean}.rec"
+        if part1_file.exists():
+            rec_parts.append(part1_file)
+        
+        # Look for numbered parts (part2, part3, etc.)
+        part_num = 2
+        while True:
+            part_file = rec_folder / f"{base_name_clean}.part{part_num}.rec"
+            if part_file.exists():
+                rec_parts.append(part_file)
+                part_num += 1
+            else:
+                break
+        
+        if not rec_parts:
+            # If no parts found, return the original file
+            rec_parts = [base_rec_file]
+        
+        return sorted(rec_parts)
 
     def _read_recording(self, data_file: Path):
         """Read recording data based on recording method."""
@@ -81,12 +123,8 @@ class BadChannelScreener:
             recording = se.read_intan(data_file, stream_id='0')
         else:  # spikegadget
             self._setup_spikegadget_files(data_file)
-            mda_folder = data_file.parent
-            mda_file = data_file.name
-            # Use lazy loading for large files
-            recording = se.read_mda_recording(mda_folder, mda_file, 
-                                            params_fname="params.json",
-                                            geom_fname="geom.csv")
+            # For SpikeGadgets, read the recording directly
+            recording = se.read_spikegadgets(data_file)
         return recording
 
     def _get_channel_info(self, ishank: int, device_type: str, impedance_path: Path = None, recording=None):
@@ -110,19 +148,24 @@ class BadChannelScreener:
                 all_channel_ids = recording.get_channel_ids()
                 if self.recording_method == 'intan':
                     # For Intan, use the channel names from recording
-                    channel_ids = np.array([all_channel_ids[i] for i in channel_index])
+                    channel_ids = np.array([all_channel_ids[i] for i in channel_index if i < len(all_channel_ids)])
                 else:
-                    # For SpikeGadgets, channel IDs are typically integers, use them directly
-                    channel_ids = channel_index
+                    # For SpikeGadgets, map electrode indices to actual channel IDs
+                    channel_ids = []
+                    available_channel_ids = [str(ch_id) for ch_id in all_channel_ids]
+                    for ch_idx in channel_index:
+                        if str(ch_idx) in available_channel_ids:
+                            channel_ids.append(str(ch_idx))
+                    channel_ids = np.array(channel_ids)
             else:
                 # Fallback to default names
                 if self.recording_method == 'intan':
                     channel_ids = np.array([f"ch{i}" for i in channel_index])
                 else:
-                    channel_ids = channel_index
-            impedance_sh = np.full(len(channel_index), np.nan)
+                    channel_ids = np.array([str(i) for i in channel_index])
+            impedance_sh = np.full(len(channel_ids), np.nan)
         
-        return channel_index, channel_ids, impedance_sh, xcoord, ycoord
+        return channel_index[:len(channel_ids)], channel_ids, impedance_sh, xcoord[:len(channel_ids)], ycoord[:len(channel_ids)]
 
     def _get_all_channel_groups(self, n_shank: int, device_type: str, impedance_path: Path = None, recording=None):
         """Get all channel groups for common reference."""
@@ -132,7 +175,8 @@ class BadChannelScreener:
             if self.recording_method == 'intan':
                 all_groups.append(ch_ids.tolist())
             else:
-                all_groups.append(ch_idx.tolist())
+                # For SpikeGadgets, use the string channel IDs
+                all_groups.append(ch_ids.tolist())
         return all_groups
 
     def get_data_files(self, data_folder: Path) -> list:
@@ -143,12 +187,33 @@ class BadChannelScreener:
                 p for p in data_folder.iterdir()
                 if p.suffix.lower() in ('.rhd', '.rhs') and not p.name.startswith("._"))
         else:  # spikegadget
-            folders = sorted(data_folder.glob('*.mountainsort'),
-                           key=lambda x: x.stat().st_mtime)
-            data_files = [x for folder in folders for x in folder.glob('*group0.mda')]
+            # Find all .rec files in the folder
+            rec_files = list(data_folder.glob('*.rec'))
+            
+            if not rec_files:
+                raise FileNotFoundError("No .rec files found in the specified folder.")
+            
+            # Group files by their base name (without part numbers)
+            file_groups = {}
+            for rec_file in rec_files:
+                # Remove .part# from the filename to get the base name
+                base_name = re.sub(r'\.part\d+$', '', rec_file.stem)
+                if base_name not in file_groups:
+                    file_groups[base_name] = []
+                file_groups[base_name].append(rec_file)
+            
+            # For each group, get all parts in order
+            all_data_files = []
+            for base_name, files in file_groups.items():
+                # Get the first file as reference to find all parts
+                ref_file = files[0]
+                parts = self._get_spikegadget_parts(ref_file)
+                all_data_files.extend(parts)
+            
+            data_files = all_data_files
         
         if not data_files:
-            file_types = ".rhd/.rhs" if self.recording_method == 'intan' else "group0.mda"
+            file_types = ".rhd/.rhs" if self.recording_method == 'intan' else ".rec"
             raise FileNotFoundError(f"No {file_types} files found in the specified folder.")
         
         return data_files
@@ -156,13 +221,8 @@ class BadChannelScreener:
     def get_session_description(self, data_folder: Path) -> str:
         """Extract session description from folder path."""
         if self.recording_method == 'spikegadget':
-            # For SpikeGadgets: extract from .rec folder
-            folder_str = str(data_folder)
-            pattern = r'[\\\/]([^\\\/]+)\.rec$'
-            match = re.search(pattern, folder_str)
-            if match:
-                return match.group(1)
-            return data_folder.stem
+            # For SpikeGadgets: use folder name directly
+            return data_folder.name
         else:
             # For Intan: use folder name
             return data_folder.name
@@ -226,14 +286,19 @@ class BadChannelScreener:
             channel_index, channel_ids, impedance_sh, xcoord, ycoord = self._get_channel_info(
                 ishank, device_type, impedance_path, recording)
 
+            if len(channel_ids) == 0:
+                print(f"Warning: No valid channels found for shank {ishank}. Skipping.")
+                continue
+
             # Get traces for this shank
             print(f"Loading traces for shank {ishank}...")
             if self.recording_method == 'intan':
                 trace = rec_cr.get_traces(channel_ids=channel_ids.tolist())
                 display_ids = channel_ids
             else:
-                trace = rec_cr.get_traces(channel_ids=channel_index.tolist())
-                display_ids = [f"ch{i}" for i in channel_index]
+                # For SpikeGadgets, channel_ids are already strings
+                trace = rec_cr.get_traces(channel_ids=channel_ids.tolist())
+                display_ids = [f"ch{ch_id}" for ch_id in channel_ids]
 
             # Sort traces by depth (y-coordinate) - shallow channels first (0μm at top)
             depth_order = np.argsort(ycoord)  # Sort ascending: 0μm, 25μm, 50μm, etc.
@@ -244,6 +309,7 @@ class BadChannelScreener:
             impedance_sh_sorted = impedance_sh[depth_order]
             ycoord_sorted = ycoord[depth_order]
             xcoord_sorted = xcoord[depth_order]
+            channel_ids_sorted = channel_ids[depth_order]
 
             print(f"Trace shape: {trace.shape}")
             print(f"Depth range: {ycoord_sorted.min():.1f} to {ycoord_sorted.max():.1f} μm (shallow to deep)")
@@ -299,9 +365,11 @@ class BadChannelScreener:
                 for spine in ax_anno.spines.values():
                     spine.set_visible(False)
 
-                seg_bad_flags = {str(cid): (str(cid) in shank_bad) for cid in display_ids}
-                visibility = [seg_bad_flags[str(cid)] for cid in display_ids]
-                check = CheckButtons(rax, [str(cid) for cid in display_ids], visibility)
+                # Use the actual channel IDs for checkbox labels (for saving to bad_channels.txt)
+                checkbox_labels = [str(channel_ids_sorted[i]) for i in range(len(display_ids))]
+                seg_bad_flags = {label: (label in shank_bad) for label in checkbox_labels}
+                visibility = [seg_bad_flags[label] for label in checkbox_labels]
+                check = CheckButtons(rax, checkbox_labels, visibility)
 
                 def checkbox_callback(label):
                     seg_bad_flags[label] = not seg_bad_flags[label]
@@ -374,7 +442,7 @@ def main():
         folder_prompt = "Enter full path to Intan data folder: "
     elif choice == '2':
         recording_method = 'spikegadget'
-        folder_prompt = "Enter full path to .rec folder: "
+        folder_prompt = "Enter full path to folder containing .rec files: "
     else:
         print("Invalid choice. Exiting.")
         return

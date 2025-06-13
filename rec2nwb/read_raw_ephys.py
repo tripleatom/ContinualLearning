@@ -13,6 +13,7 @@ from hdmf.backends.hdf5.h5_utils import H5DataIO
 from rec2nwb.preproc_func import get_or_set_device_type
 import os
 import shutil
+import json
 
 
 class EphysToNWBConverter:
@@ -86,16 +87,85 @@ class EphysToNWBConverter:
         if self.recording_method != 'spikegadget':
             return
             
-        mda_folder = data_file.parent
+        # For .rec files, the parent directory is where we need the files
+        rec_folder = data_file.parent
         script_dir = Path(__file__).resolve().parent
         params_path = script_dir / "params.json"
-        geom_path = script_dir / "geom.csv"
-        shutil.copy2(params_path, mda_folder)
-        shutil.copy2(geom_path, mda_folder)
+        # geom_path = script_dir / "geom.csv"
+        shutil.copy2(params_path, rec_folder)
+        # shutil.copy2(geom_path, rec_folder)
 
-    def _read_recording(self, data_file: Path, channel_ids: list = None):
-        """Read recording data based on recording method."""
-        if self.recording_method == 'intan':
+    def _get_sampling_rate(self, data_file: Path) -> float:
+        """
+        Get sampling rate based on recording method.
+        For SpikeGadgets, read from params.json. For Intan, use recording's rate.
+        """
+        if self.recording_method == 'spikegadget':
+            # Read sampling rate from params.json in the script directory
+            script_dir = Path(__file__).resolve().parent
+            params_file = script_dir / "params.json"
+            
+            if params_file.exists():
+                with open(params_file, 'r') as f:
+                    params = json.load(f)
+                return float(params.get("samplerate", 30000))  # Default to 30000 if not found
+            else:
+                print(f"Warning: params.json not found in {script_dir}, using default rate 30000")
+                return 30000.0
+        else:
+            # For Intan, we'll get it from the recording object later
+            return None
+
+    def _get_spikegadget_parts(self, base_rec_file: Path) -> list:
+
+        """
+        Get all parts of a SpikeGadgets recording.
+        
+        Args:
+            base_rec_file: The base .rec file (could be part1 or any part)
+            
+        Returns:
+            List of .rec files in order (part1, part2, part3, etc.)
+        """
+        rec_folder = base_rec_file.parent
+        base_name = base_rec_file.stem
+        
+        # Remove any existing part number from the base name
+        base_name_clean = re.sub(r'\.part\d+$', '', base_name)
+        
+        # Find all parts
+        rec_parts = []
+        
+        # Look for the file without part number (this is part 1)
+        part1_file = rec_folder / f"{base_name_clean}.rec"
+        if part1_file.exists():
+            rec_parts.append(part1_file)
+        
+        # Look for numbered parts (part2, part3, etc.)
+        part_num = 2
+        while True:
+            part_file = rec_folder / f"{base_name_clean}.part{part_num}.rec"
+            if part_file.exists():
+                rec_parts.append(part_file)
+                part_num += 1
+            else:
+                break
+        
+        if not rec_parts:
+            # If no parts found, return the original file
+            rec_parts = [base_rec_file]
+        
+        return sorted(rec_parts)
+
+    def _read_recording(self, data_file: Path, channel_ids: list = None, return_trace: bool = True):
+        """Read recording data based on recording method.
+        If return_trace is False, only return the recording object and sampling rate
+        """
+        trace = None
+        conversion = None
+        offset = None
+        sampling_rate = None
+        if self.recording_method == 'intan' and return_trace:
             recording = se.read_intan(data_file, stream_id='0')
             if channel_ids:
                 trace = recording.get_traces(channel_ids=channel_ids)
@@ -103,21 +173,30 @@ class EphysToNWBConverter:
                 trace = recording.get_traces()
             conversion = recording.get_channel_gains()[0] / 1e6  # convert uV to V
             offset = recording.get_channel_offsets()[0] / 1e6
-        else:  # spikegadget
+            sampling_rate = recording.get_sampling_frequency()
+        elif self.recording_method == 'intan' and not return_trace:
+            recording = se.read_intan(data_file, stream_id='0')
+            sampling_rate = recording.get_sampling_frequency()
+        elif self.recording_method == 'spikegadget' and return_trace:
             self._setup_spikegadget_files(data_file)
-            mda_folder = data_file.parent
-            mda_file = data_file.name
-            recording = se.read_mda_recording(mda_folder, mda_file, 
-                                            params_fname="params.json",
-                                            geom_fname="geom.csv")
+            # For SpikeGadgets, read the recording directly
+            recording = se.read_spikegadgets(data_file)
             if channel_ids:
-                trace = recording.get_traces(channel_ids=channel_ids)
+                # Convert channel_ids to strings since SpikeGadgets uses string IDs
+                channel_ids_str = [str(ch_id) for ch_id in channel_ids]
+                trace = recording.get_traces(channel_ids=channel_ids_str)
             else:
                 trace = recording.get_traces()
             conversion = 0.195 / 1e6  # Convert to V
             offset = 0.0 / 1e6
-            
-        return recording, trace, conversion, offset
+            # Get sampling rate from params.json instead of recording
+            sampling_rate = self._get_sampling_rate(data_file)
+        elif self.recording_method == 'spikegadget' and not return_trace:
+            recording = se.read_spikegadgets(data_file)
+            sampling_rate = self._get_sampling_rate(data_file)
+        else:
+            raise ValueError("Invalid recording method or return_trace flag")
+        return recording, trace, conversion, offset, sampling_rate
 
     def initiate_nwb(self, data_file: Path, nwb_path: Path, ishank: int = 0,
                      impedance_path: str = None, bad_ch_ids: list = None,
@@ -176,7 +255,7 @@ class EphysToNWBConverter:
             channel_name_sh = channel_name[channel_index]
         else:
             # Create default channel names and impedances
-            channel_name_sh = [f"ch{i}" for i in channel_index]
+            channel_name_sh = [f"{i}" for i in channel_index] #SpikeGadgets uses string channel names
             impedance_sh = [np.nan] * len(channel_index)
 
         # Create electrode DataFrame
@@ -212,24 +291,50 @@ class EphysToNWBConverter:
 
         # Read recording data
         print("Adding electrical data...")
-        if impedance_path is not None:
-            # If we have impedance file, we already loaded the recording above
-            recording, trace, conversion, offset = self._read_recording(data_file, electrode_df['channel_name'].tolist())
-            good_channel_ids = electrode_df['channel_name'].tolist()
-        else:
-            # If no impedance file, we need to reload with proper channel selection
-            if self.recording_method == 'intan':
+        
+        # First read the recording to get available channel IDs
+        recording, _, _, _, sampling_rate = self._read_recording(data_file, None, return_trace=False)
+        
+        if self.recording_method == 'spikegadget':
+            # Get the actual channel IDs from the recording
+            actual_channel_ids = recording.get_channel_ids()
+            # print(f"Available channel IDs: {actual_channel_ids[:10]}...")  # Show first 10
+            
+            # Map electrode indices to actual channel IDs
+            electrode_to_channel_map = {}
+            good_channel_ids_for_recording = []
+            
+            for idx, row in electrode_df.iterrows():
+                ch_index = row['channel_index']
+                if str(ch_index) in actual_channel_ids:
+                    electrode_to_channel_map[ch_index] = str(ch_index)
+                    good_channel_ids_for_recording.append(str(ch_index))
+                else:
+                    print(f"Warning: Channel index {ch_index} not found in recording")
+            
+            # Get traces with the mapped channel IDs
+            recording, trace, conversion, offset, sampling_rate = self._read_recording(data_file, good_channel_ids_for_recording)
+            good_channel_ids = [int(ch_id) for ch_id in good_channel_ids_for_recording]  # Keep as integers for consistency
+            
+        else:  # intan
+            if impedance_path is not None:
                 good_channel_ids = electrode_df['channel_name'].tolist()
             else:
-                good_channel_ids = electrode_df['channel_index'].tolist()
-            recording, trace, conversion, offset = self._read_recording(data_file, good_channel_ids)
+                good_channel_ids = electrode_df['channel_name'].tolist()
+            recording, trace, conversion, offset, sampling_rate = self._read_recording(data_file, good_channel_ids)
+
+        # Use the appropriate sampling rate
+        if self.recording_method == 'intan':
+            rate = recording.get_sampling_frequency()
+        else:
+            rate = sampling_rate
 
         electrical_series = ElectricalSeries(
             name="ElectricalSeries",
             data=H5DataIO(data=trace, maxshape=(None, trace.shape[1])),
             electrodes=electrode_table_region,
-            starting_time=0.0,
-            rate=recording.get_sampling_frequency(),
+            starting_time=0.0, #FIXME: starting_time could be the real starting time of the recording
+            rate=rate,
             conversion=conversion,
             offset=offset,
         )
@@ -273,7 +378,14 @@ class EphysToNWBConverter:
         metadata = metadata or {}
         with NWBHDF5IO(nwb_path, "a") as io:
             nwb_obj = io.read()
-            _, trace, _, _ = self._read_recording(data_file, channel_ids)
+            
+            if self.recording_method == 'spikegadget':
+                # Convert channel_ids to strings for SpikeGadgets
+                channel_ids_str = [str(ch_id) for ch_id in channel_ids] if channel_ids else None
+                _, trace, _, _, _ = self._read_recording(data_file, channel_ids_str)
+            else:
+                _, trace, _, _, _ = self._read_recording(data_file, channel_ids)
+                
             self._append_nwb_dset(
                 nwb_obj.acquisition['ElectricalSeries'].data, trace, 0)
             io.write(nwb_obj)
@@ -286,12 +398,20 @@ class EphysToNWBConverter:
                 p for p in data_folder.iterdir()
                 if p.suffix.lower() in ('.rhd', '.rhs') and not p.name.startswith("._"))
         else:  # spikegadget
-            folders = sorted(data_folder.glob('*.mountainsort'),
-                           key=lambda x: x.stat().st_mtime)
-            data_files = [x for folder in folders for x in folder.glob('*group0.mda')]
+            # Find all .rec files in the folder
+            rec_files = list(data_folder.glob('*.rec'))
+            
+            if not rec_files:
+                raise FileNotFoundError("No .rec files found in the specified folder.")
+
+            def part_key(f:Path):
+                m = re.search(r"\.part(\d+)\.rec$", f.name)
+                return (1, int(m.group(1))) if m else (0, 0)
+            
+            data_files = sorted(rec_files, key=part_key)
         
         if not data_files:
-            file_types = ".rhd/.rhs" if self.recording_method == 'intan' else "group0.mda"
+            file_types = ".rhd/.rhs" if self.recording_method == 'intan' else ".rec"
             raise FileNotFoundError(f"No {file_types} files found in the specified folder.")
         
         return data_files
@@ -299,13 +419,8 @@ class EphysToNWBConverter:
     def get_session_description(self, data_folder: Path) -> str:
         """Extract session description from folder path."""
         if self.recording_method == 'spikegadget':
-            # For SpikeGadgets: extract from .rec folder
-            folder_str = str(data_folder)
-            pattern = r'[\\\/]([^\\\/]+)\.rec$'
-            match = re.search(pattern, folder_str)
-            if match:
-                return match.group(1)
-            return data_folder.stem
+            # For SpikeGadgets: use folder name directly
+            return data_folder.name
         else:
             # For Intan: use folder name
             return data_folder.name
@@ -336,7 +451,7 @@ def main():
         folder_prompt = "Please enter the full path to the Intan data folder: "
     elif choice == '2':
         recording_method = 'spikegadget'
-        folder_prompt = "Please enter the full path to the .rec folder: "
+        folder_prompt = "Please enter the full path to the folder containing .rec files: "
     else:
         print("Invalid choice. Exiting.")
         sys.exit(1)
@@ -366,6 +481,7 @@ def main():
     # Get data files
     data_files = converter.get_data_files(data_folder)
     first_file = data_files[0]
+    print(f"First file: {first_file.name}")
 
     # Load bad channels
     bad_file = data_folder / "bad_channels.txt"
