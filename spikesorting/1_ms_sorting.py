@@ -118,7 +118,9 @@ if __name__ == "__main__":
     threshold = 5.5
     shanks = [0,1,2,3]
     rec_folders = [
-        Path(r"G:\rf\250527\CnL22\CnL22_250531_204108"),
+        # Path(r"F:\flicker\CnL22\CnL22_250717_110531"),
+        # Path(r"F:\flicker\CnL38\CnL38_250717_113259"),
+        Path(r"F:\flicker\CnL39\CnL39_250716_211732")
     ]
     for rec_folder in rec_folders:
         main(threshold=threshold, rec_folder=rec_folder, shanks=shanks)

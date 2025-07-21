@@ -6,12 +6,12 @@ import mplcursors
 from scipy.signal import find_peaks
 
 
-rec_folder = r"D:\cl\rf_reconstruction\freelymoving\CnL22_20241203_123534.rec"
+rec_folder = r"/Volumes/xieluanlabs/xl_cl/rf_reconstruction/head_fixed/250609/CnL22SG/CnL22SG_20250609_164650.rec"
 
 dio_folders = DIO.get_dio_folders(rec_folder)
 dio_folders = sorted(dio_folders, key=lambda x:x.name)
 
-pd_time, pd_state = DIO.concatenate_din_data(dio_folders, 2)
+pd_time, pd_state = DIO.concatenate_din_data(dio_folders, 3)
 
 print('start time: ', pd_time[0])
 print('end time: ', pd_time[-1])

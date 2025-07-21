@@ -281,14 +281,26 @@ class EphysToNWBConverter:
     def get_data_files(self, data_folder: Path) -> list:
         """Get list of data files based on recording method."""
         if self.recording_method == 'intan':
-            # Get .rhd or .rhs files, exclude macOS system files
+            # unchanged
             data_files = sorted(
                 p for p in data_folder.iterdir()
                 if p.suffix.lower() in ('.rhd', '.rhs') and not p.name.startswith("._"))
-        else:  # spikegadget
-            folders = sorted(data_folder.glob('*.mountainsort'),
-                           key=lambda x: x.stat().st_mtime)
-            data_files = [x for folder in folders for x in folder.glob('*group0.mda')]
+        else:  # spikegadget / mountainsort
+            ms_folders = list(data_folder.glob('*.mountainsort'))
+            if not ms_folders:
+                raise FileNotFoundError("No .mountainsort folders found in the specified folder.")
+            
+            # Base folder (no .part) → (0,0); .partN → (1,N)
+            def part_key(f: Path):
+                m = re.search(r'\.part(\d+)\.mountainsort$', f.name)
+                return (1, int(m.group(1))) if m else (0, 0)
+            
+            ms_folders.sort(key=part_key)
+            
+            data_files = []
+            for folder in ms_folders:
+                group_files = list(folder.glob('*group0.mda'))
+                data_files.extend(group_files)
         
         if not data_files:
             file_types = ".rhd/.rhs" if self.recording_method == 'intan' else "group0.mda"
@@ -366,6 +378,7 @@ def main():
     # Get data files
     data_files = converter.get_data_files(data_folder)
     first_file = data_files[0]
+    print(f"all data files: {data_files}")
 
     # Load bad channels
     bad_file = data_folder / "bad_channels.txt"

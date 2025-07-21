@@ -13,11 +13,11 @@ from rec2nwb.preproc_func import parse_session_info
 
 # Constants
 # BASE_FOLDER = r"\\10.129.151.108\xieluanlabs\xl_spinal_cord_electrode\CoI"
-BASE_FOLDER = r"\\10.129.151.108\xieluanlabs\xl_cl\ephys"  
-DATES = ['250601']
+BASE_FOLDER = r"F:\flicker"  
+DATES = ['250717']
 # ANIMAL_IDS = ['CoI06', 'CoI07', 'CoI08', 'CoI09', 'CoI10']
-ANIMAL_IDS = ['CnL41',]
-ISHS = ['0', '1', '2', '3']
+ANIMAL_IDS = ['CnL22', 'CnL38', 'CnL39']
+ISHS = [0, 1, 2, 3]
 SORTOUT_FOLDER = Path(__file__).parents[1] / 'sortout'
 overwrite = False
 
@@ -36,7 +36,7 @@ for date in DATES:
 
         # Parse session info (returns animal_id, session_id, folder_name)
         animal_id, session_id, folder_name = parse_session_info(rec_folder)
-        session_folder = Path(SORTOUT_FOLDER) / f"{animal_id}/{session_id}"
+        session_folder = SORTOUT_FOLDER / f"{animal_id}/{animal_id}_{session_id}"
 
         for ish in ISHS:
 
@@ -48,7 +48,7 @@ for date in DATES:
             recording = se.NwbRecordingExtractor(str(recording_file))
             rec_filt = sp.bandpass_filter(recording, freq_min=300, freq_max=6000, dtype=np.float32)
             
-            shank_folder = session_folder / ish
+            shank_folder = session_folder / f'shank{ish}'
             # Find folders starting with 'sorting_results_'
             sorting_results_folders = [
                 os.path.join(root, d)
