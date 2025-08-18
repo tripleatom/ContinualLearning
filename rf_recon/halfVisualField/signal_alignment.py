@@ -30,6 +30,7 @@ def process_new_experiment(rec_folder, task_file,
       - Extract trial info from task["trials"][param_key]
       - Use DIO edges to define trial windows
       - Compute mean firing rates for each neural unit across trials
+      - Exclude bad trials (duration < 0.9s) from analysis
     Parameters:
       rec_folder: path to recording folder
       task_file: path to pickle with 'trials' list and optional 'summary'
@@ -48,7 +49,7 @@ def process_new_experiment(rec_folder, task_file,
         task = pickle.load(f)
     left_params = task['trial_left_params']
 
-    left_params = left_params[1:-1] # remove the first and last trial
+    # left_params = left_params[1:-1] # remove the first and last trial
     # extract the orientation of the left grating
     left_orientation = [param['orientation'] for param in left_params]
  
@@ -56,21 +57,38 @@ def process_new_experiment(rec_folder, task_file,
     # Read digital input to define windows
     dio_folders = sorted(get_dio_folders(rec_folder), key=lambda x: x.name)
     pd_time, pd_state = concatenate_din_data(dio_folders, 3)
+    #TODO: rerun the code, for got PD = PD - PD_0
+    pd_time = pd_time - pd_time[0]
+
+
     rising = np.where(pd_state == 1)[0]
     falling = np.where(pd_state == 0)[0][1:]
     rising_times = pd_time[rising]
     falling_times = pd_time[falling]
+    trial_time_sec = (falling_times - rising_times) / 30000
+    bad_trials = np.where(trial_time_sec < 0.9)[0]
 
-    # Determine number of trials
+    # Determine number of trials and exclude bad ones
     n_trials = len(left_orientation)
     trial_windows = [(rising_times[i], falling_times[i]) for i in range(n_trials)]
+    
+    # Create boolean mask for good trials
+    good_trials_mask = np.ones(n_trials, dtype=bool)
+    good_trials_mask[bad_trials] = False
+    
+    # Filter out bad trials
+    left_orientation_filtered = [left_orientation[i] for i in range(n_trials) if good_trials_mask[i]]
+    trial_windows_filtered = [trial_windows[i] for i in range(n_trials) if good_trials_mask[i]]
+    
+    print(f"Total trials: {n_trials}, Bad trials: {len(bad_trials)}, Good trials: {len(left_orientation_filtered)}")
+    print(f"Bad trial indices: {bad_trials.tolist()}")
 
     # Construct session folder (similar to static_disc)
     code_folder = Path(__file__).parent.parent.parent
     session_folder = code_folder / f"sortout/{animal_id}/{session_id}"
     
     # Prepare output folder
-    out_folder = session_folder / 'freelymovingRF'
+    out_folder = session_folder / 'HalfGrating'
     out_folder.mkdir(parents=True, exist_ok=True)
 
     # Compute neural responses
@@ -124,7 +142,8 @@ def process_new_experiment(rec_folder, task_file,
                 # Loop units
                 for i, unit_id in enumerate(unit_ids):
                     spike_train = sorting.get_unit_spike_train(unit_id)
-                    rates = extract_mean_firing_rates(spike_train, trial_windows, fs)
+                    # Use filtered trial windows (excluding bad trials)
+                    rates = extract_mean_firing_rates(spike_train, trial_windows_filtered, fs)
                     all_units_responses.append({
                         'unit_id': unit_id,
                         'mean_firing_rates': rates.tolist(),
@@ -142,25 +161,30 @@ def process_new_experiment(rec_folder, task_file,
                 continue
 
     # Save output
-    out_file = out_folder / 'freelymovingRF_data.npz'
+    out_file = out_folder / 'HalfGrating_data.npz'
     if out_file.exists() and not overwrite:
         print(f"Skipping save, file exists: {out_file}")
         return out_file
 
     np.savez(out_file,
-             left_orientation=left_orientation,
+             left_orientation=left_orientation_filtered,  # Use filtered data
              all_units_responses=all_units_responses,
              unit_info=unit_info,
              unit_qualities=all_unit_qualities,
              session=str(rec_folder.name),
-             task_summary=task.get('summary', {}))
+             task_summary=task.get('summary', {}),
+             bad_trials=bad_trials,  # Save bad trial indices for reference
+             good_trials_mask=good_trials_mask,  # Save mask for reference
+             n_trials_original=n_trials,  # Save original trial count
+             n_trials_filtered=len(left_orientation_filtered))  # Save filtered trial count
 
     print(f"Saved new experiment data to {out_file}")
     print(f"Processed {len(all_units_responses)} units with quality information")
+    print(f"Excluded {len(bad_trials)} bad trials from analysis")
     return out_file
 
 
 if __name__ == '__main__':
-    rec_folder = r"G:\freelymovingRF\250712\CnL39SG\CnL39SG_20250712_184715.rec"
-    task_file = r"D:\cl\grating_disk_representation\task_data\CnL39_1_20250712_190810.pkl"
+    rec_folder = r"F:\freelymovingGrating\250727\CnL38SG\CnL38SG_20250727_182103.rec"
+    task_file = r"F:\freelymovingGrating\250727\CnL38_1_20250727_184148.pkl"
     process_new_experiment(rec_folder, task_file)

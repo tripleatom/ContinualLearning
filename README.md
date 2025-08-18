@@ -2,6 +2,8 @@
 
 A lightweight pipeline for converting Intan (*.rhd*) and SpikeGadget (*.mda*) recordings into NWB files, screening bad channels, and running a Mountainsort‑based spike sorting workflow.
 
+SOP by Albert Li: [SOP for SpikeGadget System](https://docs.google.com/document/d/1WlWxgnbquz-oRtNNQ2TsxFg1TqT9nE_1mHZNpW5bork/edit?usp=sharing)
+
 ---
 
 ## 📦 Installation

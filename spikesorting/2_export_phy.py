@@ -13,13 +13,15 @@ import spikeinterface.preprocessing as sp
 from rec2nwb.preproc_func import parse_session_info
 
 # Constants
-# BASE_FOLDER = r"\\10.129.151.108\xieluanlabs\xl_spinal_cord_electrode\CoI"
-BASE_FOLDER = r"F:\flicker"  
-DATES = ['250717']
+# BASE_FOLDER = r"\\10.129.151.108\xieluanlabs\xl_cl\batch2"
+BASE_FOLDER = r"C:\Users\Windows\freelymovingRF"  
+DATES = ['250817']
 # ANIMAL_IDS = ['CoI06', 'CoI07', 'CoI08', 'CoI09', 'CoI10']
-ANIMAL_IDS = [ 'CnL22', 'CnL38', 'CnL39']
+ANIMAL_IDS = ['CnL22SG']
 ISHS = [ 0, 1, 2, 3]
 SORTOUT_FOLDER = Path(__file__).parents[1] / 'sortout'
+# TODO: add overwrite option, if the phy folder exists, skip it if overwrite is False
+OVERWRITE = False
 
 for date in DATES:
     for animal_id in ANIMAL_IDS:
@@ -66,6 +68,10 @@ for date in DATES:
 
                 for sorting_results_folder in sorting_results_folders:
                     sorting_results_folder = Path(sorting_results_folder)
+                    output_folder = sorting_results_folder / 'phy'
+                    if output_folder.exists() and not OVERWRITE:
+                        print(f"Phy folder already exists: {output_folder}")
+                        continue
                     analyzer_folder = sorting_results_folder / 'sorting_analyzer'
                     
                     # Load the sorting analyzer
@@ -78,8 +84,4 @@ for date in DATES:
                     _ = sorting_analyzer.compute('principal_components', n_components = 5, mode="by_channel_local")
                     
                     # Export sorting results to Phy format
-                    output_folder = sorting_results_folder / 'phy'
-                    if output_folder.exists():
-                        print(f"Phy folder already exists: {output_folder}")
-                        continue
                     sexp.export_to_phy(sorting_analyzer, output_folder=output_folder)
