@@ -14,8 +14,13 @@ from rec2nwb.preproc_func import parse_session_info
 
 # Constants
 # BASE_FOLDER = r"\\10.129.151.108\xieluanlabs\xl_cl\batch2"
+<<<<<<< HEAD
 BASE_FOLDER = r"G:"  
 DATES = ['rf']
+=======
+BASE_FOLDER = r"C:\Users\alber\OneDrive\Desktop\Rice\Luan Lab\Continuous Learning"  
+DATES = ['250817']
+>>>>>>> 5d6772941a5f9828e55d3d013f581bdc548ba2b7
 # ANIMAL_IDS = ['CoI06', 'CoI07', 'CoI08', 'CoI09', 'CoI10']
 ANIMAL_IDS = ['CnL38', 'CnL39']
 ISHS = [ 0, 1, 2, 3]
