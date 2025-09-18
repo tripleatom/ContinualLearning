@@ -4,28 +4,33 @@ import matplotlib.pyplot as plt
 from scipy.ndimage import gaussian_filter1d
 import os
 
-from task_file_reader import load_task_file
+from parse_grating_experiment import parse_grating_experiment
 from spikeinterface import load_sorting_analyzer
 from spikeinterface.extractors import PhySortingExtractor
 
 rec_folder = Path(r"/Volumes/xieluanlabs/xl_cl/RF_GRID/250821/CnL39SG/CnL39SG_20250821_163039.rec")
-task_file_Path = Path(r"/Volumes/xieluanlabs/xl_cl/RF_GRID/250821/CnL39_20250821_3.txt")
+task_file_Path = Path(r"/Volumes/xieluanlabs/xl_cl/RF_GRID/250821/CnL39_4_20250821_175044.txt")
 animal_id = rec_folder.name.split('.')[0].split('_')[0]
 session_id = rec_folder.name.split('.')[0]
 
 print(f"Processing {animal_id}/{session_id}")
 
-task_file = load_task_file(task_file_Path)
+task_file = parse_grating_experiment(task_file_Path)
 
 # Get all trial data
-df = task_file.get_trial_data()
+df = task_file['trial_data']
 
-# # Now you can work with standard pandas operations
-# print(df.head())
-# print(df.describe())
-# print(df['StimulusIndex'].value_counts())
+stimulus_duration = task_file['parameters']['stimulus_duration']
+ITI_duration = task_file['parameters']['iti_duration']
+stimulus_duration = float(stimulus_duration.rstrip('s'))
+ITI_duration = float(ITI_duration.rstrip('s'))
+n_repeats = task_file['parameters']['total_trials']
+trial_duration = stimulus_duration + ITI_duration
 
-stimulus_index = df['StimulusIndex'].values
+print("stimulus_duration", stimulus_duration, "s")
+print("ITI_duration", ITI_duration, "s")
+print("n_repeats", n_repeats)
+print("trial_duration", trial_duration, "s")
 
 # load processed DIO file
 task_id = task_file_Path.stem
@@ -36,23 +41,30 @@ dio_data = np.load(processed_dio_folder)
 rising_times = dio_data['rising_times']
 falling_times = dio_data['falling_times']
 
-n_trials = len(stimulus_index)
+n_trials = len(df)
+L_Orient = df['L_Orient'].values
+# L_Orient contains actual orientation values (e.g., 0, 45, 90), not indices
+orientations = L_Orient
+
+# Print unique orientations for verification
+print(f"Unique orientations: {np.unique(orientations)}")
+
 trial_windows = [(rising_times[i], falling_times[i]) for i in range(n_trials)]
 
 code_folder = Path(__file__).parent.parent.parent
 session_folder = code_folder / f"sortout/{animal_id}/{session_id}"
 
-
-# Setup for visualization
-unique_stim = np.unique(stimulus_index)
-n_stim_types = len(unique_stim)
+# Setup for visualization - use actual orientation values
+unique_orientations = np.unique(orientations)
+n_stim_types = len(unique_orientations)
 colors = plt.cm.viridis(np.linspace(0, 1, n_stim_types))
-stim2color = dict(zip(unique_stim, colors))
+orientation2color = dict(zip(unique_orientations, colors))
 
+print(f"Orientations to analyze: {unique_orientations}")
+print(f"Number of stimulus types: {n_stim_types}")
 
-out_folder = session_folder / f'RFBlock_Stim{n_stim_types}'
+out_folder = session_folder / f'L_Grating_Stim{n_stim_types}'
 out_folder.mkdir(parents=True, exist_ok=True)
-
 
 # Compute neural responses
 all_units_responses = []
@@ -63,9 +75,9 @@ fs = None
 # Iterate through shanks (similar to static_disc)
 ishs = ['0', '1', '2', '3']
 
-# Sort trials by stimulus index for better visualization
-sorted_idx = np.argsort(stimulus_index)
-sorted_stimulus_index = stimulus_index[sorted_idx]
+# Sort trials by orientation for better visualization
+sorted_idx = np.argsort(orientations)
+sorted_orientations = orientations[sorted_idx]
 
 for ish in ishs:
     print(f'Processing shank {ish}')
@@ -135,8 +147,12 @@ for ish in ishs:
                     else:
                         unit_trial_spikes.append([])
 
-                # Group trials by stimulus index
-                groups = {stim: np.where(stimulus_index[:-1] == stim)[0] for stim in unique_stim}
+                # Group trials by orientation (actual values, not indices)
+                groups = {orientation: np.where(orientations == orientation)[0] for orientation in unique_orientations}
+                
+                # Verify grouping
+                for orientation in unique_orientations:
+                    print(f"Orientation {orientation}°: {len(groups[orientation])} trials")
                 
                 # --- Create combined figure (matching first file's style) ---
                 plt.style.use('default')
@@ -148,8 +164,11 @@ for ish in ishs:
                 yticks = []
                 ylabels = []
                 
-                for stim in unique_stim:
-                    idxs = groups[stim]
+                # Sort orientations for consistent display order
+                sorted_unique_orientations = np.sort(unique_orientations)
+                
+                for orientation in sorted_unique_orientations:
+                    idxs = groups[orientation]
                     n = len(idxs)
                     for i, tidx in enumerate(idxs):
                         if tidx < len(unit_trial_spikes):
@@ -157,16 +176,16 @@ for ish in ishs:
                             y = y_base + i + 0.5
                             if len(spikes) > 0:
                                 ax_raster.scatter(np.array(spikes)*1000, np.full_like(spikes, y),
-                                                s=8, color=stim2color[stim], marker='|', 
+                                                s=8, color=orientation2color[orientation], marker='|', 
                                                 alpha=0.8, linewidth=1.5)
                     yticks.append(y_base + n/2)
-                    ylabels.append(f"Stim {stim}")
+                    ylabels.append(f"{orientation}°")
                     y_base += n
 
                 ax_raster.set_ylim(0, y_base)
                 ax_raster.set_yticks(yticks)
                 ax_raster.set_yticklabels(ylabels, fontsize=11)
-                ax_raster.set_ylabel('Trial Block (by stimulus)', fontsize=12, fontweight='bold')
+                ax_raster.set_ylabel('Trial Block (by orientation)', fontsize=12, fontweight='bold')
                 ax_raster.set_title(f"Unit {unit_id} — Quality: {quality}", fontsize=14, fontweight='bold', pad=20)
                 ax_raster.grid(True, alpha=0.3, linestyle='--')
                 ax_raster.spines['top'].set_visible(False)
@@ -185,9 +204,9 @@ for ish in ishs:
                 sigma_ms = 20  # smoothing width in ms
                 sigma_bins = sigma_ms / (bin_width * 1000)  # convert to bins
 
-                for stim in unique_stim:
-                    idxs = groups[stim]
-                    # Collect all spikes for this stimulus type
+                for orientation in sorted_unique_orientations:
+                    idxs = groups[orientation]
+                    # Collect all spikes for this orientation
                     allspikes = []
                     for idx in idxs:
                         if idx < len(unit_trial_spikes) and len(unit_trial_spikes[idx]) > 0:
@@ -202,13 +221,13 @@ for ish in ishs:
                         rate_smooth = gaussian_filter1d(rate, sigma=sigma_bins)
                         
                         ax_psth.plot(bin_centers*1000, rate_smooth,
-                                   label=f"Stim {stim}", color=stim2color[stim], 
+                                   label=f"{orientation}°", color=orientation2color[orientation], 
                                    linewidth=2.5, alpha=0.9)
 
                 ax_psth.set_xlabel('Time from stimulus onset (ms)', fontsize=12, fontweight='bold')
                 ax_psth.set_ylabel('Firing rate (Hz)', fontsize=12, fontweight='bold')
                 ax_psth.set_title('Peri-Stimulus Time Histogram (smoothed)', fontsize=12, fontweight='bold')
-                ax_psth.legend(title='Stimulus', title_fontsize=9, fontsize=8, 
+                ax_psth.legend(title='Orientation', title_fontsize=9, fontsize=8, 
                               ncol=min(3, n_stim_types), loc='upper right', 
                               frameon=True, fancybox=True, shadow=True, 
                               bbox_to_anchor=(0.98, 0.98))

@@ -14,10 +14,10 @@ from rec2nwb.preproc_func import parse_session_info
 
 # Constants
 # BASE_FOLDER = r"\\10.129.151.108\xieluanlabs\xl_cl\batch2"
-BASE_FOLDER = r"C:\Users\Windows\freelymovingRF"  
-DATES = ['250817']
+BASE_FOLDER = r"G:"  
+DATES = ['rf']
 # ANIMAL_IDS = ['CoI06', 'CoI07', 'CoI08', 'CoI09', 'CoI10']
-ANIMAL_IDS = ['CnL22SG']
+ANIMAL_IDS = ['CnL38', 'CnL39']
 ISHS = [ 0, 1, 2, 3]
 SORTOUT_FOLDER = Path(__file__).parents[1] / 'sortout'
 # TODO: add overwrite option, if the phy folder exists, skip it if overwrite is False

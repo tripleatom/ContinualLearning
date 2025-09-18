@@ -28,7 +28,7 @@ def process_static_grating_responses(rec_folder, stimdata_file, overwrite=True):
       npz_file (Path): Path to the saved (or existing) NPZ file.
     """
     DIN_file = rec_folder / "DIN.mat"
-    peaks_file = rec_folder / "peaks.mat"
+    peaks_file = rec_folder / "peaks_static_grating.mat"
     
     # Load peaks data (to get rising edges)
     peaks_data = scipy.io.loadmat(peaks_file, struct_as_record=False, squeeze_me=True)

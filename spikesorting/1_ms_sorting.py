@@ -116,11 +116,10 @@ def main(rec_folder, threshold=5.5, shanks=[0]):
 
 if __name__ == "__main__":
     threshold = 5.5
-    shanks = [2,3]
+    shanks = [0,1,2,3]
     rec_folders = [
-        Path(r"C:\Users\Windows\freelymovingRF\250817\CnL22SG\CnL22SG_20250817_145143.rec"),
-        # Path(r"C:\Users\Windows\freelymovingRF\250817\CnL38SG\CnL38SG_20250817_152720.rec"),
-        # Path(r"C:\Users\Windows\freelymovingRF\250817\CnL39SG\CnL39SG_20250817_140912.rec")
+        Path(r"G:\rf\CnL38\CnL38_250912_182321"),
+        Path(r"G:\rf\CnL39\CnL39_250912_171515")
     ]
     for rec_folder in rec_folders:
         main(threshold=threshold, rec_folder=rec_folder, shanks=shanks)

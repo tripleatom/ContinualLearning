@@ -118,7 +118,7 @@ class TaskFileReader:
             return
         
         # Parse trial data into DataFrame
-        columns = ['TrialIndex', 'StimulusIndex', 'TrialStartTime', 'StimulusDuration', 
+        columns = ['TrialIndex', 'StimulusIndex', 'TrialStartTime', 'StimulusDuration', 'ITIDuration',
                   'Azimuth', 'Altitude', 'AzGridIndex', 'AltGridIndex']
         
         trial_data = []
@@ -130,10 +130,11 @@ class TaskFileReader:
                     int(parts[1]),      # StimulusIndex
                     parts[2],           # TrialStartTime (keep as string initially)
                     float(parts[3]),    # StimulusDuration
-                    float(parts[4]),    # Azimuth
-                    float(parts[5]),    # Altitude
-                    int(parts[6]),      # AzGridIndex
-                    int(parts[7])       # AltGridIndex
+                    float(parts[4]),    # ITIDuration
+                    float(parts[5]),    # Azimuth
+                    float(parts[6]),    # Altitude
+                    int(parts[7]),      # AzGridIndex
+                    int(parts[8])       # AltGridIndex
                 ])
         
         self.trial_data = pd.DataFrame(trial_data, columns=columns)
