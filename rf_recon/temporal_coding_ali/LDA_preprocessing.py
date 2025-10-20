@@ -24,7 +24,7 @@ def get_good_units(unit_info):
 
     for unit_id, meta in unit_info.items():
         q = str(meta.get("quality", "")).lower()
-        if q in ("good", "mua"):
+        if q in ("good", "mua", "unsorted"):
             good_units.append((unit_id, meta))
             shank = str(meta.get("shank", "unknown"))
             if shank not in good_units_by_shank:
