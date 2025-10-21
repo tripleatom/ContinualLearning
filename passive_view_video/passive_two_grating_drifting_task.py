@@ -9,7 +9,7 @@ screen_bg_color    = [0, 0, 0]        # black
 stim_duration_s    = 1.0              # on-screen time per trial
 iti_duration_s     = 0.5              # black screen between trials
 grating_oris_deg   = (45.0, 135.0)    # orientations to present
-n_trials           = 50
+n_trials           = 4
 random_seed        = 42
 
 # Spatial and temporal parameters
@@ -132,15 +132,22 @@ right_grat = visual.GratingStim(
     interpolate=True, texRes=512
 )
 
+
 # =========================
-# 9) Trial list
+# 9) Trial list (balanced by RIGHT side)
 # =========================
-trials = []
-for i in range(n_trials):
-    if random.random() < 0.5:
-        trials.append({"trial_index": i + 1, "left_type": "A", "right_type": "B"})
-    else:
-        trials.append({"trial_index": i + 1, "left_type": "B", "right_type": "A"})
+if n_trials % 2 != 0:
+    raise ValueError("n_trials must be even to balance right-side counts exactly.")
+
+half = n_trials // 2
+trials = (
+    [{"left_type": "A", "right_type": "B"} for _ in range(half)] +   # right = B
+    [{"left_type": "B", "right_type": "A"} for _ in range(half)]     # right = A
+)
+
+random.shuffle(trials)
+for i, tr in enumerate(trials, start=1):
+    tr["trial_index"] = i
 
 # =========================
 # 10) Helper for drift direction
