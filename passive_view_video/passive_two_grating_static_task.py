@@ -1,14 +1,15 @@
-# passive_two_grating_task_syncpatch_cpd.py
-# PsychoPy static two-grating task with rectangular sync patch and cycles/degree control.
-
-from psychopy import visual, core, event
+from psychopy import visual, core, event, monitors
+import psychopy.logging as logging
 import csv, random, time, os, math
+
+# Quiet down console chatter (optional)
+logging.console.setLevel(logging.ERROR)
 
 # =========================
 # 1) Experiment parameters
 # =========================
 win_fullscreen     = True
-screen_bg_color    = [0, 0, 0]     # black
+screen_bg_color    = [0, 0, 0]        # black
 stim_duration_s    = 1.0              # on-screen time per trial
 iti_duration_s     = 0.5              # black screen between trials
 grating_oris_deg   = (0.0, 45.0)      # two orientations to present (bar tilt)
@@ -16,8 +17,8 @@ n_trials           = 50
 random_seed        = 42
 
 # Give parameters in DEGREES (visual angle):
-grating_sfs_cpd    = (0.08, 0.08)       # spatial frequency (LEFT type, RIGHT type) in cycles/degree
-grating_sizes_deg  = (100.0, 100.0)     # diameter (deg) for the two grating types
+grating_sfs_cpd    = (0.08, 0.08)     # spatial frequency (LEFT type, RIGHT type) in cycles/degree
+grating_sizes_deg  = (100.0, 100.0)   # diameter (deg) for the two grating types
 eccentricity_deg   = 70.0             # horizontal eccentricity of patch centers (deg)
 
 contrast           = 1.0
@@ -67,7 +68,18 @@ os.makedirs(save_dir, exist_ok=True)
 log_path = os.path.join(save_dir, f"two_grating_passive_static_{run_id}.csv")
 
 # =========================
-# 5) Window
+# 5) Monitor profile (prevents PsychoPy from 'measuring' screen size)
+# =========================
+width_cm = screen2_width_mm / 10.0
+dist_cm  = view_dist_mm / 10.0
+
+mon = monitors.Monitor("Screen2")      # arbitrary name for this profile
+mon.setWidth(width_cm)                 # width in cm
+mon.setDistance(dist_cm)               # distance in cm
+mon.setSizePix(screen2_res_px)         # pixel resolution
+
+# =========================
+# 6) Window
 # =========================
 random.seed(random_seed)
 win = visual.Window(
@@ -75,18 +87,21 @@ win = visual.Window(
     fullscr=win_fullscreen,
     units="pix",
     screen=1,               # 0=primary, 1=external (adjust if needed)
-    winType="pyglet",       # force a valid backend; try "glfw" if preferred/installed
+    winType="pyglet",       # try "glfw" if preferred/installed
+    monitor=mon,            # <-- pass the defined monitor to avoid measurement
     color=screen_bg_color,
     allowGUI=False,
     multiSample=True,
+    checkTiming=False,
     numSamples=8
 )
+win.recordFrameIntervals = False
 
 # =========================
-# 6) Rectangular sync patch (top-right)
+# 7) Rectangular sync patch (top-right)
 # =========================
 width, height = win.size
-sync_width_px   = 70      # horizontal size
+sync_width_px   = 70       # horizontal size
 sync_height_px  = 60       # vertical size (shorter for rectangular look)
 sync_margin_px  = 10       # margin from screen edges
 
@@ -105,7 +120,7 @@ sync_patch = visual.Rect(
 )
 
 # =========================
-# 7) Gratings
+# 8) Gratings
 # =========================
 left_grat = visual.GratingStim(
     win=win, mask="circle",
@@ -125,7 +140,7 @@ right_grat = visual.GratingStim(
 )
 
 # =========================
-# 8) Trial list (A vs B)
+# 9) Trial list (A vs B)
 # =========================
 # Type A uses (ori[0], sf[0], size[0])
 # Type B uses (ori[1], sf[1], size[1])
@@ -137,7 +152,7 @@ for i in range(n_trials):
         trials.append({"trial_index": i + 1, "left_type": "B", "right_type": "A"})
 
 # =========================
-# 9) Run
+# 10) Run
 # =========================
 with open(log_path, "w", newline="") as f:
     writer = csv.DictWriter(
@@ -245,3 +260,4 @@ with open(log_path, "w", newline="") as f:
 
 win.close()
 core.quit()
+

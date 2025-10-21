@@ -1,87 +1,166 @@
-# passive_two_grating_task_drifting.py
-from psychopy import visual, core, event
-import csv, random, time, os
+from psychopy import visual, core, event, monitors
+import csv, random, time, os, math
 
-# -----------------------
-# Experiment parameters
-# -----------------------
-win_fullscreen    = True
-screen_bg_color   = [-1, -1, -1]     # black
-stim_duration_s   = 5.0              # on-screen time per trial
-iti_duration_s    = 0.5              # black screen between trials
-grating_oris_deg  = (0.0, 45.0)      # two orientations to present
-n_trials          = 10
-random_seed       = 42
+# =========================
+# 1) Experiment parameters
+# =========================
+win_fullscreen     = True
+screen_bg_color    = [0, 0, 0]        # black
+stim_duration_s    = 1.0              # on-screen time per trial
+iti_duration_s     = 0.5              # black screen between trials
+grating_oris_deg   = (0.0, 45.0)      # two orientations to present (bar tilt)
+n_trials           = 50
+random_seed        = 42
 
-# Layout (PIXELS)
-win_size_pix      = (1440, 900)
-eccentricity_pix  = 400              # horizontal offset of patch centers from screen center
+# Give parameters in DEGREES (visual angle):
+grating_sfs_cpd    = (0.08, 0.08)     # spatial frequency (LEFT type, RIGHT type) in cycles/degree
+grating_sizes_deg  = (100.0, 100.0)   # diameter (deg) for the two grating types
+eccentricity_deg   = 70.0             # horizontal eccentricity of patch centers (deg)
+contrast           = 1.0
+start_phase        = 0.0
+left_tf_hz         = 2.0              # temporal frequency (cycles/sec)
+right_tf_hz        = 2.0              # temporal frequency (cycles/sec)
 
-# Stimulus appearance (PIXELS & cycles/pixel)
-# You can set different SF, SIZE, and TF for the two gratings.
-grating_sfs_cyc_per_pix = (0.004, 0.006)     # spatial freq (cycles/pixel)
-grating_sizes_pix       = (600, 600)         # diameter (pixels)
-drift_tf_hz             = (1.5, 2.0)         # temporal freq (cycles/second); sign sets drift direction
-contrast                = 1.0
+# =========================
+# 2) Screen 2 geometry (edit to your setup)
+# =========================
+screen2_width_mm   = 520.0
+screen2_height_mm  = 520.0
+screen2_res_px     = (1440, 900)
+view_dist_mm       = 200.0
 
-# -----------------------
-# Save name / paths
-# -----------------------
+# =========================
+# 3) Deg↔Pix conversion
+# =========================
+def pixels_per_degree(view_dist_mm: float, px_per_mm: float) -> float:
+    mm_per_deg = 2.0 * view_dist_mm * math.tan(math.radians(0.5))
+    return px_per_mm * mm_per_deg
+
+px_per_mm_x = screen2_res_px[0] / screen2_width_mm
+px_per_mm_y = screen2_res_px[1] / screen2_height_mm
+px_per_mm   = 0.5 * (px_per_mm_x + px_per_mm_y)
+
+PPD = pixels_per_degree(view_dist_mm, px_per_mm)
+
+grating_sfs_cyc_per_pix = tuple(sf_cpd / PPD for sf_cpd in grating_sfs_cpd)
+grating_sizes_pix       = tuple(int(round(sz_deg * PPD)) for sz_deg in grating_sizes_deg)
+eccentricity_pix        = int(round(eccentricity_deg * PPD))
+
+print(f"[Info] pixels/degree (PPD): {PPD:.2f}")
+print(f"[Info] SF cyc/pix: {grating_sfs_cyc_per_pix}")
+print(f"[Info] Sizes (pix): {grating_sizes_pix}, Eccentricity (pix): {eccentricity_pix}")
+
+# =========================
+# 4) Save path
+# =========================
 clock = core.Clock()
 run_id = time.strftime("%Y%m%d_%H%M%S")
 save_dir = os.path.join(os.path.dirname(__file__), "logs")
 os.makedirs(save_dir, exist_ok=True)
-log_path = os.path.join(save_dir, f"two_grating_passiveDRIFT_{run_id}.csv")
+log_path = os.path.join(save_dir, f"two_grating_passive_drifting_{run_id}.csv")
 
-# -----------------------
-# Setup
-# -----------------------
+# =========================
+# 5) Monitor profile (prevent screen-size measurement)
+# =========================
+width_cm = screen2_width_mm / 10.0
+dist_cm  = view_dist_mm / 10.0
+mon = monitors.Monitor("Screen2")
+mon.setWidth(width_cm)
+mon.setDistance(dist_cm)
+mon.setSizePix(screen2_res_px)
+
+# =========================
+# 6) Window
+# =========================
 random.seed(random_seed)
 win = visual.Window(
-    size=win_size_pix,
+    size=screen2_res_px,
     fullscr=win_fullscreen,
     units="pix",
+    screen=1,
+    winType="pyglet",
+    monitor=mon,
     color=screen_bg_color,
-    allowGUI=False
+    allowGUI=False,
+    multiSample=True,
+    checkTiming=False,
+    numSamples=8
+)
+win.recordFrameIntervals = False
+
+# =========================
+# 7) Rectangular sync patch (top-right)
+# =========================
+width, height = win.size
+sync_width_px   = 70
+sync_height_px  = 60
+sync_margin_px  = 10
+sync_patch_x = (width / 2)  - (sync_width_px / 2)  - sync_margin_px
+sync_patch_y = (height / 2) - (sync_height_px / 2) - sync_margin_px
+
+sync_patch = visual.Rect(
+    win,
+    width=sync_width_px,
+    height=sync_height_px,
+    pos=(sync_patch_x, sync_patch_y),
+    fillColor=[-1, -1, -1],
+    lineColor=None,
+    units='pix',
+    autoLog=False
 )
 
-# Build once; update attributes each trial
+# =========================
+# 8) Gratings
+# =========================
 left_grat = visual.GratingStim(
-    win=win, mask="circle", size=grating_sizes_pix[0], sf=grating_sfs_cyc_per_pix[0],
-    ori=0.0, phase=0.0, contrast=contrast, pos=(-eccentricity_pix, 0)
+    win=win, mask="circle",
+    size=grating_sizes_pix[0],
+    sf=grating_sfs_cyc_per_pix[0],
+    ori=0.0, phase=start_phase, contrast=contrast,
+    pos=(-eccentricity_pix, 0),
+    interpolate=True, texRes=512
 )
 right_grat = visual.GratingStim(
-    win=win, mask="circle", size=grating_sizes_pix[1], sf=grating_sfs_cyc_per_pix[1],
-    ori=0.0, phase=0.0, contrast=contrast, pos=(+eccentricity_pix, 0)
+    win=win, mask="circle",
+    size=grating_sizes_pix[1],
+    sf=grating_sfs_cyc_per_pix[1],
+    ori=0.0, phase=start_phase, contrast=contrast,
+    pos=(+eccentricity_pix, 0),
+    interpolate=True, texRes=512
 )
 
-# Trial list: randomize which type (A vs B) goes left/right
-# Type A uses (ori[0], sf[0], size[0], tf[0]); Type B uses (ori[1], sf[1], size[1], tf[1])
+# =========================
+# 9) Trial list (A vs B)
+# =========================
 trials = []
 for i in range(n_trials):
     if random.random() < 0.5:
-        left_type, right_type = "A", "B"
+        trials.append({"trial_index": i + 1, "left_type": "A", "right_type": "B"})
     else:
-        left_type, right_type = "B", "A"
-    trials.append({"trial_index": i + 1, "left_type": left_type, "right_type": right_type})
+        trials.append({"trial_index": i + 1, "left_type": "B", "right_type": "A"})
 
-# -----------------------
-# Run
-# -----------------------
+# =========================
+# 10) Run
+# =========================
 with open(log_path, "w", newline="") as f:
     writer = csv.DictWriter(
         f,
-        fieldnames=["trial_index",
-                    "left_type","right_type",
-                    "left_ori","right_ori",
-                    "left_sf","right_sf",
-                    "left_size","right_size",
-                    "left_tf_hz","right_tf_hz",
-                    "stim_on_s","stim_off_s"]
+        fieldnames=[
+            "trial_index",
+            "left_type","right_type",
+            "left_ori","right_ori",
+            "left_sf_cpd","right_sf_cpd",
+            "left_size_deg","right_size_deg",
+            "left_sf_cyc_per_pix","right_sf_cyc_per_pix",
+            "left_size_pix","right_size_pix",
+            "stim_on_s","stim_off_s"
+        ]
     )
     writer.writeheader()
 
-    # Initial ITI
+    # Initial ITI (sync OFF/black)
+    sync_patch.fillColor = [-1, -1, -1]
+    sync_patch.draw()
     win.flip()
     core.wait(iti_duration_s)
 
@@ -91,71 +170,80 @@ with open(log_path, "w", newline="") as f:
 
         # Assign parameters by type
         if tr["left_type"] == "A":
-            left_ori  = grating_oris_deg[0]
-            left_sf   = grating_sfs_cyc_per_pix[0]
-            left_size = grating_sizes_pix[0]
-            left_tf   = drift_tf_hz[0]
+            left_ori       = grating_oris_deg[0]
+            left_sf_cpd    = grating_sfs_cpd[0]
+            left_sf_cpp    = grating_sfs_cyc_per_pix[0]
+            left_size_deg  = grating_sizes_deg[0]
+            left_size_pix  = grating_sizes_pix[0]
         else:
-            left_ori  = grating_oris_deg[1]
-            left_sf   = grating_sfs_cyc_per_pix[1]
-            left_size = grating_sizes_pix[1]
-            left_tf   = drift_tf_hz[1]
+            left_ori       = grating_oris_deg[1]
+            left_sf_cpd    = grating_sfs_cpd[1]
+            left_sf_cpp    = grating_sfs_cyc_per_pix[1]
+            left_size_deg  = grating_sizes_deg[1]
+            left_size_pix  = grating_sizes_pix[1]
 
         if tr["right_type"] == "A":
-            right_ori  = grating_oris_deg[0]
-            right_sf   = grating_sfs_cyc_per_pix[0]
-            right_size = grating_sizes_pix[0]
-            right_tf   = drift_tf_hz[0]
+            right_ori      = grating_oris_deg[0]
+            right_sf_cpd   = grating_sfs_cpd[0]
+            right_sf_cpp   = grating_sfs_cyc_per_pix[0]
+            right_size_deg = grating_sizes_deg[0]
+            right_size_pix = grating_sizes_pix[0]
         else:
-            right_ori  = grating_oris_deg[1]
-            right_sf   = grating_sfs_cyc_per_pix[1]
-            right_size = grating_sizes_pix[1]
-            right_tf   = drift_tf_hz[1]
+            right_ori      = grating_oris_deg[1]
+            right_sf_cpd   = grating_sfs_cpd[1]
+            right_sf_cpp   = grating_sfs_cyc_per_pix[1]
+            right_size_deg = grating_sizes_deg[1]
+            right_size_pix = grating_sizes_pix[1]
 
-        # Update BOTH stimuli for this trial
+        # Update gratings
         left_grat.ori  = left_ori
-        left_grat.sf   = left_sf
-        left_grat.size = left_size
-        left_grat.phase = 0.0             # reset phase each trial
-
+        left_grat.sf   = left_sf_cpp
+        left_grat.size = left_size_pix
         right_grat.ori  = right_ori
-        right_grat.sf   = right_sf
-        right_grat.size = right_size
-        right_grat.phase = 0.0
+        right_grat.sf   = right_sf_cpp
+        right_grat.size = right_size_pix
 
-        # Present drifting gratings for stim_duration_s
-        stim_on = clock.getTime()
-        t0 = core.getTime()               # high-precision reference
-        last_t = t0
-        while (core.getTime() - t0) < stim_duration_s:
+        # ---------------- Stimulus ON (drifting) ----------------
+        stim_clock = core.Clock()
+        t_trial = stim_duration_s
+
+        left_grat.phase = start_phase
+        right_grat.phase = start_phase
+
+        left_grat.draw()
+        right_grat.draw()
+        sync_patch.fillColor = [1, 1, 1]
+        sync_patch.draw()
+        stim_on = win.flip()
+
+        # Update phase continuously to drift
+        while stim_clock.getTime() < t_trial:
             if "escape" in event.getKeys():
                 break
-
-            # elapsed time since last frame
-            now = core.getTime()
-            dt = now - last_t
-            last_t = now
-
-            # Advance phase by temporal frequency * dt (phase units are cycles)
-            left_grat.phase  += left_tf  * dt
-            right_grat.phase += right_tf * dt
-
-            # Draw & flip
+            t = stim_clock.getTime()
+            left_grat.phase  = (start_phase + left_tf_hz  * t) % 1.0
+            right_grat.phase = (start_phase + right_tf_hz * t) % 1.0
             left_grat.draw()
             right_grat.draw()
+            sync_patch.fillColor = [1, 1, 1]
+            sync_patch.draw()
             win.flip()
 
-        # ITI (black)
+        # ---------------- Stimulus OFF ----------------
+        sync_patch.fillColor = [-1, -1, -1]
+        sync_patch.draw()
         win.flip()
         stim_off = clock.getTime()
+
         core.wait(iti_duration_s)
 
         # Log
         tr.update({
             "left_ori": left_ori, "right_ori": right_ori,
-            "left_sf": left_sf, "right_sf": right_sf,
-            "left_size": left_size, "right_size": right_size,
-            "left_tf_hz": left_tf, "right_tf_hz": right_tf,
+            "left_sf_cpd": left_sf_cpd, "right_sf_cpd": right_sf_cpd,
+            "left_size_deg": left_size_deg, "right_size_deg": right_size_deg,
+            "left_sf_cyc_per_pix": left_sf_cpp, "right_sf_cyc_per_pix": right_sf_cpp,
+            "left_size_pix": left_size_pix, "right_size_pix": right_size_pix,
             "stim_on_s": stim_on, "stim_off_s": stim_off
         })
         writer.writerow(tr)
