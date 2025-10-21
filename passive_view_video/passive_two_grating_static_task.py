@@ -8,17 +8,17 @@ import csv, random, time, os, math
 # 1) Experiment parameters
 # =========================
 win_fullscreen     = True
-screen_bg_color    = [-1, -1, -1]     # black
-stim_duration_s    = 5.0              # on-screen time per trial
+screen_bg_color    = [0, 0, 0]     # black
+stim_duration_s    = 1.0              # on-screen time per trial
 iti_duration_s     = 0.5              # black screen between trials
 grating_oris_deg   = (0.0, 45.0)      # two orientations to present (bar tilt)
-n_trials           = 10
+n_trials           = 50
 random_seed        = 42
 
 # Give parameters in DEGREES (visual angle):
-grating_sfs_cpd    = (0.1, 0.1)       # spatial frequency (LEFT type, RIGHT type) in cycles/degree
-grating_sizes_deg  = (70.0, 70.0)     # diameter (deg) for the two grating types
-eccentricity_deg   = 50.0             # horizontal eccentricity of patch centers (deg)
+grating_sfs_cpd    = (0.08, 0.08)       # spatial frequency (LEFT type, RIGHT type) in cycles/degree
+grating_sizes_deg  = (100.0, 100.0)     # diameter (deg) for the two grating types
+eccentricity_deg   = 70.0             # horizontal eccentricity of patch centers (deg)
 
 contrast           = 1.0
 start_phase        = 0.0
@@ -86,8 +86,8 @@ win = visual.Window(
 # 6) Rectangular sync patch (top-right)
 # =========================
 width, height = win.size
-sync_width_px   = 150      # horizontal size
-sync_height_px  = 40       # vertical size (shorter for rectangular look)
+sync_width_px   = 70      # horizontal size
+sync_height_px  = 60       # vertical size (shorter for rectangular look)
 sync_margin_px  = 10       # margin from screen edges
 
 sync_patch_x = (width / 2)  - (sync_width_px / 2)  - sync_margin_px
