@@ -12,17 +12,21 @@ grating_oris_deg   = (45.0, 135.0)    # orientations to present
 n_trials           = 50
 random_seed        = 42
 
-# Give parameters in DEGREES (visual angle):
-grating_sfs_cpd    = (0.08, 0.08)     # spatial frequency (LEFT type, RIGHT type)
+# Spatial and temporal parameters
+grating_sfs_cpd    = (0.08, 0.08)     # spatial frequency in cycles/degree
 grating_sizes_deg  = (100.0, 100.0)   # diameter (deg)
 eccentricity_deg   = 70.0             # horizontal eccentricity
 contrast           = 1.0
 start_phase        = 0.0
-left_tf_hz         = 2.0              # temporal frequency (cycles/sec)
-right_tf_hz        = 2.0
+
+# 🔧 Temporal frequency (drift speed) in Hz per orientation
+tf_hz_map = {
+    45.0: 2.0,      # drift speed for 45° gratings
+    135.0: 1.0      # drift speed for 135° gratings
+}
 
 # =========================
-# 2) Screen 2 geometry (edit to your setup)
+# 2) Screen geometry
 # =========================
 screen2_width_mm   = 520.0
 screen2_height_mm  = 520.0
@@ -88,7 +92,7 @@ win = visual.Window(
 win.recordFrameIntervals = False
 
 # =========================
-# 7) Rectangular sync patch
+# 7) Sync patch
 # =========================
 width, height = win.size
 sync_width_px   = 70
@@ -142,7 +146,7 @@ for i in range(n_trials):
 # 10) Helper for drift direction
 # =========================
 def drift_sign_for_ori(ori_deg: float) -> int:
-    # Flip sign so 45° and 135° drift opposite directions
+    # Flip sign so opposite diagonals (45° vs 135°) drift oppositely
     return 1 if math.cos(math.radians(ori_deg)) >= 0 else -1
 
 # =========================
@@ -155,10 +159,7 @@ with open(log_path, "w", newline="") as f:
             "trial_index",
             "left_type","right_type",
             "left_ori","right_ori",
-            "left_sf_cpd","right_sf_cpd",
-            "left_size_deg","right_size_deg",
-            "left_sf_cyc_per_pix","right_sf_cyc_per_pix",
-            "left_size_pix","right_size_pix",
+            "left_tf_hz","right_tf_hz",
             "stim_on_s","stim_off_s"
         ]
     )
@@ -175,26 +176,22 @@ with open(log_path, "w", newline="") as f:
 
         # Assign parameters
         if tr["left_type"] == "A":
-            left_ori, left_sf_cpd, left_sf_cpp, left_size_deg, left_size_pix = \
-                grating_oris_deg[0], grating_sfs_cpd[0], grating_sfs_cyc_per_pix[0], grating_sizes_deg[0], grating_sizes_pix[0]
+            left_ori = grating_oris_deg[0]
         else:
-            left_ori, left_sf_cpd, left_sf_cpp, left_size_deg, left_size_pix = \
-                grating_oris_deg[1], grating_sfs_cpd[1], grating_sfs_cyc_per_pix[1], grating_sizes_deg[1], grating_sizes_pix[1]
+            left_ori = grating_oris_deg[1]
 
         if tr["right_type"] == "A":
-            right_ori, right_sf_cpd, right_sf_cpp, right_size_deg, right_size_pix = \
-                grating_oris_deg[0], grating_sfs_cpd[0], grating_sfs_cyc_per_pix[0], grating_sizes_deg[0], grating_sizes_pix[0]
+            right_ori = grating_oris_deg[0]
         else:
-            right_ori, right_sf_cpd, right_sf_cpp, right_size_deg, right_size_pix = \
-                grating_oris_deg[1], grating_sfs_cpd[1], grating_sfs_cyc_per_pix[1], grating_sizes_deg[1], grating_sizes_pix[1]
+            right_ori = grating_oris_deg[1]
+
+        # Set TFs based on orientation and drift direction
+        left_tf  = tf_hz_map[left_ori]  * drift_sign_for_ori(left_ori)
+        right_tf = tf_hz_map[right_ori] * drift_sign_for_ori(right_ori)
 
         # Update gratings
-        left_grat.ori, left_grat.sf, left_grat.size = left_ori, left_sf_cpp, left_size_pix
-        right_grat.ori, right_grat.sf, right_grat.size = right_ori, right_sf_cpp, right_size_pix
-
-        # Set signed TFs based on orientation
-        left_tf  = left_tf_hz  * drift_sign_for_ori(left_ori)
-        right_tf = right_tf_hz * drift_sign_for_ori(right_ori)
+        left_grat.ori = left_ori
+        right_grat.ori = right_ori
 
         # ---------------- Stimulus ON (drifting) ----------------
         stim_clock = core.Clock()
@@ -226,11 +223,9 @@ with open(log_path, "w", newline="") as f:
         core.wait(iti_duration_s)
 
         tr.update({
+            "left_type": tr["left_type"], "right_type": tr["right_type"],
             "left_ori": left_ori, "right_ori": right_ori,
-            "left_sf_cpd": left_sf_cpd, "right_sf_cpd": right_sf_cpd,
-            "left_size_deg": left_size_deg, "right_size_deg": right_size_deg,
-            "left_sf_cyc_per_pix": left_sf_cpp, "right_sf_cyc_per_pix": right_sf_cpp,
-            "left_size_pix": left_size_pix, "right_size_pix": right_size_pix,
+            "left_tf_hz": left_tf, "right_tf_hz": right_tf,
             "stim_on_s": stim_on, "stim_off_s": stim_off
         })
         writer.writerow(tr)
