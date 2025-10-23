@@ -8,3 +8,4 @@ sortout
 vr_kinematic
 rf_recon/visual_stim
 *.json
+passive_view_video/logs

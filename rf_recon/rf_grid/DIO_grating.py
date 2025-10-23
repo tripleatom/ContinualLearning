@@ -4,8 +4,8 @@ import numpy as np
 from process_func.DIO import get_dio_folders, concatenate_din_data
 import matplotlib.pyplot as plt
 
-rec_folder = Path(r"D:\cl\freelymovingDrifting\CnL39SG\CnL39SG_20250921_230747.rec")
-task_file_Path = Path(r"D:\cl\freelymovingDrifting\CnL39SG\CnL39_drifting_grating_exp_20250921_230759.txt")
+rec_folder = Path(r"/Volumes/xieluanlabs/xl_cl/RF_GRID/250821/CnL39SG/CnL39SG_20250821_163039.rec")
+task_file_Path = Path(r"/Volumes/xieluanlabs/xl_cl/RF_GRID/250821/CnL39_4_20250821_175044.txt")
 task_id = task_file_Path.stem
 folder_path = task_file_Path.parent
 
