@@ -34,7 +34,7 @@ def process_static_grating_responses(rec_folder, stimdata_file, peaks_file, over
     
     # Parse session info (animal_id, session_id, folder_name)
     animal_id, session_id, folder_name = parse_session_info(rec_folder)
-    ishs = ['0', '1', '2', '3']
+    ishs = ['0', '1', '2', '3', '4', '5', '6', '7']  # Assuming 8 shanks
     
     # Open the Stimdata file to get stimulus parameters
 

@@ -116,16 +116,10 @@ def main(rec_folder, threshold=5.5, shanks=[0]):
 
 if __name__ == "__main__":
     threshold = 5.5
-    shanks = [0,1,2,3]
+    shanks = [0,1,2,3,4,5,6,7]
     rec_folders = [
-<<<<<<< HEAD
-        Path(r"G:\rf\CnL38\CnL38_250912_182321"),
-        Path(r"G:\rf\CnL39\CnL39_250912_171515")
-=======
-        # Path(r"F:\flicker\CnL22\CnL22_250717_110531"),
-        # Path(r"F:\flicker\CnL38\CnL38_250717_113259"),
-        Path(r"C:\Users\alber\OneDrive\Desktop\Rice\Luan Lab\Continuous Learning\CnL22SG\CnL22SG_20250817_145143.rec")
->>>>>>> 5d6772941a5f9828e55d3d013f581bdc548ba2b7
+        Path(r"C:\Users\Windows\Desktop\Albert\251022\CnL42SG\CnL42SG_20251022_160759.rec"),
+        # Path(r"D:\cl\freelymovingDrifting\CnL38SG\CnL38SG_20250921_220148.rec")
     ]
     for rec_folder in rec_folders:
         main(threshold=threshold, rec_folder=rec_folder, shanks=shanks)

@@ -81,7 +81,7 @@ class EphysToNWBConverter:
         ch_index = np.where(sh == ish)[0]
         return ch_index, xcoord[ch_index], ycoord[ch_index]
 
-    def _setup_spikegadget_files(self, data_file: Path):
+    def _setup_spikegadget_files(self, data_file: Path, selected_geom: Path = None):
         """Setup required files for SpikeGadgets reading."""
         if self.recording_method != 'spikegadget':
             return
@@ -89,11 +89,17 @@ class EphysToNWBConverter:
         mda_folder = data_file.parent
         script_dir = Path(__file__).resolve().parent
         params_path = script_dir / "params.json"
-        geom_path = script_dir / "geom.csv"
+        
+        # Use selected geom file or default
+        if selected_geom is None:
+            geom_path = script_dir / "geom.csv"
+        else:
+            geom_path = selected_geom
+        
         shutil.copy2(params_path, mda_folder)
-        shutil.copy2(geom_path, mda_folder)
+        shutil.copy2(geom_path, mda_folder / "geom.csv")  # Always copy as geom.csv
 
-    def _read_recording(self, data_file: Path, channel_ids: list = None):
+    def _read_recording(self, data_file: Path, channel_ids: list = None, selected_geom: Path = None):
         """Read recording data based on recording method."""
         if self.recording_method == 'intan':
             recording = se.read_intan(data_file, stream_id='0')
@@ -101,10 +107,11 @@ class EphysToNWBConverter:
                 trace = recording.get_traces(channel_ids=channel_ids)
             else:
                 trace = recording.get_traces()
-            conversion = recording.get_channel_gains()[0] / 1e6  # convert uV to V
+            conversion = recording.get_channel_gains()[0] / 1e6
             offset = recording.get_channel_offsets()[0] / 1e6
         else:  # spikegadget
-            self._setup_spikegadget_files(data_file)
+            self._setup_spikegadget_files(data_file, selected_geom)  # Pass selected_geom
+        # rest remains the same...
             mda_folder = data_file.parent
             mda_file = data_file.name
             recording = se.read_mda_recording(mda_folder, mda_file, 
@@ -137,7 +144,7 @@ class EphysToNWBConverter:
         session_id = metadata.get("session_id", "None")
         electrode_location = metadata.get("electrode_location", None)
         device_type = metadata.get("device_type", "4shank16intan" if self.recording_method == 'intan' else "4shank16")
-
+        selected_geom = metadata.get("selected_geom", None)
         nwbfile = NWBFile(
             session_description=nwb_description,
             identifier=str(uuid4()),
@@ -213,17 +220,16 @@ class EphysToNWBConverter:
         # Read recording data
         print("Adding electrical data...")
         if impedance_path is not None:
-            # If we have impedance file, we already loaded the recording above
-            recording, trace, conversion, offset = self._read_recording(data_file, electrode_df['channel_name'].tolist())
+            recording, trace, conversion, offset = self._read_recording(
+                data_file, electrode_df['channel_name'].tolist(), selected_geom)
             good_channel_ids = electrode_df['channel_name'].tolist()
         else:
-            # If no impedance file, we need to reload with proper channel selection
             if self.recording_method == 'intan':
                 good_channel_ids = electrode_df['channel_name'].tolist()
             else:
                 good_channel_ids = electrode_df['channel_index'].tolist()
-            recording, trace, conversion, offset = self._read_recording(data_file, good_channel_ids)
-
+            recording, trace, conversion, offset = self._read_recording(
+                data_file, good_channel_ids, selected_geom)  # Add selected_geom here
         electrical_series = ElectricalSeries(
             name="ElectricalSeries",
             data=H5DataIO(data=trace, maxshape=(None, trace.shape[1])),
@@ -271,9 +277,10 @@ class EphysToNWBConverter:
         Append additional recording data to an existing NWB file.
         """
         metadata = metadata or {}
+        selected_geom = metadata.get("selected_geom", None)
         with NWBHDF5IO(nwb_path, "a") as io:
             nwb_obj = io.read()
-            _, trace, _, _ = self._read_recording(data_file, channel_ids)
+            _, trace, _, _ = self._read_recording(data_file, channel_ids, selected_geom)
             self._append_nwb_dset(
                 nwb_obj.acquisition['ElectricalSeries'].data, trace, 0)
             io.write(nwb_obj)
@@ -334,6 +341,13 @@ def load_bad_ch(bad_file: Path) -> list:
         bad_channels = [line.strip() for line in f.readlines()]
     return bad_channels
 
+def get_geom_files(geom_folder: Path) -> list:
+    """Get list of available geom.csv files in the geom folder."""
+    if not geom_folder.exists():
+        return []
+    geom_files = sorted(geom_folder.glob("*.csv"))
+    return geom_files
+
 
 def main():
     """Main function to run the unified converter."""
@@ -363,9 +377,36 @@ def main():
     electrode_location = input("Please enter the electrode location: ").strip()
     exp_desc = input("Please enter the experiment description: ").strip() or "None"
     
+    # Get device type
     animal_id = data_folder.parent.name
     device_type = get_or_set_device_type(animal_id)
-    raw = input("Please enter the shank numbers (e.g. 0,1,2,3 or [0,1,2,3]): ")
+
+    # GEOM FILE SELECTION (only for SpikeGadgets)
+    selected_geom = None
+    if recording_method == 'spikegadget':
+        script_dir = Path(__file__).resolve().parent
+        geom_folder = script_dir / "geom"
+        geom_files = get_geom_files(geom_folder)
+        
+        if not geom_files:
+            print(f"Warning: No .csv files found in {geom_folder}. Will use default geom.csv if available.")
+        else:
+            print("\nAvailable geom files:")
+            for idx, gfile in enumerate(geom_files, 1):
+                print(f"{idx}. {gfile.name}")
+            
+            geom_choice = input("Select geom file (enter number): ").strip()
+            try:
+                geom_idx = int(geom_choice) - 1
+                if 0 <= geom_idx < len(geom_files):
+                    selected_geom = geom_files[geom_idx]
+                    print(f"Selected: {selected_geom.name}")
+                else:
+                    print("Invalid selection. Using default geom.csv if available.")
+            except ValueError:
+                print("Invalid input. Using default geom.csv if available.")
+
+    raw = input("Please enter the shank numbers (e.g. 0,1,2,3 or [0,1,2,3]): ")    
     shanks = [int(x) for x in re.findall(r'\d+', raw)]
     print(f"Processing shanks: {shanks}")
     
@@ -400,6 +441,7 @@ def main():
                 'n_channels_per_shank': 32,
                 'electrode_location': electrode_location,
                 'exp_desc': exp_desc,
+                'selected_geom': selected_geom if recording_method == 'spikegadget' else None
             }
         )
 
@@ -413,7 +455,8 @@ def main():
             converter.append_nwb(
                 nwb_path, f,
                 channel_ids=good_ch,
-                metadata={'device_type': device_type}
+                metadata={'device_type': device_type,
+                          'selected_geom': selected_geom if recording_method == 'spikegadget' else None}
             )
 
     print("Conversion completed successfully!")

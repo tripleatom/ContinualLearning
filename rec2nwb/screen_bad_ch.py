@@ -26,7 +26,12 @@ def get_ch_index_on_shank(ish: int, device_type: str) -> tuple:
 
     ch_index = np.where(sh == ish)[0]
     return ch_index, xcoord[ch_index], ycoord[ch_index]
-
+def get_geom_files(geom_folder: Path) -> list:
+    """Get list of available geom.csv files in the geom folder."""
+    if not geom_folder.exists():
+        return []
+    geom_files = sorted(geom_folder.glob("*.csv"))
+    return geom_files
 
 def format_impedance(imp):
     """
@@ -59,7 +64,7 @@ class BadChannelScreener:
             raise ValueError("Recording method must be 'intan' or 'spikegadget'")
         self.recording_method = recording_method
 
-    def _setup_spikegadget_files(self, data_file: Path):
+    def _setup_spikegadget_files(self, data_file: Path, selected_geom: Path = None):
         """Setup required files for SpikeGadgets reading."""
         if self.recording_method != 'spikegadget':
             return
@@ -67,26 +72,31 @@ class BadChannelScreener:
         mda_folder = data_file.parent
         script_dir = Path(__file__).resolve().parent
         params_path = script_dir / "params.json"
-        geom_path = script_dir / "geom.csv"
+        
+        # Use selected geom file or default
+        if selected_geom is None:
+            geom_path = script_dir / "geom.csv"
+        else:
+            geom_path = selected_geom
         
         if params_path.exists() and geom_path.exists():
             shutil.copy2(params_path, mda_folder)
-            shutil.copy2(geom_path, mda_folder)
+            shutil.copy2(geom_path, mda_folder / "geom.csv")  # Always copy as geom.csv
         else:
-            print("Warning: params.json or geom.csv not found. SpikeGadgets reading may fail.")
-
-    def _read_recording(self, data_file: Path):
+            print("Warning: params.json or geom file not found. SpikeGadgets reading may fail.")
+    
+    def _read_recording(self, data_file: Path, selected_geom: Path = None):
         """Read recording data based on recording method."""
         if self.recording_method == 'intan':
             recording = se.read_intan(data_file, stream_id='0')
         else:  # spikegadget
-            self._setup_spikegadget_files(data_file)
+            self._setup_spikegadget_files(data_file, selected_geom)
             mda_folder = data_file.parent
             mda_file = data_file.name
             # Use lazy loading for large files
             recording = se.read_mda_recording(mda_folder, mda_file, 
                                             params_fname="params.json",
-                                            geom_fname="geom.csv")
+                                            geom_fname="geom.csv",)
         return recording
 
     def _get_channel_info(self, ishank: int, device_type: str, impedance_path: Path = None, recording=None):
@@ -168,7 +178,8 @@ class BadChannelScreener:
             return data_folder.name
 
     def manual_bad_ch_id(self, data_folder: Path, first_file: Path, n_shank: int, 
-                        impedance_path: Path = None, device_type: str = "4shank16") -> list:
+                        impedance_path: Path = None, device_type: str = "4shank16",
+                        selected_geom: Path = None) -> list:
         """
         Manually screen bad channels across shanks, saving segment screenshots.
         """
@@ -186,7 +197,7 @@ class BadChannelScreener:
 
         # Load recording
         print("Loading recording...")
-        recording = self._read_recording(first_file)
+        recording = self._read_recording(first_file, selected_geom)
         fs = recording.sampling_frequency
         
         print(f"Recording info: {recording.get_num_channels()} channels, {recording.get_num_samples()} samples, {fs} Hz")
@@ -360,7 +371,6 @@ class BadChannelScreener:
         print(f"Bad channel IDs saved to {bad_file}")
         return all_bad_ch_ids
 
-
 def main():
     """Main function to run the bad channel screener."""
     # Choose recording method
@@ -399,6 +409,31 @@ def main():
     device_type = get_or_set_device_type(animal_id)
     print("Using device type:", device_type)
     
+    # GEOM FILE SELECTION (only for SpikeGadgets)
+    selected_geom = None
+    if recording_method == 'spikegadget':
+        script_dir = Path(__file__).resolve().parent
+        geom_folder = script_dir / "geom"
+        geom_files = get_geom_files(geom_folder)
+        
+        if not geom_files:
+            print(f"Warning: No .csv files found in {geom_folder}. Will use default geom.csv.")
+        else:
+            print("\nAvailable geom files:")
+            for idx, gfile in enumerate(geom_files, 1):
+                print(f"{idx}. {gfile.name}")
+            
+            geom_choice = input("Select geom file (enter number): ").strip()
+            try:
+                geom_idx = int(geom_choice) - 1
+                if 0 <= geom_idx < len(geom_files):
+                    selected_geom = geom_files[geom_idx]
+                    print(f"Selected: {selected_geom.name}")
+                else:
+                    print("Invalid selection. Using default geom.csv.")
+            except ValueError:
+                print("Invalid input. Using default geom.csv.")
+    
     # Get number of shanks
     n_shank = int(input("Enter the number of shanks: ").strip())
 
@@ -411,10 +446,10 @@ def main():
         print(f"Error: {e}")
         return
 
-    # Run screening
+    # Run screening (pass selected_geom)
     try:
         bad_channels = screener.manual_bad_ch_id(
-            data_folder, first_file, n_shank, impedance_file, device_type)
+            data_folder, first_file, n_shank, impedance_file, device_type, selected_geom)
         print(f"Screening completed. Found {len(bad_channels)} bad channels total.")
     except Exception as e:
         print(f"Error during screening: {e}")
