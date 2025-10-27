@@ -4,8 +4,8 @@ import numpy as np
 from process_func.DIO import get_dio_folders, concatenate_din_data
 import matplotlib.pyplot as plt
 
-rec_folder = Path(r"C:\Users\alber\OneDrive\Desktop\Rice\Luan_Lab\Data\Continuous Learning\DIO_testing\CnL40SG_20250922_164122.rec")
-task_file_Path = Path(r"C:\Users\alber\OneDrive\Desktop\Rice\Luan_Lab\Data\Continuous Learning\DIO_testing\CnL40_drifting_grating_exp_20250922_164536.txt")
+rec_folder = Path(r"/Volumes/xieluanlabs/xl_cl/RF_GRID/250821/CnL39SG/CnL39SG_20250821_163039.rec")
+task_file_Path = Path(r"/Volumes/xieluanlabs/xl_cl/RF_GRID/250821/CnL39_4_20250821_175044.txt")
 task_id = task_file_Path.stem
 folder_path = task_file_Path.parent
 
@@ -49,22 +49,28 @@ pd_time = pd_time - pd_time[0]
 rising = np.where(pd_state == 1)[0]
 falling = np.where(pd_state == 0)[0]
 rising_times = pd_time[rising]
+rising_times = np.delete(rising_times, [52])
+# rising_times = np.insert(rising_times, 51, rising_times[50]+30000*3)
+
 falling_times = pd_time[falling]
 
 rising_diff = np.diff(rising_times)/fs
 print(np.where(rising_diff > 5)[0])
 
-rising_rf_start = 2999
+
+
+
+rising_rf_start = 0
 # rising_rf_end = 
 
 rising_times_rf = rising_times[rising_rf_start:]
 
 print("rising times shape", np.shape(rising_times_rf))
 
-
-falling_times_rf = falling_times[rising_rf_start:]
+falling_times_rf = rising_times_rf + int(stimulus_duration*fs)
+# falling_times_rf = falling_times[rising_rf_start:]
 trial_times_rf = falling_times_rf - rising_times_rf
-plt.plot(trial_times_rf/fs)
+plt.plot(rising_diff/fs)
 plt.show()
 
 # print(np.diff(rising_times_rf)/fs)

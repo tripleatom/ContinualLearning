@@ -13,17 +13,13 @@ import spikeinterface.preprocessing as sp
 from rec2nwb.preproc_func import parse_session_info
 
 # Constants
-# BASE_FOLDER = r"\\10.129.151.108\xieluanlabs\xl_cl\batch2"
-<<<<<<< HEAD
-BASE_FOLDER = r"G:"  
-DATES = ['rf']
-=======
-BASE_FOLDER = r"C:\Users\alber\OneDrive\Desktop\Rice\Luan Lab\Continuous Learning"  
-DATES = ['250817']
->>>>>>> 5d6772941a5f9828e55d3d013f581bdc548ba2b7
-# ANIMAL_IDS = ['CoI06', 'CoI07', 'CoI08', 'CoI09', 'CoI10']
-ANIMAL_IDS = ['CnL38', 'CnL39']
-ISHS = [ 0, 1, 2, 3]
+BASE_FOLDER = r"C:\Users\Windows\Desktop\Albert"
+# BASE_FOLDER = r"\\10.129.151.108\xieluanlabs\xl_cl\rf_reconstruction\head_fixed"  
+DATES = ['251022']
+ANIMAL_IDS = ['CnL39SG']
+# ISHS = [ 0, 1, 2, 3, 4, 5, 6, 7]  # List of shank numbers to process
+ISHS = [ 0, 1, 2, 3]  # List of shank numbers to process
+
 SORTOUT_FOLDER = Path(__file__).parents[1] / 'sortout'
 # TODO: add overwrite option, if the phy folder exists, skip it if overwrite is False
 OVERWRITE = False

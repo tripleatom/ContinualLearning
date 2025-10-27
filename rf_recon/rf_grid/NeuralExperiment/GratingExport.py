@@ -618,8 +618,8 @@ def load_from_npz(filepath):
 if __name__ == "__main__":
     # Example usage with better error handling
     try:
-        rec_folder = Path(r"/Volumes/xieluanlabs/xl_cl/RF_GRID/250821/CnL22SG/CnL22SG_20250821_183152.rec")
-        task_file_path = Path(r"/Volumes/xieluanlabs/xl_cl/RF_GRID/250821/CnL22_4_20250821_195440.txt")
+        rec_folder = Path(r"D:\cl\freelymovingDrifting\CnL40SG\CnL40SG_20250922_164122.rec")
+        task_file_path = Path(r"D:\cl\grating_disk_representation\driftingGratingBuild\DriftingGratingData\CnL40_drifting_grating_exp_20250922_164536.txt")
 
         # Check if paths exist
         if not rec_folder.exists():
