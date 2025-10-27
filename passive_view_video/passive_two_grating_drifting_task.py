@@ -9,7 +9,7 @@ screen_bg_color    = [0, 0, 0]        # black
 stim_duration_s    = 1.0              # on-screen time per trial
 iti_duration_s     = 0.5              # black screen between trials
 grating_oris_deg   = (45.0, 135.0)    # orientations to present
-n_trials           = 4
+n_trials           = 600
 random_seed        = 42
 
 # Spatial and temporal parameters
@@ -21,8 +21,10 @@ start_phase        = 0.0
 
 # 🔧 Temporal frequency (drift speed) in Hz per orientation
 tf_hz_map = {
-    45.0: 2.0,      # drift speed for 45° gratings
-    135.0: 1.0      # drift speed for 135° gratings
+    45.0: 4.0,      # drift speed for 45° gratings
+    135.0: 4.0,      # drift speed for 135° gratings
+    0.0: 4.0,
+    90.0: 4.0
 }
 
 # =========================
@@ -60,7 +62,7 @@ clock = core.Clock()
 run_id = time.strftime("%Y%m%d_%H%M%S")
 save_dir = os.path.join(os.path.dirname(__file__), "logs")
 os.makedirs(save_dir, exist_ok=True)
-log_path = os.path.join(save_dir, f"two_grating_passive_drifting_{run_id}.csv")
+log_path = os.path.join(save_dir, f"CnL42_45_135_two_grating_passive_drifting_{run_id}.csv")
 
 # =========================
 # 5) Monitor profile
@@ -95,8 +97,8 @@ win.recordFrameIntervals = False
 # 7) Sync patch
 # =========================
 width, height = win.size
-sync_width_px   = 70
-sync_height_px  = 60
+sync_width_px   = 80
+sync_height_px  = 80
 sync_margin_px  = 10
 sync_patch_x = (width / 2)  - (sync_width_px / 2)  - sync_margin_px
 sync_patch_y = (height / 2) - (sync_height_px / 2) - sync_margin_px
