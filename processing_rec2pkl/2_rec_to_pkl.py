@@ -2,6 +2,7 @@
 # Unifies ephys .rec + PsychoPy CSV (+ optional *_DIO_cleaned.npz and *_taskmeta.npz)
 # and attaches spikes from Phy or SortingAnalyzer results, producing a single .pkl
 # ready for downstream analysis / embeddings.
+# Includes robust CSV↔DIO subsequence alignment + verification plot.
 # ================================================================
 
 from pathlib import Path
@@ -12,11 +13,86 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 import pickle
-import h5py  # only if you later want HDF5 I/O
+
+# plotting for alignment verification
+import matplotlib.pyplot as plt
 
 # SpikeInterface
 from spikeinterface import load_sorting_analyzer
 from spikeinterface.extractors import PhySortingExtractor
+
+
+# -----------------------
+# Alignment helpers
+# -----------------------
+def _best_csv_dio_alignment(csv_on_s, dio_rising_s, tol_s=0.02):
+    """
+    Find where the CSV run occurs inside a longer DIO sequence.
+    Slide a window of length len(csv_on_s) across dio_rising_s and
+    compare relative onset patterns (offset-invariant). Returns:
+      best_j: best start index in DIO,
+      diffs: per-trial |Δ| (seconds) for the chosen match
+    """
+    csv_on_s = np.asarray(csv_on_s, float)
+    dio_rising_s = np.asarray(dio_rising_s, float)
+
+    m = len(csv_on_s)
+    n = len(dio_rising_s)
+    if m == 0 or n == 0 or n < m:
+        return None, None
+
+    csv_rel = csv_on_s - csv_on_s[0]
+    best_j, best_err = None, np.inf
+
+    for j in range(0, n - m + 1):
+        dio_block = dio_rising_s[j:j + m]
+        dio_rel = dio_block - dio_block[0]
+        diffs = np.abs(csv_rel - dio_rel)
+        err = np.max(diffs)  # strict criterion; use mean if you prefer
+        if err < best_err:
+            best_err = err
+            best_j = j
+
+    if best_j is None:
+        return None, None
+
+    # Recompute diffs for the selected block and enforce tolerance
+    dio_block = dio_rising_s[best_j:best_j + m]
+    dio_rel = dio_block - dio_block[0]
+    diffs = np.abs((csv_on_s - csv_on_s[0]) - dio_rel)
+    if np.any(diffs > tol_s):
+        return None, diffs
+    return best_j, diffs
+
+
+def select_trials_for_this_csv(csv_on_s, csv_off_s, rising_samples, falling_samples, fs, tol_s=0.02):
+    """
+    Locate the CSV run inside DIO edges and return the exact subset:
+      - trial_windows in *samples* (start=rising, end=falling)
+      - keep_idx: indices of the matched trials in the DIO sequence
+      - diffs: per-trial |Δ| (sec) between CSV and matched DIO onsets
+      - start_j: starting index into DIO rising sequence
+    """
+    dio_rising_s = np.asarray(rising_samples, float) / float(fs)
+    dio_falling_s = np.asarray(falling_samples, float) / float(fs)
+
+    start_j, diffs = _best_csv_dio_alignment(csv_on_s, dio_rising_s, tol_s=tol_s)
+    if start_j is None:
+        raise RuntimeError(
+            f"Could not align CSV run inside DIO within ±{tol_s:.3f}s. "
+            f"Try increasing tol_s or verify clocks."
+        )
+
+    m = len(csv_on_s)
+    dio_slice = slice(start_j, start_j + m)
+
+    chosen_rising = rising_samples[dio_slice].astype(float)
+    chosen_falling = falling_samples[dio_slice].astype(float)
+
+    trial_windows = [(float(chosen_rising[i]), float(chosen_falling[i])) for i in range(m)]
+    keep_idx = np.arange(start_j, start_j + m, dtype=int)
+
+    return trial_windows, keep_idx, diffs, start_j
 
 
 # -----------------------
@@ -70,8 +146,7 @@ def attach_phy_spikes(
                 sorter_fs = sorter.sampling_frequency
                 print(f"[attach_phy_spikes] Loaded Phy at {p} | fs={sorter_fs} Hz | units={len(sorter.unit_ids)}")
             else:
-                # p is the sorting_analyzer dir
-                sa = load_sorting_analyzer(p)
+                sa = load_sorting_analyzer(p)  # p is the sorting_analyzer dir
                 sorter = sa.sorting
                 sorter_fs = sorter.sampling_frequency
                 print(f"[attach_phy_spikes] Loaded SortingAnalyzer at {p} | fs={sorter_fs} Hz | units={len(sorter.unit_ids)}")
@@ -79,9 +154,9 @@ def attach_phy_spikes(
             print(f"[attach_phy_spikes] Skipping {p}: {e}")
             continue
 
+        # Backfill fs if needed
         if data["metadata"].get("fs") in (None, "None", "") and sorter_fs is not None:
             data["metadata"]["fs"] = float(sorter_fs)
-            fs = float(sorter_fs)
 
         try:
             unit_ids = sorter.unit_ids
@@ -99,6 +174,11 @@ def attach_phy_spikes(
                 qualities = ["good"] * len(unit_ids)
         except Exception:
             qualities = ["good"] * len(unit_ids)
+
+        # Prefer the explicit orientations array if present
+        orientations = data["trial_info"].get("orientations", None)
+        left_seq = data["trial_info"].get("left_ori_seq", [])
+        right_seq = data["trial_info"].get("right_ori_seq", [])
 
         for idx, uid in enumerate(unit_ids):
             qual = qualities[idx] if idx < len(qualities) else "unknown"
@@ -120,34 +200,36 @@ def attach_phy_spikes(
             trials_out = []
             n_trials = len(trial_windows)
 
-            if not have_samples and (fs is None or fs == 0):
+            fs_eff = data["metadata"].get("fs", None) or sorter_fs
+            if not have_samples and (fs_eff is None or fs_eff == 0):
                 print(f"[attach_phy_spikes] Missing fs to align seconds; skipping {unique_id}")
                 continue
 
-            spike_times_s = spike_samples / float(fs if fs else sorter_fs)
+            spike_times_s = spike_samples / float(fs_eff)
 
             for t_idx in range(n_trials):
                 start, end = trial_windows[t_idx]
 
                 if have_samples:
                     start_samp = int(start)
-                    pre_samp = int(window_pre_s * (fs if fs else sorter_fs))
-                    post_samp = int(window_post_s * (fs if fs else sorter_fs))
+                    pre_samp = int(window_pre_s * fs_eff)
+                    post_samp = int(window_post_s * fs_eff)
                     mask = (spike_samples >= start_samp - pre_samp) & (spike_samples < start_samp + post_samp)
-                    spikes_rel_s = (spike_samples[mask] - start_samp) / float(fs if fs else sorter_fs)
+                    spikes_rel_s = (spike_samples[mask] - start_samp) / float(fs_eff)
                 else:
                     start_sec = float(start)
                     mask = (spike_times_s >= start_sec - window_pre_s) & (spike_times_s < start_sec + window_post_s)
                     spikes_rel_s = spike_times_s[mask] - start_sec
 
-                # Orientation per trial (best-effort)
-                left_seq = data["trial_info"].get("left_ori_seq", [])
-                right_seq = data["trial_info"].get("right_ori_seq", [])
-                ori_val = None
-                if isinstance(left_seq, list) and t_idx < len(left_seq):
+                # Orientation per trial: prefer explicit 'orientations', then left/right seq
+                if isinstance(orientations, list) and t_idx < len(orientations):
+                    ori_val = orientations[t_idx]
+                elif isinstance(left_seq, list) and t_idx < len(left_seq):
                     ori_val = left_seq[t_idx]
                 elif isinstance(right_seq, list) and t_idx < len(right_seq):
                     ori_val = right_seq[t_idx]
+                else:
+                    ori_val = None
 
                 trials_out.append({
                     "trial_index": t_idx,
@@ -188,6 +270,7 @@ if __name__ == "__main__":
     taskmeta_npz_path = None   # or Path(...)
     sorting_root      = Path(r"\\10.129.151.108\xieluanlabs\xl_cl\code\sortout\CnL42SG\CnL42SG_20251022_160759")
     output_dir        = Path(r"C:\Users\Windows\Desktop\Albert\251022\CnL42SG")
+
     # ==== 2) Parse session IDs ====
     rec_name   = rec_folder.name.replace(".rec", "")
     parts      = rec_name.split("_")
@@ -197,8 +280,16 @@ if __name__ == "__main__":
 
     # ==== 3) Load CSV ====
     df = pd.read_csv(csv_path)
-    if not {"stim_on_s", "stim_off_s"}.issubset(df.columns):
-        raise ValueError("CSV missing required columns 'stim_on_s' and 'stim_off_s'")
+    required_cols = {"stim_on_s", "stim_off_s"}
+    if not required_cols.issubset(df.columns):
+        raise ValueError(f"CSV missing required columns {required_cols}")
+
+    # --- Orientation from CSV (left_ori) ---
+    if "left_ori" in df.columns:
+        orientations = df["left_ori"].to_numpy(float)
+    else:
+        print("[Warning] No 'left_ori' column found in CSV — assigning zeros.")
+        orientations = np.zeros(len(df), dtype=float)
 
     csv_on  = df["stim_on_s"].to_numpy(float)
     csv_off = df["stim_off_s"].to_numpy(float)
@@ -235,15 +326,85 @@ if __name__ == "__main__":
     iti_duration      = float(meta.get("iti_duration_s", 0.5))
     n_trials_meta     = int(meta.get("n_trials", len(csv_on)))
     orientation_pairs = meta.get("orientation_pairs", np.array([[0, 90]]))
-    left_seq  = meta.get("left_ori_seq", np.zeros(len(csv_on)))
-    right_seq = meta.get("right_ori_seq", np.zeros(len(csv_on)))
+    right_seq         = meta.get("right_ori_seq", np.zeros(len(csv_on)))
 
-    # ==== 6) Build trial windows (prefer DIO if present) ====
-    if len(rising_times) and len(falling_times):
-        n = min(len(csv_on), len(rising_times), len(falling_times))
-        trial_windows = [(float(rising_times[i]), float(falling_times[i])) for i in range(n)]
+    # ==== 6) Build trial windows (prefer DIO if present with alignment) ====
+    tol_s = 0.02  # tolerance in seconds for CSV↔DIO matching
+
+    if len(rising_times) and len(falling_times) and fs:
+        # Align THIS CSV to its segment inside the long DIO stream
+        trial_windows, keep_idx, diffs, start_j = select_trials_for_this_csv(
+            csv_on_s=csv_on,
+            csv_off_s=csv_off,                 # kept for potential future checks
+            rising_samples=rising_times,
+            falling_samples=falling_times,
+            fs=float(fs),
+            tol_s=tol_s
+        )
+
+        # Slice per-trial arrays to the matched trials only (length m)
+        m = len(trial_windows)
+        orientations = orientations[:m]
+
+        # ------- Verification: print summary -------
+        print(f"[Align] Matched CSV run at DIO index start: {int(start_j)}")
+        print(f"[Align] Max |Δonset| = {float(np.max(diffs)):.4f}s | Mean = {float(np.mean(diffs)):.4f}s")
+        n_bad = int(np.sum(diffs > tol_s))
+        if n_bad:
+            print(f"[Align][WARN] {n_bad} trials exceed tolerance ±{tol_s:.3f}s")
+
+        # ------- Verification: quick plot saved to output_dir -------
+        try:
+            dio_rising_s = np.asarray(rising_times, float) / float(fs)
+            csv_rel = csv_on - csv_on[0]
+            dio_block = dio_rising_s[start_j:start_j + m]
+            dio_rel = dio_block - dio_block[0]
+
+            fig = plt.figure(figsize=(8, 6))
+
+            # Overlay of relative onsets
+            ax1 = fig.add_subplot(2, 1, 1)
+            ax1.plot(csv_rel, marker='o', linestyle='-', label='CSV (rel)')
+            ax1.plot(dio_rel, marker='x', linestyle='--', label='DIO (rel)')
+            ax1.set_ylabel('Time (s, relative)')
+            ax1.set_title('CSV vs DIO relative onsets')
+            ax1.legend(loc='best')
+
+            # Per-trial absolute diffs
+            ax2 = fig.add_subplot(2, 1, 2)
+            ax2.plot(diffs, marker='o')
+            ax2.axhline(tol_s, linestyle='--')
+            ax2.set_ylabel('|Δonset| (s)')
+            ax2.set_xlabel('Trial # (matched)')
+            ax2.set_title('Per-trial onset differences')
+
+            output_dir.mkdir(parents=True, exist_ok=True)
+            align_png = output_dir / "alignment_check.png"
+            fig.tight_layout()
+            fig.savefig(align_png, dpi=150)
+            plt.close(fig)
+            print(f"[Align] Saved verification plot to: {align_png}")
+        except Exception as e:
+            print(f"[Align] Plot skipped: {e}")
+
+        alignment_meta = {
+            "mode": "DIO_csv_subsequence",
+            "tol_s": float(tol_s),
+            "dio_start_index": int(start_j),
+            "max_abs_diff_s": float(np.max(diffs)),
+            "mean_abs_diff_s": float(np.mean(diffs)),
+        }
+
     else:
+        # Fallback: no DIO -> use CSV directly (seconds)
         trial_windows = [(float(csv_on[i]), float(csv_off[i])) for i in range(len(csv_on))]
+        alignment_meta = {
+            "mode": "csv_only",
+            "tol_s": float(tol_s),
+            "dio_start_index": None,
+            "max_abs_diff_s": None,
+            "mean_abs_diff_s": None,
+        }
 
     # ==== 7) Combine into unified dict ====
     data = {
@@ -252,12 +413,13 @@ if __name__ == "__main__":
             "session_id": session_id,
             "recording_folder": str(rec_folder),
             "csv_path": str(csv_path),
-            "dio_npz_path": str(dio_guess) if dio_guess.exists() else None,
-            "taskmeta_npz_path": str(taskmeta_guess) if taskmeta_guess.exists() else None,
+            "dio_npz_path": str(dio_guess) if 'dio_guess' in locals() and dio_guess.exists() else None,
+            "taskmeta_npz_path": str(taskmeta_guess) if 'taskmeta_guess' in locals() and taskmeta_guess.exists() else None,
             "extraction_date": datetime.now().isoformat(),
             "fs": float(fs) if fs is not None else None,
             "n_trials": len(trial_windows),
             "source": "CSV+DIO" if len(rising_times) else "CSV",
+            "alignment": alignment_meta,
         },
         "experiment_parameters": {
             "stimulus_duration_s": stimulus_duration,
@@ -265,9 +427,10 @@ if __name__ == "__main__":
             "orientation_pairs": orientation_pairs.tolist() if isinstance(orientation_pairs, np.ndarray) else orientation_pairs,
         },
         "trial_info": {
-            "trial_windows": trial_windows,
+            "trial_windows": trial_windows,                           # list of (start, end) in samples if DIO, else seconds
             "csv_iti": csv_iti.tolist(),
-            "left_ori_seq": left_seq.tolist() if isinstance(left_seq, np.ndarray) else list(left_seq),
+            "orientations": orientations.tolist(),                    # canonical per-trial orientation from CSV
+            "left_ori_seq": orientations.tolist(),                    # kept for backward-compat
             "right_ori_seq": right_seq.tolist() if isinstance(right_seq, np.ndarray) else list(right_seq),
             "csv_df": df.to_dict("records"),
         },
@@ -299,3 +462,6 @@ if __name__ == "__main__":
     print(f"- Trials: {data['metadata']['n_trials']}")
     print(f"- FS: {data['metadata'].get('fs')}")
     print(f"- Units attached: {data['extraction_params'].get('total_units', 0)}")
+    # Optional: orientation distribution
+    u, c = np.unique(np.array(data["trial_info"]["orientations"]), return_counts=True)
+    print(f"- Orientation counts: {dict(zip(u.tolist(), c.tolist()))}")
