@@ -10,8 +10,7 @@ import neo.rawio
 from pynwb import NWBFile, NWBHDF5IO
 from pynwb.ecephys import ElectricalSeries, TimeSeries
 from hdmf.backends.hdf5.h5_utils import H5DataIO
-from rec2nwb.preproc_func import get_or_set_device_type
-import os
+from rec2nwb.preproc_func import get_or_set_device_type, get_animal_id
 import shutil
 
 
@@ -378,7 +377,7 @@ def main():
     exp_desc = input("Please enter the experiment description: ").strip() or "None"
     
     # Get device type
-    animal_id = data_folder.parent.name
+    animal_id = get_animal_id(data_folder)
     device_type = get_or_set_device_type(animal_id)
 
     # GEOM FILE SELECTION (only for SpikeGadgets)

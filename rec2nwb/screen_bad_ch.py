@@ -8,7 +8,7 @@ from spikeinterface import extractors as se
 import os
 import shutil
 import re
-from rec2nwb.preproc_func import get_or_set_device_type
+from rec2nwb.preproc_func import get_or_set_device_type, get_animal_id
 
 
 def get_ch_index_on_shank(ish: int, device_type: str) -> tuple:
@@ -177,7 +177,7 @@ class BadChannelScreener:
             # For Intan: use folder name
             return data_folder.name
 
-    def manual_bad_ch_id(self, data_folder: Path, first_file: Path, n_shank: int, 
+    def manual_bad_ch_id(self, animal_id,  data_folder: Path, first_file: Path, n_shank: int, 
                         impedance_path: Path = None, device_type: str = "4shank16",
                         selected_geom: Path = None) -> list:
         """
@@ -191,7 +191,6 @@ class BadChannelScreener:
                 return [line.strip() for line in open(bad_file)]
 
         # Derive animal_id and session_id from folder structure
-        animal_id = data_folder.parent.name
         session_id = self.get_session_description(data_folder)
         out_root = Path("sortout") / animal_id / session_id
 
@@ -405,7 +404,7 @@ def main():
         impedance_file = None
 
     # Get animal_id and device_type
-    animal_id = data_folder.parent.name
+    animal_id = get_animal_id(data_folder)
     device_type = get_or_set_device_type(animal_id)
     print("Using device type:", device_type)
     
@@ -449,7 +448,7 @@ def main():
     # Run screening (pass selected_geom)
     try:
         bad_channels = screener.manual_bad_ch_id(
-            data_folder, first_file, n_shank, impedance_file, device_type, selected_geom)
+            animal_id, data_folder, first_file, n_shank, impedance_file, device_type, selected_geom)
         print(f"Screening completed. Found {len(bad_channels)} bad channels total.")
     except Exception as e:
         print(f"Error during screening: {e}")

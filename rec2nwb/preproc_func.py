@@ -6,6 +6,31 @@ import json
 import tkinter as tk
 from pathlib import Path
 
+def get_animal_id(data_folder):
+    """Get animal ID with user confirmation."""
+    # Auto-detect animal ID
+    detected_id = data_folder.stem.split('_')[0]
+    print(f"\nDetected animal ID: {detected_id}")
+    
+    while True:
+        confirm = input(f"Is '{detected_id}' correct? (y/n): ").strip().lower()
+        
+        if confirm == 'y' or confirm == 'yes':
+            animal_id = detected_id
+            print(f"✓ Using animal ID: {animal_id}")
+            break
+        elif confirm == 'n' or confirm == 'no':
+            animal_id = input("Enter the correct animal ID: ").strip()
+            if animal_id:  # Check if not empty
+                print(f"✓ Animal ID set to: {animal_id}")
+                break
+            else:
+                print("Animal ID cannot be empty. Please try again.")
+        else:
+            print("Please enter 'y' for yes or 'n' for no.")
+    
+    return animal_id
+
 def choose_device_type(animal_id: str) -> str:
     """
     Pop up a small Tk window to let the user pick one of the
