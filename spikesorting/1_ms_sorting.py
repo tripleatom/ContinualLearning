@@ -2,33 +2,70 @@ import os
 import time
 import json
 from pathlib import Path
-
 import matplotlib.pyplot as plt
 import numpy as np
-
 import spikeinterface as si
 import spikeinterface.extractors as se
 import spikeinterface.preprocessing as sp
 import spikeinterface.widgets as sw
-import spikeinterface.exporters as sexp
 import mountainsort5 as ms5
-
 from Timer import Timer
 from rec2nwb.preproc_func import rm_artifacts, parse_session_info
 
 
-def main(rec_folder, threshold=5.5, shanks=[0]):
+def get_sortout_folder(default_sortout=r"\\10.129.151.108\xieluanlabs\xl_cl\code\sortout"):
+    """Get and validate the sortout folder path."""
+
+    print(f"\nDefault output folder: {default_sortout}")
+
+    while True:
+        response = input("Press Enter to accept or type a new path: ").strip()
+
+        if not response:  # User pressed Enter
+            sortout = default_sortout
+        else:
+            # Clean up the input
+            sortout = response.strip('"').strip("'")
+
+        # Validate the path
+        sortout_path = Path(sortout)
+
+        try:
+            if sortout_path.exists():
+                if sortout_path.is_dir():
+                    print(f"✓ Using existing folder: {sortout}")
+                    return sortout
+                else:
+                    print(f"Error: {sortout} exists but is not a folder.")
+                    continue
+            else:
+                create = input(
+                    f"Folder doesn't exist. Create '{sortout}'? (y/n): ").strip().lower()
+                if create == 'y':
+                    sortout_path.mkdir(parents=True, exist_ok=True)
+                    print(f"✓ Created folder: {sortout}")
+                    return sortout
+                else:
+                    print("Please enter a different path.")
+        except Exception as e:
+            print(f"Error accessing path: {e}")
+            print("Please enter a valid path.")
+
+
+def main(rec_folder, threshold=5.5, scheme=1, shanks=[0]):
     # Define recording folder and parse session info
     rec_folder = Path(rec_folder)
     animal_id, session_id, folder_name = parse_session_info(str(rec_folder))
 
+    sortout = get_sortout_folder()
     for shank in shanks:
         # Construct paths for NWB file and output folder
         nwb_folder = rec_folder / f"{folder_name}sh{shank}.nwb"
         if not nwb_folder.exists():
             print(f"NWB file not found: {nwb_folder}")
             continue
-        out_folder = Path("sortout") / animal_id / \
+
+        out_folder = Path(sortout) / animal_id / \
             f"{animal_id}_{session_id}" / f"shank{shank}"
         out_folder.mkdir(parents=True, exist_ok=True)
 
@@ -43,7 +80,6 @@ def main(rec_folder, threshold=5.5, shanks=[0]):
         # Remove artifacts using a chunk-based approach
         chunk_time = 0.02
         artifacts_thres = 6.0
-        # FIXME: the artifact problem is severe, don't directly set to 0, try to interpolate...
         rec_rm_artifacts = rm_artifacts(
             rec_filt, rec_folder, shank,
             chunk_time=chunk_time, threshold=artifacts_thres,
@@ -56,22 +92,41 @@ def main(rec_folder, threshold=5.5, shanks=[0]):
         recording_preprocessed: si.BaseRecording = sp.whiten(rec_cr)
 
         # Define sorting parameters
-        detect_time_radius_msec = 0.4
+        detect_time_radius_msec = 0.5
         npca_per_channel = 3
         npca_per_subdivision = 10
 
         timer = Timer("ms5")
         print("Starting ms5 sorting...")
-        sorting_params = ms5.Scheme1SortingParameters(
-            detect_sign=0,  # 0 for all, 1 for positive, -1 for negative
-            detect_time_radius_msec=detect_time_radius_msec,
-            detect_threshold=threshold,
-            npca_per_channel=npca_per_channel,
-            npca_per_subdivision=npca_per_subdivision
-        )
-        sorting = ms5.sorting_scheme1(
-            recording=recording_preprocessed, sorting_parameters=sorting_params)
-        timer.report()
+
+        if scheme == 1:
+            print("Using Scheme 1 sorting...")
+            sorting_params = ms5.Scheme1SortingParameters(
+                detect_sign=0,  # 0 for all, 1 for positive, -1 for negative
+                detect_time_radius_msec=detect_time_radius_msec,
+                detect_threshold=threshold,
+                npca_per_channel=npca_per_channel,
+                npca_per_subdivision=npca_per_subdivision
+            )
+            sorting = ms5.sorting_scheme1(
+                recording=recording_preprocessed, sorting_parameters=sorting_params)
+            timer.report()
+        elif scheme == 2:
+            # FIXME: finish setting parameters for scheme 2
+            print("Using Scheme 2 sorting...")
+            sorting_params = ms5.Scheme2SortingParameters(
+                phase1_detect_channel_radius=150,
+                detect_channel_radius=120,
+                training_duration_sec=300,
+                detect_sign=0,  # 0 for all, 1 for positive, -1 for negative
+                detect_time_radius_msec=detect_time_radius_msec,
+                detect_threshold=threshold,
+                npca_per_channel=npca_per_channel,
+                npca_per_subdivision=npca_per_subdivision,
+            )
+            sorting = ms5.sorting_scheme2(
+                recording=recording_preprocessed, sorting_parameters=sorting_params)
+            timer.report()
 
         # Create sorting results folder
         current_time = time.strftime("%Y%m%d_%H%M", time.localtime())
@@ -121,10 +176,10 @@ def process_from_json(json_file="sorting_files.json"):
 
     # Get the directory where this script is located
     script_dir = Path(__file__).parent
-    
+
     # Construct the full path to the JSON file
     json_path = script_dir / json_file
-    
+
     # Read JSON file
     with open(json_path, 'r') as f:
         config = json.load(f)
@@ -135,12 +190,14 @@ def process_from_json(json_file="sorting_files.json"):
     for i, rec in enumerate(config['recordings'], 1):
         rec_folder = Path(rec['path'])
         shanks = rec['shanks']
+        scheme = rec.get('scheme', 1)
 
         print(f"\n[{i}/{len(config['recordings'])}] Processing: {rec_folder.name}")
         print(f"  Shanks: {shanks}")
 
         # Call your main function
-        main(threshold=threshold, rec_folder=rec_folder, shanks=shanks)
+        main(threshold=threshold, rec_folder=rec_folder,
+             shanks=shanks, scheme=scheme)
 
 
 if __name__ == "__main__":
