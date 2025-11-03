@@ -28,7 +28,8 @@ def main(rec_folder, threshold=5.5, shanks=[0]):
         if not nwb_folder.exists():
             print(f"NWB file not found: {nwb_folder}")
             continue
-        out_folder = Path("sortout") / animal_id / f"{animal_id}_{session_id}" / f"shank{shank}"
+        out_folder = Path("sortout") / animal_id / \
+            f"{animal_id}_{session_id}" / f"shank{shank}"
         out_folder.mkdir(parents=True, exist_ok=True)
 
         # Load recording from NWB file
@@ -62,7 +63,7 @@ def main(rec_folder, threshold=5.5, shanks=[0]):
         timer = Timer("ms5")
         print("Starting ms5 sorting...")
         sorting_params = ms5.Scheme1SortingParameters(
-            detect_sign=0, # 0 for all, 1 for positive, -1 for negative
+            detect_sign=0,  # 0 for all, 1 for positive, -1 for negative
             detect_time_radius_msec=detect_time_radius_msec,
             detect_threshold=threshold,
             npca_per_channel=npca_per_channel,
@@ -95,7 +96,8 @@ def main(rec_folder, threshold=5.5, shanks=[0]):
         # Compute metrics
 
         try:
-            sorting_analyzer.compute(['random_spikes', 'waveforms', 'noise_levels'])
+            sorting_analyzer.compute(
+                ['random_spikes', 'waveforms', 'noise_levels'])
             sorting_analyzer.compute('templates')
             _ = sorting_analyzer.compute('template_similarity')
             _ = sorting_analyzer.compute('spike_amplitudes')
@@ -114,12 +116,32 @@ def main(rec_folder, threshold=5.5, shanks=[0]):
             print(f"Error during metrics computation: {e}")
 
 
-if __name__ == "__main__":
-    threshold = 5.5
-    shanks = [0,1,2,3,4,5,6,7]
-    rec_folders = [
-        Path(r"C:\Users\Windows\Desktop\Albert\251022\CnL42SG\CnL42SG_20251022_160759.rec"),
-        # Path(r"D:\cl\freelymovingDrifting\CnL38SG\CnL38SG_20250921_220148.rec")
-    ]
-    for rec_folder in rec_folders:
+def process_from_json(json_file="sorting_files.json"):
+    """Simple function to read JSON and process recordings."""
+
+    # Get the directory where this script is located
+    script_dir = Path(__file__).parent
+    
+    # Construct the full path to the JSON file
+    json_path = script_dir / json_file
+    
+    # Read JSON file
+    with open(json_path, 'r') as f:
+        config = json.load(f)
+
+    threshold = config['threshold']
+
+    # Process each recording
+    for i, rec in enumerate(config['recordings'], 1):
+        rec_folder = Path(rec['path'])
+        shanks = rec['shanks']
+
+        print(f"\n[{i}/{len(config['recordings'])}] Processing: {rec_folder.name}")
+        print(f"  Shanks: {shanks}")
+
+        # Call your main function
         main(threshold=threshold, rec_folder=rec_folder, shanks=shanks)
+
+
+if __name__ == "__main__":
+    process_from_json()
