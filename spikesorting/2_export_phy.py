@@ -11,16 +11,17 @@ import numpy as np
 import spikeinterface.preprocessing as sp
 
 from rec2nwb.preproc_func import parse_session_info
+from spikesorting.ss_proc_func import get_sortout_folder
 
 # Constants
-BASE_FOLDER = r"C:\Users\Windows\Desktop\Albert"
+BASE_FOLDER = r"D:\cl\ephys"
 # BASE_FOLDER = r"\\10.129.151.108\xieluanlabs\xl_cl\rf_reconstruction\head_fixed"  
-DATES = ['251022']
+DATES = ['sleep']
 ANIMAL_IDS = ['CnL39SG']
 # ISHS = [ 0, 1, 2, 3, 4, 5, 6, 7]  # List of shank numbers to process
 ISHS = [ 0, 1, 2, 3]  # List of shank numbers to process
 
-SORTOUT_FOLDER = Path(__file__).parents[1] / 'sortout'
+SORTOUT_FOLDER = get_sortout_folder()
 # TODO: add overwrite option, if the phy folder exists, skip it if overwrite is False
 OVERWRITE = False
 
