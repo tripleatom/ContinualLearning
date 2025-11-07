@@ -217,7 +217,8 @@ print(f"[Info] Wrote task metadata: {taskmeta_path}")
 with open(log_path, "w", newline="") as f:
     writer = csv.DictWriter(
         f,
-        fieldnames=["trial_index","pair_id","left_ori","right_ori","stim_on_s","stim_off_s"]
+        fieldnames=["trial_index","pair_id","left_ori","right_ori",
+                    "stim_on_s","stim_off_s","contrast","spatial_freq"]
     )
     writer.writeheader()
 
@@ -263,13 +264,15 @@ with open(log_path, "w", newline="") as f:
 
         # Log: on/off are the SAME trial
         writer.writerow({
-            "trial_index": tr["trial_index"],
-            "pair_id": tr["pair_id"],
-            "left_ori": tr["left_ori"],
-            "right_ori": tr["right_ori"],
-            "stim_on_s": stim_on,
-            "stim_off_s": stim_off
-        })
+        "trial_index": tr["trial_index"],
+        "pair_id": tr["pair_id"],
+        "left_ori": tr["left_ori"],
+        "right_ori": tr["right_ori"],
+        "stim_on_s": stim_on,
+        "stim_off_s": stim_off,
+        "contrast": contrast,
+        "spatial_freq": grating_sfs_cpd[0]  # assuming both gratings use same SF
+    })
 
 # Finish
 win.close()
