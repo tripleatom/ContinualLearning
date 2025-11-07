@@ -4,8 +4,8 @@ import numpy as np
 from process_func.DIO import get_dio_folders, concatenate_din_data
 import matplotlib.pyplot as plt
 
-rec_folder = Path(r"/Volumes/xieluanlabs/xl_cl/RF_GRID/250821/CnL39SG/CnL39SG_20250821_163039.rec")
-task_file_Path = Path(r"/Volumes/xieluanlabs/xl_cl/RF_GRID/250821/CnL39_4_20250821_175044.txt")
+rec_folder = Path(r"Z:\xl_cl\Albert\20251031_psv;hf;sphr;2sides\CnL39SG\CnL39SG_20251031_085159.rec")
+task_file_Path = Path(r"Z:\xl_cl\Albert\20251031_psv;hf;sphr;2sides\CnL39SG\CnL39_drifting_grating_exp_20251031_085247.txt")
 task_id = task_file_Path.stem
 folder_path = task_file_Path.parent
 
@@ -49,10 +49,15 @@ pd_time = pd_time - pd_time[0]
 rising = np.where(pd_state == 1)[0]
 falling = np.where(pd_state == 0)[0]
 rising_times = pd_time[rising]
-rising_times = np.delete(rising_times, [52])
+falling_times = pd_time[falling]
+
+# rising_times = np.delete(rising_times, [52])
+rising_times = np.delete(rising_times, [56])  # remove known glitch
+falling_times = np.delete(falling_times, [55])  # remove known glitch
+
+# rising_times = np.insert(rising_times, 51, rising_times[50] + 30000 * 3)
 # rising_times = np.insert(rising_times, 51, rising_times[50]+30000*3)
 
-falling_times = pd_time[falling]
 
 rising_diff = np.diff(rising_times)/fs
 print(np.where(rising_diff > 5)[0])

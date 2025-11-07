@@ -1,201 +1,325 @@
 # ================================================================
-# Compare PsychoPy CSV timing vs. ephys DIO (.rec) to verify sync.
-# Saves cleaned DIO edges as "<csv_name>_DIO_cleaned.npz" (includes fs).
+# dio_extract_clean_segments_samples_with_dtplots.py
+# Extract DIO edges from .rec (in SAMPLES), optionally clean,
+# optionally segment by long gaps, visualize Δt between rises,
+# and save NPZ(s). No TXT verification.
 # ================================================================
 
+from __future__ import annotations
+from dataclasses import dataclass
 from pathlib import Path
-import csv
+import os, sys
 import numpy as np
 import matplotlib.pyplot as plt
-import os, sys
 
-# --- Make local package importable (process_func/...) ---
-base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.append(base_dir)
-from process_func.DIO import get_dio_folders, concatenate_din_data
+# ---- DIO helpers ----
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.append(BASE_DIR)
+from process_func.DIO import get_dio_folders, concatenate_din_data  # noqa: E402
 
-# =========================
+# ======================
 # User config
-# =========================
-rec_folder = Path(r"L:\xl_cl\Albert_passive_grating\CnL42SG_20251022_160759.rec")
-csv_path   = Path(r"L:\xl_cl\Albert\20251022_logs\CnL42_0_90_two_grating_passive_static_20251022_160842.csv")
-save_dir   = Path(r"L:\xl_cl\Albert\20251022_dio")  # or None to use csv folder
+# ======================
+rec_folder        = Path(r"Z:\xl_cl\Albert\20251022_psv;hf;2grtings\CnL42SG\CnL42SG_20251022_160759.rec")
+pd_channel        = 3
+fs                = 30000  # Hz
+save_dir          = rec_folder.parent
+out_stem          = rec_folder.stem + "_DIO_samples"
 
-fs = 30000        # Hz
-pd_channel = 3
+# Falls choice
+use_real_falls        = False   # False → fall = rise + stimulus_duration*fs ; True → use measured falls
+stimulus_duration_s   = 1.0     # used if use_real_falls == False
 
-# Debounce thresholds (seconds)
-MIN_HIGH_S = 0.20
-MIN_LOW_S  = 0.05
+# Cleaning options
+auto_clean            = True
+min_high_s            = 0.10    # drop highs with ON duration < this
+min_low_s             = 0.10    # collapse LOW gaps < this by deleting (fall_i, rise_{i+1})
 
-# Alignment / comparison
-MAX_ALIGN_GAP_S = 0.50
-ITI_TOL_S       = 0.050
+# Manual fixes (indices after auto_clean)
+manual_drop_rise_idxs: list[int] = []  # e.g., [56]
+manual_drop_fall_idxs: list[int] = []  # e.g., [55]
 
-# If ON duration is constant and you want a QA check; else None
-EXPECTED_ON_S   = None
+# Segmentation
+segment_by_gaps       = True
+gap_threshold_s       = 10.0    # split when Δrise > this
 
-# =========================
-# Load CSV schedule
-# =========================
-csv_on, csv_off = [], []
-with open(csv_path, newline="") as f:
-    r = csv.DictReader(f)
-    for row in r:
-        csv_on.append(float(row["stim_on_s"]))
-        csv_off.append(float(row["stim_off_s"]))
+# Δt plot options
+make_dt_plots         = True
+dt_tolerance_s        = 1000    # tolerance around median for flagging
+save_plots            = True
 
-csv_on = np.asarray(csv_on, float)
-csv_off = np.asarray(csv_off, float)
 
-# Between-trial ITI = current ON - previous OFF
-csv_off_prev = np.r_[np.nan, csv_off[:-1]]
-csv_iti = csv_on - csv_off_prev
+# ======================
+# Utilities
+# ======================
+@dataclass
+class CleanLog:
+    raw_highs: int
+    dropped_short_high_idxs: list
+    removed_low_blips_pairs: list
+    manual_drop_rise_idxs: list
+    manual_drop_fall_idxs: list
+    clean_highs: int
 
-# drop first NaN for comparisons/plots
-valid = ~np.isnan(csv_iti)
-csv_on_v   = csv_on[valid]
-csv_iti_v  = csv_iti[valid]
-print(f"CSV trials: {len(csv_on)} | mean ITI={np.nanmean(csv_iti):.3f}s (on[i] - off[i-1])")
 
-# =========================
-# Load DIO data and extract edges
-# =========================
-dio_folders = sorted(get_dio_folders(rec_folder), key=lambda p: p.name)
-pd_time, pd_state = concatenate_din_data(dio_folders, pd_channel)
-pd_time  = np.asarray(pd_time, float) / fs
-pd_state = np.asarray(pd_state)
+def load_pd_samples(rec: Path, din_ch: int) -> tuple[np.ndarray, np.ndarray]:
+    """Return (time_samples:int64, state:int8) anchored to 0."""
+    dio_folders = sorted(get_dio_folders(rec), key=lambda p: p.name)
+    pd_time, pd_state = concatenate_din_data(dio_folders, din_ch)
+    pd_time = pd_time - pd_time[0]
+    return pd_time.astype(np.int64), np.asarray(pd_state, np.int8)
 
-# Event stream (0/1 per row) vs dense edges
-uniq = np.unique(pd_state)
-is_event_stream = set(uniq.tolist()).issubset({0, 1})
 
-if is_event_stream:
-    r_idx = np.where(pd_state == 1)[0]
-    f_idx = np.where(pd_state == 0)[0]
-    rising_s  = pd_time[r_idx]
-    falling_s = pd_time[f_idx]
-else:
-    s  = pd_state.astype(np.int8)
-    ds = np.diff(s, prepend=s[0])
-    r_idx = np.where(ds == 1)[0]
-    f_idx = np.where(ds == -1)[0]
-    rising_s  = pd_time[r_idx]
-    falling_s = pd_time[f_idx]
+def edges_from_transitions(time_samples: np.ndarray, state01: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Detect rising/falling edges from state transitions; return paired arrays in samples."""
+    ds = np.diff(state01, prepend=state01[0])
+    r = time_samples[ds == 1]
+    f = time_samples[ds == -1]
+    if r.size and f.size and f[0] < r[0]:
+        f = f[1:]
+    m = min(len(r), len(f))
+    return r[:m].astype(np.int64), f[:m].astype(np.int64)
 
-# =========================
-# Debounce (pair, drop short highs, merge short lows)
-# =========================
-r = np.asarray(rising_s, float)
-f = np.asarray(falling_s, float)
-if r.size == 0 or f.size == 0:
-    raise RuntimeError("No DIO edges found on the specified channel.")
 
-# ensure first is rising
-if f[0] < r[0]:
-    f = f[1:]
-n = min(r.size, f.size)
-r, f = r[:n], f[:n]
+def clean_dio_simple_samples(r_samples: np.ndarray,
+                             f_samples: np.ndarray,
+                             fs_hz: int,
+                             min_high_s: float,
+                             min_low_s: float) -> tuple[np.ndarray, np.ndarray, CleanLog]:
+    """Drop short highs and collapse short LOW blips; all in samples."""
+    r = r_samples.copy()
+    f = f_samples.copy()
+    n0 = min(len(r), len(f))
+    r, f = r[:n0], f[:n0]
+    if n0 == 0:
+        return r, f, CleanLog(0, [], [], [], [], 0)
 
-# drop short highs
-keep = (f - r) >= MIN_HIGH_S
-r, f = r[keep], f[keep]
+    # Drop short highs
+    dur = f - r
+    keep_high = dur >= int(round(min_high_s * fs_hz))
+    dropped = np.where(~keep_high)[0].tolist()
+    r1, f1 = r[keep_high], f[keep_high]
 
-# merge short lows
-if r.size > 1:
-    low = r[1:] - f[:-1]
-    to_merge = np.where(low < MIN_LOW_S)[0]
-    if to_merge.size:
-        r_new = [r[0]]
-        f_new = []
-        i = 0
-        while i < len(r) - 1:
-            if i in set(to_merge.tolist()):
-                j = i
-                while j < len(low) and low[j] < MIN_LOW_S:
-                    j += 1
-                f_new.append(f[j])
-                if j + 1 < len(r):
-                    r_new.append(r[j + 1])
-                i = j + 1
-            else:
-                f_new.append(f[i])
-                r_new.append(r[i + 1])
-                i += 1
-        r = np.array(r_new[:len(f_new)], float)
-        f = np.array(f_new, float)
+    # Collapse short LOW blips
+    removed_pairs = []
+    if len(r1) > 1:
+        low = r1[1:] - f1[:-1]
+        to_remove = np.where(low < int(round(min_low_s * fs_hz)))[0]
+        keep_r = np.ones(len(r1), dtype=bool)
+        keep_f = np.ones(len(f1), dtype=bool)
+        for i in to_remove:
+            keep_f[i] = False
+            keep_r[i + 1] = False
+            removed_pairs.append((int(i), int(i + 1)))
+        r2 = r1[keep_r]
+        f2 = f1[keep_f]
+    else:
+        r2, f2 = r1, f1
 
-rising_s, falling_s = r, f
-print(f"DIO highs (cleaned): {len(rising_s)}")
+    log = CleanLog(
+        raw_highs=int(len(r)),
+        dropped_short_high_idxs=dropped,
+        removed_low_blips_pairs=removed_pairs,
+        manual_drop_rise_idxs=[],
+        manual_drop_fall_idxs=[],
+        clean_highs=int(len(r2)),
+    )
+    return r2, f2, log
 
-# =========================
-# Align DIO edges to CSV ON times
-# =========================
-aligned_r, aligned_f = [], []
-for t in csv_on:  # align to all; we’ll filter with `valid` below
-    j = np.searchsorted(rising_s, t)
-    candidates = []
-    if j > 0: candidates.append(j - 1)
-    if j < rising_s.size: candidates.append(j)
-    if not candidates:
-        continue
-    best = min(candidates, key=lambda k: abs(rising_s[k] - t))
-    if abs(rising_s[best] - t) <= MAX_ALIGN_GAP_S:
-        aligned_r.append(rising_s[best])
-        aligned_f.append(falling_s[best])
 
-aligned_r = np.asarray(aligned_r, float)
-aligned_f = np.asarray(aligned_f, float)
-print(f"Aligned highs: {len(aligned_r)} (of {len(csv_on)} CSV trials)")
+def apply_manual_drops(r_samples: np.ndarray,
+                       f_samples: np.ndarray,
+                       drop_rise_idxs: list[int],
+                       drop_fall_idxs: list[int],
+                       log: CleanLog) -> tuple[np.ndarray, np.ndarray, CleanLog]:
+    """Apply manual index removals, then re-pair."""
+    r = r_samples
+    f = f_samples
+    if drop_rise_idxs:
+        keep_r = np.ones(len(r), dtype=bool)
+        keep_r[drop_rise_idxs] = False
+        r = r[keep_r]
+    if drop_fall_idxs:
+        keep_f = np.ones(len(f), dtype=bool)
+        keep_f[drop_fall_idxs] = False
+        f = f[keep_f]
+    m = min(len(r), len(f))
+    r, f = r[:m], f[:m]
+    log.manual_drop_rise_idxs = list(drop_rise_idxs)
+    log.manual_drop_fall_idxs = list(drop_fall_idxs)
+    log.clean_highs = int(m)
+    return r, f, log
 
-# Filter aligned series to the same valid range as csv_iti_v (drop first)
-if aligned_r.size >= 2:
-    dio_iti = aligned_r[1:] - aligned_f[:-1]
-    n = min(len(dio_iti), len(csv_iti_v))
-    diffs = dio_iti[:n] - csv_iti_v[:n]
-    print(f"ITI diffs (DIO - CSV): mean={np.mean(diffs):.4f}s, std={np.std(diffs):.4f}s, "
-          f"max|diff|={np.max(np.abs(diffs)):.4f}s")
-else:
-    print("Not enough aligned highs to compute ITI diffs.")
-    dio_iti = np.array([]); n = 0
 
-# =========================
-# Optional ON-duration QA
-# =========================
-if EXPECTED_ON_S is not None and aligned_r.size > 0:
-    dio_on = aligned_f - aligned_r
-    plt.figure()
-    plt.plot(dio_on, label="DIO ON (s)")
-    plt.hlines(EXPECTED_ON_S, 0, len(dio_on) - 1, linestyles='dashed', label="Expected ON")
-    plt.title("Stimulus ON durations (aligned DIO)")
-    plt.xlabel("Trial"); plt.ylabel("Seconds"); plt.legend(); plt.tight_layout(); plt.show()
-else:
-    print("ON-duration comparison skipped (EXPECTED_ON_S=None).")
+def synthesize_falls_from_duration(r_samples: np.ndarray, fs_hz: int, stim_dur_s: float) -> np.ndarray:
+    """Create ideal falls from rise times and fixed duration."""
+    return r_samples + int(round(stim_dur_s * fs_hz))
 
-# =========================
-# Visualize ITI sequence
-# =========================
-if n > 0:
-    plt.figure()
-    plt.plot(dio_iti[:n], label="DIO ITI (s)")
-    plt.plot(csv_iti_v[:n], label="CSV ITI (s)", alpha=0.7)
-    plt.title("ITI durations: DIO (aligned) vs CSV")
-    plt.xlabel("Between-trial index"); plt.ylabel("Seconds")
-    plt.legend(); plt.tight_layout(); plt.show()
 
-# =========================
-# Save cleaned edges + fs
-# =========================
-out_dir = save_dir if save_dir else csv_path.parent
-out_dir.mkdir(parents=True, exist_ok=True)
-save_path = out_dir / f"{csv_path.stem}_DIO_cleaned.npz"
+def split_by_long_gaps(r_samples: np.ndarray, fs_hz: int, gap_threshold_s: float) -> list[np.ndarray]:
+    """Return list of index arrays for each segment."""
+    if len(r_samples) <= 1:
+        return [np.arange(len(r_samples))]
+    d = np.diff(r_samples) / fs_hz
+    cut = np.where(d > gap_threshold_s)[0]
+    return np.split(np.arange(len(r_samples)), cut + 1)
 
-np.savez_compressed(
-    save_path,
-    rising_times=rising_s,
-    falling_times=falling_s,
-    fs=fs  # include sampling rate for downstream use
-)
 
-print(f"Saved cleaned edges to {save_path}")
-print(f"Including sampling rate fs={fs} Hz")
+def save_npz_samples(path: Path,
+                     rising_samples: np.ndarray,
+                     falling_samples: np.ndarray,
+                     fs_hz: int,
+                     log: CleanLog,
+                     segment_index: int | None = None):
+    np.savez_compressed(
+        path,
+        rising_samples=rising_samples.astype(np.int64),
+        falling_samples=falling_samples.astype(np.int64),
+        fs=np.int64(fs_hz),
+        segment_index=(np.int64(segment_index) if segment_index is not None else -1),
+        cleaner_log=dict(
+            raw_highs=log.raw_highs,
+            dropped_short_high_idxs=log.dropped_short_high_idxs,
+            removed_low_blips_pairs=log.removed_low_blips_pairs,
+            manual_drop_rise_idxs=log.manual_drop_rise_idxs,
+            manual_drop_fall_idxs=log.manual_drop_fall_idxs,
+            clean_highs=log.clean_highs,
+        ),
+    )
+
+
+def plot_rise_dt_diagnostics(rising_edges, fs_hz, *,
+                             gap_threshold_s: float,
+                             tolerance_s: float,
+                             title_prefix: str,
+                             save_path: Path | None,
+                             show: bool):
+    """Plot Δt between rising edges (seconds) as time-series + histogram."""
+    rising_edges = np.asarray(rising_edges)
+    in_samples = (rising_edges.dtype.kind in "iu") or (rising_edges.max() > 1e4)
+    t_rise_s = rising_edges / fs_hz if in_samples else rising_edges.astype(float)
+
+    if t_rise_s.size < 2:
+        print("[Δt] not enough rises to compute deltas.")
+        return
+
+    dt = np.diff(t_rise_s)
+    n = dt.size
+    med = float(np.median(dt))
+    p25, p75 = np.percentile(dt, [25, 75])
+    iqr = float(p75 - p25)
+    print(f"[Δt stats] n={n}  median={med:.3f}s  IQR={iqr:.3f}s  min={dt.min():.3f}s  max={dt.max():.3f}s")
+
+    idx_long = np.where(dt > gap_threshold_s)[0]
+    idx_outlier = np.where(np.abs(dt - med) > tolerance_s)[0]
+    if idx_outlier.size:
+        print(f"[Δt] {len(idx_outlier)} deltas deviate > {tolerance_s:.2f}s from median")
+
+    if idx_long.size:
+        print(f"[gaps] Δt > {gap_threshold_s:.1f}s at indices {idx_long.tolist()}")
+
+    # Plot
+    fig = plt.figure(figsize=(11, 4.5))
+    ax1 = plt.subplot(1, 2, 1)
+    ax1.plot(dt, marker='.', lw=0.8)
+    ax1.set_title(f"{title_prefix} Δt between rising edges")
+    ax1.set_xlabel("Rise index (i → i+1)")
+    ax1.set_ylabel("Δt (s)")
+    ax1.grid(alpha=0.3)
+    ax1.axhline(med, ls='--', alpha=0.6, label=f"median {med:.3f}s")
+    ax1.axhline(gap_threshold_s, color='r', ls='--', alpha=0.7, label=f"gap {gap_threshold_s:.1f}s")
+    ax1.legend(loc="best", fontsize=8)
+
+    ax2 = plt.subplot(1, 2, 2)
+    ax2.hist(dt, bins=max(12, int(np.sqrt(n))))
+    ax2.set_title("Δt histogram")
+    ax2.set_xlabel("Δt (s)")
+    ax2.set_ylabel("count")
+    ax2.grid(alpha=0.3)
+
+    plt.tight_layout()
+    if save_path is not None:
+        plt.savefig(save_path, dpi=150)
+        print(f"[saved] {save_path}")
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+
+
+# ======================
+# Main
+# ======================
+def main():
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    # Load DIN stream
+    pd_time_samp, pd_state = load_pd_samples(rec_folder, pd_channel)
+    r_samp, f_samp = edges_from_transitions(pd_time_samp, pd_state)
+
+    # Auto clean
+    if auto_clean:
+        r_samp, f_samp, clog = clean_dio_simple_samples(r_samp, f_samp, fs, min_high_s, min_low_s)
+    else:
+        clog = CleanLog(len(r_samp), [], [], [], [], len(r_samp))
+
+    # Manual drops
+    if manual_drop_rise_idxs or manual_drop_fall_idxs:
+        r_samp, f_samp, clog = apply_manual_drops(r_samp, f_samp, manual_drop_rise_idxs, manual_drop_fall_idxs, clog)
+
+    # Ideal vs real falls
+    if not use_real_falls:
+        f_samp = synthesize_falls_from_duration(r_samp, fs, stimulus_duration_s)
+        m = min(len(r_samp), len(f_samp))
+        r_samp, f_samp = r_samp[:m], f_samp[:m]
+
+    # Δt diagnostics (before segmentation)
+    if make_dt_plots:
+        plot_path = (save_dir / f"{out_stem}_dt_all.png") if save_plots else None
+        plot_rise_dt_diagnostics(
+            rising_edges=r_samp,
+            fs_hz=fs,
+            gap_threshold_s=gap_threshold_s,
+            tolerance_s=dt_tolerance_s,
+            title_prefix=rec_folder.stem,
+            save_path=plot_path,
+            show=not save_plots,
+        )
+
+    # Segmentation
+    if segment_by_gaps:
+        segs = split_by_long_gaps(r_samp, fs, gap_threshold_s)
+        print(f"[DIO] Found {len(segs)} segment(s) with gap > {gap_threshold_s:.1f}s")
+        for i, idx in enumerate(segs, 1):
+            r_seg = r_samp[idx]
+            f_seg = f_samp[idx]
+            out_path = save_dir / f"{out_stem}_segment{i:02d}.npz"
+            save_npz_samples(out_path, r_seg, f_seg, fs, clog, segment_index=i)
+            print(f"  [Saved] {out_path.name} | highs={len(r_seg)}")
+
+            if make_dt_plots:
+                seg_plot = (save_dir / f"{out_stem}_dt_segment{i:02d}.png") if save_plots else None
+                plot_rise_dt_diagnostics(
+                    rising_edges=r_seg,
+                    fs_hz=fs,
+                    gap_threshold_s=gap_threshold_s,
+                    tolerance_s=dt_tolerance_s,
+                    title_prefix=f"{rec_folder.stem} seg{i:02d}",
+                    save_path=seg_plot,
+                    show=False if save_plots else True,
+                )
+    else:
+        out_path = save_dir / f"{out_stem}.npz"
+        save_npz_samples(out_path, r_samp, f_samp, fs, clog)
+        print(f"[Saved] {out_path.name} | highs={len(r_samp)}")
+
+    # Summary
+    print(f"[clean] Raw highs: {clog.raw_highs}")
+    print(f"[clean] Dropped short highs: {clog.dropped_short_high_idxs}")
+    print(f"[clean] Removed LOW blips (pairs): {clog.removed_low_blips_pairs}")
+    print(f"[clean] Manual drops (rise): {clog.manual_drop_rise_idxs} | (fall): {clog.manual_drop_fall_idxs}")
+    print(f"[clean] Clean highs: {clog.clean_highs}")
+
+
+if __name__ == "__main__":
+    main()
