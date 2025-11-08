@@ -1,7 +1,6 @@
 __pycache__
 build
 cl_project.egg-info
-sortout
 ._*
 *.ipynb
 .DS_Store
