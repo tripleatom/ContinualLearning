@@ -10,26 +10,27 @@ rec = se.NwbRecordingExtractor(rec_file)
 
 # Extract shank number from filename
 ish = int(rec_file.split('sh')[-1].split('.')[0])  # Extracts 0 from 'sh0.nwb'
-folder = Path(rec_file).parent.parent  # Get parent folder for saving artifacts
+folder = Path(rec_file).parent  # Get parent folder for saving artifacts
 
+rec_clean = rm_artifacts(rec, folder, ish, threshold=6, chunk_time=0.02, overwrite=True)
 # Common reference FIRST (on raw data)
-rec_car = spre.common_reference(rec, reference='global', operator='median')
+rec_car = spre.common_reference(rec_clean, reference='global', operator='median')
 
 # Bandpass filter for spike band (to detect artifacts)
-rec_filtered = spre.bandpass_filter(rec_car, freq_min=300, freq_max=6000, dtype="float32")
+rec_filtered = spre.bandpass_filter(rec_car, freq_min=0.1, freq_max=100, dtype="float32")
 
 # Remove artifacts (operates on spike-band filtered data)
 print("Removing artifacts...")
-rec_clean = rm_artifacts(rec_filtered, folder, ish, threshold=6, chunk_time=0.05, overwrite=False)
-
+# rec_clean = rm_artifacts(rec_filtered, folder, ish, threshold=6, chunk_time=0.02, overwrite=False)
+# rec_clean = rec_filtered
 # Now downsample the CLEAN data
 print("Downsampling...")
 target_fs = 1000  # 1kHz is good for LFP
-rec_downsampled = spre.resample(rec_clean, target_fs)
+rec_downsampled = spre.resample(rec_filtered, target_fs)
 
 # Then bandpass filter for LFP range
 print("Applying LFP filter...")
-rec_lfp = spre.bandpass_filter(rec_downsampled, freq_min=0.1, freq_max=100, dtype="float32")
+rec_lfp = spre.bandpass_filter(rec_downsampled, freq_min=0.1, freq_max=300, dtype="float32")
 
 # Get channel locations and sort by depth
 channel_locations = rec.get_channel_locations()
