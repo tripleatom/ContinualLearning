@@ -10,3 +10,4 @@ rf_recon/visual_stim
 passive_view_video/logs
 *.csv
 *.pkl
+*.png
