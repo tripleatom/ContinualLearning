@@ -1,5 +1,16 @@
+# -------------------------------------------------------------------------
+# Two drifting sinusoidal gratings on left/right, with the SAME save format
+# as the static script. Each CSV row has stim_on_s and stim_off_s using a
+# single global timebase. Orientation pairs are balanced and randomized.
+# -------------------------------------------------------------------------
+
 from psychopy import visual, core, event, monitors
+import psychopy.logging as logging
 import csv, random, time, os, math
+import numpy as np
+
+# Quiet console
+logging.console.setLevel(logging.ERROR)
 
 # =========================
 # 1) Experiment parameters
@@ -8,37 +19,33 @@ win_fullscreen     = True
 screen_bg_color    = [0, 0, 0]
 stim_duration_s    = 1.0
 iti_duration_s     = 0.5
-n_trials           = 600
+n_trials           = 600        # total across all orientation pairs
 random_seed        = 42
 
-# Orientation pairs (flexible)
+# Orientation pairs (L,R). Each pair will be shown equally often with sides swapped.
 orientation_pairs = [
     (45.0, 135.0),
-    (0.0, 90.0)
+    (0.0, 90.0),
 ]
 
-# Spatial & temporal parameters
+# Grating parameters
 grating_sfs_cpd    = (0.08, 0.08)
 grating_sizes_deg  = (100.0, 100.0)
 eccentricity_deg   = 70.0
 contrast           = 1.0
 start_phase        = 0.0
-tf_hz              = 4.0  # drift speed (same for all gratings)
+tf_hz              = 4.0   # drift speed (magnitude, in cycles/s)
 
 # =========================
-# 1.5) Save file configuration
+# 1.5) Save paths
 # =========================
-ori_label   = "_".join([f"{int(a)}-{int(b)}" for a,b in orientation_pairs])
-save_prefix = f"CnL42_drifting_{ori_label}"
-run_id      = time.strftime("%Y%m%d_%H%M%S")
-save_dir    = os.path.join(os.path.dirname(__file__), "logs")
+run_id   = time.strftime("%Y%m%d_%H%M%S")
+save_dir = os.path.join(os.path.dirname(__file__), "logs")
 os.makedirs(save_dir, exist_ok=True)
-log_path    = os.path.join(save_dir, f"{save_prefix}_{run_id}.csv")
-
-print(f"[Info] Saving log file to:\n  {log_path}")
+log_path = os.path.join(save_dir, f"two_grating_passive_drifting_{run_id}.csv")
 
 # =========================
-# 2) Screen geometry (same as static)
+# 2) Screen geometry
 # =========================
 screen2_width_mm   = 520.0
 screen2_height_mm  = 520.0
@@ -61,8 +68,12 @@ grating_sfs_cyc_per_pix = tuple(sf_cpd / PPD for sf_cpd in grating_sfs_cpd)
 grating_sizes_pix       = tuple(int(round(sz_deg * PPD)) for sz_deg in grating_sizes_deg)
 eccentricity_pix        = int(round(eccentricity_deg * PPD))
 
+print(f"[Info] pixels/degree (PPD): {PPD:.2f}")
+print(f"[Info] SF cyc/pix: {grating_sfs_cyc_per_pix}")
+print(f"[Info] Sizes (pix): {grating_sizes_pix}, Eccentricity (pix): {eccentricity_pix}")
+
 # =========================
-# 4) Monitor profile
+# 5) Monitor & window
 # =========================
 width_cm = screen2_width_mm / 10.0
 dist_cm  = view_dist_mm / 10.0
@@ -71,9 +82,6 @@ mon.setWidth(width_cm)
 mon.setDistance(dist_cm)
 mon.setSizePix(screen2_res_px)
 
-# =========================
-# 5) Window
-# =========================
 random.seed(random_seed)
 win = visual.Window(
     size=screen2_res_px,
@@ -90,25 +98,33 @@ win = visual.Window(
 )
 win.recordFrameIntervals = False
 
-# One global clock for BOTH on/off times (same timebase)
+# Global clock for on/off timestamps (same timebase)
 global_clock = core.Clock()
 global_clock.reset()
 
 # =========================
-# 6) Sync patch (same as static)
+# 7) Sync patch (top-right)
 # =========================
 width, height = win.size
+sync_width_px   = 100
+sync_height_px  = 100
+sync_margin_px  = 10
+sync_patch_x = (width / 2)  - (sync_width_px / 2)  - sync_margin_px
+sync_patch_y = (height / 2) - (sync_height_px / 2) - sync_margin_px
+
 sync_patch = visual.Rect(
     win,
-    width=100, height=100,
-    pos=((width/2)-(100/2)-10, (height/2)-(100/2)-10),
-    fillColor=[-1,-1,-1],
+    width=sync_width_px,
+    height=sync_height_px,
+    pos=(sync_patch_x, sync_patch_y),
+    fillColor=[-1, -1, -1],
     lineColor=None,
-    units="pix",
+    units='pix',
+    autoLog=False
 )
 
 # =========================
-# 7) Gratings (same look as static)
+# 8) Gratings
 # =========================
 left_grat = visual.GratingStim(
     win=win, mask="circle",
@@ -128,104 +144,174 @@ right_grat = visual.GratingStim(
 )
 
 # =========================
-# 8) Balanced trial builder
+# 9) Balanced trial builder (same logic as static)
 # =========================
-def build_trials_balanced(n_trials, orientation_pairs):
-    """Return randomized trials balanced across orientation pairs and sides."""
-    if n_trials % (2 * len(orientation_pairs)) != 0:
+def build_trials_from_pairs(n_trials, orientation_pairs):
+    """
+    Build balanced randomized trial list for any number of orientation pairs.
+    Each pair is shown equally often, with sides swapped half the time.
+    """
+    n_pairs = len(orientation_pairs)
+    if n_trials % (2 * n_pairs) != 0:
         raise ValueError("n_trials must be divisible by 2 × number of orientation pairs.")
 
-    per_pair_total = n_trials // len(orientation_pairs)
-    per_side = per_pair_total // 2
     trials = []
     idx = 0
+    per_pair_total = n_trials // n_pairs      # trials per pair
+    per_side = per_pair_total // 2            # left/right swap per pair
 
-    for a, b in orientation_pairs:
-        for _ in range(per_side):
-            trials.append({"trial_index": idx, "left_ori": a, "right_ori": b, "pair_id": f"{a}-{b}"}); idx += 1
-            trials.append({"trial_index": idx, "left_ori": b, "right_ori": a, "pair_id": f"{a}-{b}"}); idx += 1
+    for pair in orientation_pairs:
+        lo, ro = pair
+        for _ in range(per_side):             # as given
+            trials.append({"trial_index": idx, "left_ori": lo, "right_ori": ro, "pair_id": f"{lo}-{ro}"})
+            idx += 1
+        for _ in range(per_side):             # swapped
+            trials.append({"trial_index": idx, "left_ori": ro, "right_ori": lo, "pair_id": f"{lo}-{ro}"})
+            idx += 1
 
     random.shuffle(trials)
     for i, tr in enumerate(trials):
         tr["trial_index"] = i
     return trials
 
-trials = build_trials_balanced(n_trials, orientation_pairs)
+trials = build_trials_from_pairs(n_trials, orientation_pairs)
+print(f"[Info] Generated {len(trials)} trials using {len(orientation_pairs)} orientation pairs.")
 
 # =========================
-# 9) Drift direction helper
+# 9.5) Save per-run task metadata (same format + drift info)
+# =========================
+left_ori_seq  = [tr["left_ori"]  for tr in trials]
+right_ori_seq = [tr["right_ori"] for tr in trials]
+pair_id_seq   = [tr["pair_id"]   for tr in trials]
+taskmeta_path = os.path.join(
+    save_dir, f"{os.path.splitext(os.path.basename(log_path))[0]}_taskmeta.npz"
+)
+np.savez_compressed(
+    taskmeta_path,
+    run_id=run_id,
+    task_name="two_grating_passive_drifting",
+    csv_path=log_path,
+    stimulus_duration_s=float(stim_duration_s),
+    iti_duration_s=float(iti_duration_s),
+    n_trials=int(n_trials),
+    orientation_pairs=np.array(orientation_pairs, dtype=float),
+    left_ori_seq=np.array(left_ori_seq, dtype=float),
+    right_ori_seq=np.array(right_ori_seq, dtype=float),
+    pair_id_seq=np.array(pair_id_seq, dtype=object),
+    grating_sfs_cpd=np.array(grating_sfs_cpd, dtype=float),
+    grating_sizes_deg=np.array(grating_sizes_deg, dtype=float),
+    eccentricity_deg=float(eccentricity_deg),
+    contrast=float(contrast),
+    start_phase=float(start_phase),
+    temporal_freq_hz=float(tf_hz),
+    PPD=float(PPD),
+    screen2_width_mm=float(screen2_width_mm),
+    screen2_height_mm=float(screen2_height_mm),
+    screen2_res_px=np.array(screen2_res_px, dtype=int),
+    view_dist_mm=float(view_dist_mm),
+)
+print(f"[Info] Wrote task metadata: {taskmeta_path}")
+
+# =========================
+# 10) Drift direction helper
 # =========================
 def drift_sign_for_ori(ori_deg: float) -> int:
-    """Make diagonals drift in opposite directions."""
+    """
+    Decide drift direction based on orientation.
+    This does NOT change the orientation itself; it only flips the sign
+    of the temporal frequency along that orientation.
+    """
     return 1 if math.cos(math.radians(ori_deg)) >= 0 else -1
 
 # =========================
-# 10) Run experiment
+# 11) Run experiment (drifting, static-style logging)
 # =========================
 with open(log_path, "w", newline="") as f:
-    writer = csv.DictWriter(f, fieldnames=[
-        "trial_index", "pair_id",
-        "left_ori", "right_ori",
-        "left_tf_hz", "right_tf_hz",
-        "stim_on_s", "stim_off_s"
-    ])
+    writer = csv.DictWriter(
+        f,
+        fieldnames=[
+            "trial_index", "pair_id", "left_ori", "right_ori",
+            "stim_on_s", "stim_off_s", "contrast", "spatial_freq"
+        ]
+    )
     writer.writeheader()
 
-    # Initial ITI (no logging row)
-    sync_patch.fillColor = [-1,-1,-1]
+    # Initial ITI (no logging)
+    sync_patch.fillColor = [-1, -1, -1]
     sync_patch.draw()
     win.flip()
     core.wait(iti_duration_s)
 
+    abort = False
+
     for tr in trials:
         if "escape" in event.getKeys():
+            abort = True
+        if abort:
             break
 
-        left_ori, right_ori = tr["left_ori"], tr["right_ori"]
-        left_grat.ori, right_grat.ori = left_ori, right_ori
+        # Assign orientations (this is the actual grating orientation on screen)
+        left_grat.ori  = tr["left_ori"]
+        right_grat.ori = tr["right_ori"]
 
-        left_tf  = tf_hz * drift_sign_for_ori(left_ori)
-        right_tf = tf_hz * drift_sign_for_ori(right_ori)
+        # Temporal frequencies (signed) for drift direction
+        left_tf  = tf_hz * drift_sign_for_ori(tr["left_ori"])
+        right_tf = tf_hz * drift_sign_for_ori(tr["right_ori"])
 
-        stim_clock = core.Clock()
-        left_grat.phase = start_phase
+        # Reset phase and local timer
+        left_grat.phase  = start_phase
         right_grat.phase = start_phase
+        stim_clock = core.Clock()
 
-        # Stim ON
-        left_grat.draw(); right_grat.draw()
-        sync_patch.fillColor = [1,1,1]; sync_patch.draw()
+        # ---------------- Stimulus ON ----------------
+        left_grat.draw()
+        right_grat.draw()
+        sync_patch.fillColor = [1, 1, 1]
+        sync_patch.draw()
         win.flip()
-        stim_on = global_clock.getTime()   # <- SAME timebase as stim_off
+        stim_on = global_clock.getTime()   # same timebase for ON/OFF
 
-        # Drifting period
+        # Drifting during stim_duration_s
         while stim_clock.getTime() < stim_duration_s:
             if "escape" in event.getKeys():
+                abort = True
                 break
+
             t = stim_clock.getTime()
+            # phase evolves in cycles; ori stays fixed at the requested angle
             left_grat.phase  = (start_phase + left_tf  * t) % 1.0
             right_grat.phase = (start_phase + right_tf * t) % 1.0
-            left_grat.draw(); right_grat.draw()
-            sync_patch.fillColor = [1,1,1]; sync_patch.draw()
+
+            left_grat.draw()
+            right_grat.draw()
+            sync_patch.fillColor = [1, 1, 1]
+            sync_patch.draw()
             win.flip()
 
-        # Stim OFF
-        sync_patch.fillColor = [-1,-1,-1]; sync_patch.draw()
+        # ---------------- Stimulus OFF ----------------
+        sync_patch.fillColor = [-1, -1, -1]
+        sync_patch.draw()
         win.flip()
-        stim_off = global_clock.getTime()  # <- SAME timebase as stim_on
+        stim_off = global_clock.getTime()
+
+        if abort:
+            break
 
         # ITI
         core.wait(iti_duration_s)
 
+        # Log: same fields as static version
         writer.writerow({
             "trial_index": tr["trial_index"],
             "pair_id": tr["pair_id"],
-            "left_ori": left_ori,
-            "right_ori": right_ori,
-            "left_tf_hz": left_tf,
-            "right_tf_hz": right_tf,
+            "left_ori": tr["left_ori"],
+            "right_ori": tr["right_ori"],
             "stim_on_s": stim_on,
-            "stim_off_s": stim_off
+            "stim_off_s": stim_off,
+            "contrast": contrast,
+            "spatial_freq": grating_sfs_cpd[0]  # assuming both gratings share SF
         })
 
+# Finish
 win.close()
 core.quit()
