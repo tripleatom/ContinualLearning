@@ -49,7 +49,7 @@ def rm_artifacts(rec_raw, folder, ish, threshold=6, chunk_time=0.02,
     n_channels = rec_detect.get_num_channels()
     num_chunks = int(np.ceil(n_timepoints / chunk_size))
 
-    artifact_file = folder / f'artifact_indices_sh{ish}_{chunk_time}.npy'
+    artifact_file = folder / f'artifact_indices_sh{ish}_{chunk_time}_{threshold}.npy'
 
     if not overwrite and os.path.exists(artifact_file):
         print(f"Loading existing artifact indices from {artifact_file}")
@@ -101,9 +101,9 @@ def rm_artifacts(rec_raw, folder, ish, threshold=6, chunk_time=0.02,
             if artifact_chunks.size > 0:
                 # Vectorized neighbor marking
                 all_bad = np.concatenate([
-                    artifact_chunks - 1,
                     artifact_chunks,
-                    artifact_chunks + 1
+                    # artifact_chunks - 1,
+                    # artifact_chunks + 1
                 ])
                 all_bad = all_bad[(all_bad >= 0) & (all_bad < num_chunks)]
                 use_chunk[all_bad] = False
