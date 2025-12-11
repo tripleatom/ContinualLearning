@@ -2,13 +2,12 @@ from pathlib import Path
 import numpy as np
 import pickle
 from scipy import signal
-from pynwb import NWBHDF5IO
+import spikeinterface.extractors as se
+import spikeinterface.preprocessing as spre
 from tqdm import tqdm
-# FIXME: add probe's position information in the figure
-# TODO: check frequency bin of the spectrum
 
 # === CONFIGURATION ===
-base_folder = r"\\10.129.151.108\xieluanlabs\xl_spinal_cord_electrode\CoI\CoI11\251103\data_251103_165957"
+base_folder = r"\\10.129.151.108\xieluanlabs\xl_spinal_cord_electrode\CoI\CoI11\251103\3cms_2\data_251103_165302"
 session_name = base_folder.split('\\')[-1]
 output_folder = base_folder
 
@@ -16,25 +15,34 @@ output_folder = base_folder
 brain_shanks = [0, 1, 2, 3]
 spinal_shanks = [4, 5, 6, 7]
 
+# Preprocessing parameters (matching your pipeline)
+preproc_params = {
+    'car_reference': 'global',  # Common average reference
+    'car_operator': 'median',
+    'lfp_filter_min': 0.1,  # Hz
+    'lfp_filter_max': 300,  # Hz
+    'target_fs': 1000,  # Target sampling rate for LFP
+}
+
 # Coherence parameters
 coherence_params = {
-    'fs': None,  # Will be loaded from NWB
+    'fs': None,  # Will be set to target_fs after preprocessing
     'nperseg': 2048,  # Window length for coherence calculation
     'noverlap': None,  # Will be set to nperseg // 2
     'nfft': None,  # Will be set to nperseg
     'freq_range': (0.5, 100),  # Frequency range to keep
 }
 
-# === LOAD NWB FILES ===
-print(f"Loading NWB files from: {base_folder}")
+# === LOAD AND PREPROCESS NWB FILES ===
+print(f"Loading and preprocessing NWB files from: {base_folder}")
 
-# Storage for all LFP data
+# Storage for all preprocessed LFP data
 all_lfp_data = {}
 all_channel_info = {}
 sampling_rate = None
 total_channels = 0
 
-# Load each shank's NWB file
+# Load and preprocess each shank's NWB file
 for shank_id in brain_shanks + spinal_shanks:
     nwb_file = Path(base_folder) / f"{session_name}sh{shank_id}.nwb"
     
@@ -42,46 +50,90 @@ for shank_id in brain_shanks + spinal_shanks:
         print(f"WARNING: File not found: {nwb_file}")
         continue
     
-    print(f"\nLoading shank {shank_id}: {nwb_file.name}")
+    print(f"\n{'='*60}")
+    print(f"Processing Shank {shank_id}: {nwb_file.name}")
+    print(f"{'='*60}")
     
-    # Open NWB file
-    io = NWBHDF5IO(str(nwb_file), 'r')
-    nwbfile = io.read()
+    # Load recording
+    rec = se.NwbRecordingExtractor(str(nwb_file))
+    pos = rec.get_channel_locations()
     
-    # Get LFP data
-    lfp = nwbfile.processing['ecephys']['LFP']['ElectricalSeries']
-    lfp_data = lfp.data[:]  # Shape: (n_samples, n_channels)
+    # Store original recording info
+    original_fs = rec.get_sampling_frequency()
+    original_duration = rec.get_total_duration()
     
-    # Get sampling rate (should be same for all shanks)
-    if sampling_rate is None:
-        sampling_rate = lfp.rate
+    print(f"Original sampling rate: {original_fs} Hz")
+    print(f"Original duration: {original_duration} s")
+    print(f"Number of channels: {rec.get_num_channels()}")
+    
+    # Apply preprocessing pipeline efficiently
+    print("\n=== Preprocessing ===")
+    # 1. Common average reference
+    print("1. Applying common average reference...")
+    rec_car = spre.common_reference(rec, reference=preproc_params['car_reference'], 
+                                    operator=preproc_params['car_operator'])
+    
+    # 2. Bandpass filter for LFP range
+    print("2. Applying bandpass filter...")
+    rec_filtered = spre.bandpass_filter(rec_car, 
+                                        freq_min=preproc_params['lfp_filter_min'],
+                                        freq_max=preproc_params['lfp_filter_max'])
+    
+    # 3. Downsample to target frequency
+    print("3. Downsampling...")
+    target_fs = preproc_params['target_fs']
+    rec_downsampled = spre.resample(rec_filtered, resample_rate=target_fs)
+    
+    print(f"Downsampled sampling rate: {rec_downsampled.get_sampling_frequency()} Hz")
+    
+    # Get traces as numpy array
+    # Check SpikeInterface version - newer versions return (n_samples, n_channels)
+    print("4. Loading preprocessed data into memory...")
+    traces = rec_downsampled.get_traces(return_scaled=True)
+    
+    print(f"   Raw traces shape from get_traces(): {traces.shape}")
+    
+    # Ensure we have (n_samples, n_channels) format
+    n_channels = rec_downsampled.get_num_channels()
+    if traces.shape[0] == n_channels:
+        # Got (n_channels, n_samples), need to transpose
+        lfp_data = traces.T
+        print(f"   Transposed to: {lfp_data.shape}")
     else:
-        assert sampling_rate == lfp.rate, f"Sampling rate mismatch for shank {shank_id}"
+        # Already (n_samples, n_channels)
+        lfp_data = traces
+        print(f"   Already in correct format: {lfp_data.shape}")
     
-    # Get electrode information
-    electrodes_table = nwbfile.electrodes.to_dataframe()
+    # Get sampling rate (should be same for all shanks after preprocessing)
+    current_fs = rec_downsampled.get_sampling_frequency()
+    if sampling_rate is None:
+        sampling_rate = current_fs
+    else:
+        assert np.isclose(sampling_rate, current_fs), \
+               f"Sampling rate mismatch for shank {shank_id}"
     
     # Store data
     all_lfp_data[shank_id] = lfp_data
+    
+    # --- Save physical electrode positions ---
+    # pos: (n_channels, 2) containing (x, y)
+    pos = rec.get_channel_locations()   
     all_channel_info[shank_id] = {
+        'pos_xy': pos,                                     # <--- Save (x, y)
         'n_channels': lfp_data.shape[1],
-        'channel_ids': list(range(lfp_data.shape[1])),  # 0 to n_channels-1 for each shank
-        'electrodes_table': electrodes_table,
+        'channel_ids': rec_downsampled.get_channel_ids().tolist(),
     }
     
     total_channels += lfp_data.shape[1]
     
-    print(f"  LFP shape: {lfp_data.shape}")
-    print(f"  Sampling rate: {sampling_rate} Hz")
-    print(f"  Duration: {lfp_data.shape[0] / sampling_rate:.1f} s")
-    print(f"  Number of channels: {lfp_data.shape[1]}")
-    
-    # Close this NWB file
-    io.close()
+    print(f"\n✓ Preprocessed LFP shape: {lfp_data.shape} (n_samples, n_channels)")
+    print(f"✓ Duration: {lfp_data.shape[0] / sampling_rate:.1f} s")
+    print(f"✓ Number of channels: {lfp_data.shape[1]}")
 
 print(f"\n{'='*60}")
 print(f"Total channels loaded: {total_channels}")
-print(f"Sampling rate: {sampling_rate} Hz")
+print(f"Final sampling rate: {sampling_rate} Hz")
+print(f"{'='*60}")
 
 # Update coherence parameters
 coherence_params['fs'] = sampling_rate
@@ -117,19 +169,23 @@ coherence_results = {
     'brain_shank': [],
     'brain_channel_idx': [],
     'brain_channel_id': [],
+    'brain_channel_position': [],  # Store position info if available
     'spinal_shank': [],
     'spinal_channel_idx': [],
     'spinal_channel_id': [],
+    'spinal_channel_position': [],  # Store position info if available
     'frequencies': None,
     'coherence': [],
     'phase': [],
     'parameters': coherence_params.copy(),
+    'preprocessing': preproc_params.copy(),
     'metadata': {
         'base_folder': str(base_folder),
         'session_name': session_name,
         'sampling_rate': sampling_rate,
         'brain_shanks': brain_shanks,
         'spinal_shanks': spinal_shanks,
+        'channel_info': all_channel_info,  # Store all channel metadata
     }
 }
 
@@ -201,6 +257,14 @@ with tqdm(total=total_pairs, desc="Computing coherence") as pbar:
                     coherence_results['spinal_channel_id'].append(spinal_ch_id)
                     coherence_results['coherence'].append(Cxy[freq_mask])
                     coherence_results['phase'].append(phase[freq_mask])
+
+                    # Store physical channel position
+                    brain_xy = all_channel_info[brain_shank]['pos_xy'][brain_idx]
+                    spinal_xy = all_channel_info[spinal_shank]['pos_xy'][spinal_idx]
+
+                    coherence_results['brain_channel_position'].append(brain_xy)
+                    coherence_results['spinal_channel_position'].append(spinal_xy)
+
                     
                     pbar.update(1)
 
@@ -208,9 +272,11 @@ with tqdm(total=total_pairs, desc="Computing coherence") as pbar:
 coherence_results['brain_shank'] = np.array(coherence_results['brain_shank'])
 coherence_results['brain_channel_idx'] = np.array(coherence_results['brain_channel_idx'])
 coherence_results['brain_channel_id'] = np.array(coherence_results['brain_channel_id'])
+coherence_results['brain_channel_position'] = np.array(coherence_results['brain_channel_position'], dtype=object)
 coherence_results['spinal_shank'] = np.array(coherence_results['spinal_shank'])
 coherence_results['spinal_channel_idx'] = np.array(coherence_results['spinal_channel_idx'])
 coherence_results['spinal_channel_id'] = np.array(coherence_results['spinal_channel_id'])
+coherence_results['spinal_channel_position'] = np.array(coherence_results['spinal_channel_position'], dtype=object)
 coherence_results['coherence'] = np.array(coherence_results['coherence'])  # Shape: (n_pairs, n_freqs)
 coherence_results['phase'] = np.array(coherence_results['phase'])  # Shape: (n_pairs, n_freqs)
 

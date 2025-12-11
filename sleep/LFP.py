@@ -5,7 +5,7 @@ import spikeinterface.preprocessing as spre
 from pathlib import Path
 import pickle
 
-rec_folder = r"\\10.129.151.108\xieluanlabs\xl_cl\ephys\sleep\CnL39SG\CnL39SG_20251102_210043.rec"
+rec_folder = r"D:\cl\ephys\sleep\CnL42SG_20251112_170949.rec"
 session_name = Path(rec_folder).stem.split('.')[0]
 shanks = [0, 1, 2, 3]
 
