@@ -25,7 +25,7 @@ class ProcessingConfig:
     
     def __post_init__(self):
         if self.animal_ids is None:
-            self.animal_ids = ["CnL22", "CnL38", "CnL39", "CnL40", "CnL41"]
+            self.animal_ids = [ "CnL41"]
         if self.shank_ids is None:
             self.shank_ids = [0, 1, 2, 3]
 
