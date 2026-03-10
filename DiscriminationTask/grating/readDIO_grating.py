@@ -151,9 +151,11 @@ def process_behavior_trial_responses(rec_folder, trial_start, trial_end, rewarde
             sorting_analyzer_folder = Path(sorting_results_folder) / 'sorting_analyzer'
 
             # Prioritize phy folder, then fall back to sorting_analyzer
+            loaded_from_phy = False
             if phy_folder.exists():
                 try:
                     sorting = PhySortingExtractor(phy_folder)
+                    loaded_from_phy = True
                     print(f"Loaded from phy: {phy_folder}")
                 except Exception as e:
                     print(f"Failed to load from phy: {e}")
@@ -179,14 +181,16 @@ def process_behavior_trial_responses(rec_folder, trial_start, trial_end, rewarde
             else:
                 print(f"No valid sorting folder found in {sorting_results_folder}")
                 continue
-            
+
             unit_ids = sorting.unit_ids
-            unit_qualities_this_sort = sorting.get_property('quality')
-            
+            if loaded_from_phy:
+                phy_qualities = sorting.get_property('quality')
+                phy_quality_map = {uid: q for uid, q in zip(unit_ids, phy_qualities)} if phy_qualities is not None else {}
+
             if fs is None:
                 fs = sorting.sampling_frequency
                 print(f"Sampling frequency: {fs} Hz")
-            
+
             for unit_id in unit_ids:
                 spike_train = sorting.get_unit_spike_train(unit_id)
 
@@ -194,9 +198,12 @@ def process_behavior_trial_responses(rec_folder, trial_start, trial_end, rewarde
                 task_end_eff = task_end if task_end is not None else int(spike_train[-1]) + 1
                 task_mask = (spike_train >= task_start) & (spike_train < task_end_eff)
                 spike_train = spike_train[task_mask] - task_start
-                
-                # Create structured data for this unit
-                quality = unit_labels.get(f'shank{ish}', {}).get(str(unit_id), 'unknown')
+
+                # Use phy quality if loaded from phy, otherwise use unit_labels.json
+                if loaded_from_phy:
+                    quality = phy_quality_map.get(unit_id, 'unknown')
+                else:
+                    quality = unit_labels.get(f'shank{ish}', {}).get(str(unit_id), 'unknown')
                 unit_data = {
                     'unit_id': unit_id,
                     'shank': ish,

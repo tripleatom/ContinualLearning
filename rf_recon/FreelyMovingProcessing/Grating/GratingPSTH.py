@@ -8,14 +8,14 @@ from rf_recon.FreelyMovingProcessing.Grating.parse_grating_experiment import par
 from spikeinterface import load_sorting_analyzer
 from spikeinterface.extractors import PhySortingExtractor
 
-rec_folder = Path(r"/Volumes/xieluanlabs/xl_cl/RF_GRID/250821/CnL39SG/CnL39SG_20250821_163039.rec")
-task_file_Path = Path(r"/Volumes/xieluanlabs/xl_cl/RF_GRID/250821/CnL39_4_20250821_175044.txt")
+rec_folder = Path(r"/Volumes/xieluanlabs/xl_cl/experiment_data/CnL42/260304/CnL42_20260304/CnL42SG_passive_20260304_142720.rec")
+task_file_path = Path(r"/Volumes/xieluanlabs/xl_cl/experiment_data/CnL42/260304/CnL42_drifting_grating_exp_20260304_142748.txt")
 animal_id = rec_folder.name.split('.')[0].split('_')[0]
 session_id = rec_folder.name.split('.')[0]
 
 print(f"Processing {animal_id}/{session_id}")
 
-task_file = parse_grating_experiment(task_file_Path)
+task_file = parse_grating_experiment(task_file_path)
 
 # Get all trial data
 df = task_file['trial_data']
@@ -33,8 +33,8 @@ print("n_repeats", n_repeats)
 print("trial_duration", trial_duration, "s")
 
 # load processed DIO file
-task_id = task_file_Path.stem
-task_folder = task_file_Path.parent
+task_id = task_file_path.stem
+task_folder = task_file_path.parent
 processed_dio_folder = task_folder / f"{task_id}_DIO.npz"
 
 dio_data = np.load(processed_dio_folder)
@@ -73,7 +73,7 @@ all_unit_qualities = []
 fs = None
 
 # Iterate through shanks (similar to static_disc)
-ishs = ['0', '1', '2', '3']
+ishs = ['0', '1', '2', '3', '4', '5', '6', '7']
 
 # Sort trials by orientation for better visualization
 sorted_idx = np.argsort(orientations)
