@@ -40,22 +40,30 @@ def plot_behavior_trial_psth(pkl_file, out_folder=None):
     session_id = data['metadata']['session_id']
     fs = data['metadata']['sampling_frequency']
     
-    # Get trial information
-    white_on_left = np.array(data['trial_info']['white_on_left'])
-    n_trials = len(white_on_left)
-    
+    # Get trial information — support both white_on_left and rewarded_on_left
+    trial_info_dict = data['trial_info']
+    if 'white_on_left' in trial_info_dict:
+        condition_key = 'white_on_left'
+        left_label, right_label = 'White on Left', 'White on Right'
+    elif 'rewarded_on_left' in trial_info_dict:
+        condition_key = 'rewarded_on_left'
+        left_label, right_label = 'Rewarded on Left', 'Rewarded on Right'
+    else:
+        raise KeyError("trial_info must contain 'white_on_left' or 'rewarded_on_left'")
+
+    white_on_left = np.array(trial_info_dict[condition_key])
+
     # Window parameters
     window_pre = data['extraction_params']['window_pre']
     window_post = data['extraction_params']['window_post']
-    
+
     # Get unique conditions
-    unique_conditions = [False, True]  # Right, Left
-    condition_labels = {False: 'White on Right', True: 'White on Left'}
+    condition_labels = {False: right_label, True: left_label}
     colors = {False: '#FF6B6B', True: '#4ECDC4'}  # Red for right, teal for left
-    
+
     print(f"\nConditions:")
-    print(f"  White on Left: {np.sum(white_on_left)} trials")
-    print(f"  White on Right: {np.sum(~white_on_left)} trials")
+    print(f"  {left_label}: {np.sum(white_on_left)} trials")
+    print(f"  {right_label}: {np.sum(~white_on_left)} trials")
     
     # Process each unit
     for unit_id, unit_data in data['spike_data'].items():
@@ -195,7 +203,7 @@ def plot_behavior_trial_psth(pkl_file, out_folder=None):
 # Example usage
 if __name__ == '__main__':
     # Option 1: Specify the PKL file path directly
-    pkl_file = r"\\10.129.151.108\xieluanlabs\xl_cl\sortout\CnL39SG\CnL39SG_20260107_163640\behavior_trial_embedding_20260108_1032.pkl"
+    pkl_file = r"/Volumes/xieluanlabs/xl_cl/sortout/CnL42SG/CnL42SG_20260304/behavior_trial_embedding_20260309_1932.pkl"
     
     # Option 2: Or find the most recent PKL file in a session folder
     # from pathlib import Path

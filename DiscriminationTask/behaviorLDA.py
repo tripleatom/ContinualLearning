@@ -62,18 +62,37 @@ def calculate_firing_rates(neural_data, time_window=(0.0, None)):
     """
     window_start = time_window[0]
     
-    unit_ids = list(neural_data['spike_data'].keys())
-    white_on_left = np.array(neural_data['trial_info']['white_on_left'])
+    unit_info = neural_data.get('unit_info', {})
+    unit_ids = [
+        uid for uid in neural_data['spike_data'].keys()
+        if unit_info.get(uid, {}).get('quality', 'unknown') != 'noise'
+    ]
+    n_noise = len(neural_data['spike_data']) - len(unit_ids)
+    if n_noise:
+        print(f"  Excluded {n_noise} noise unit(s)")
+
+    # Support both white_on_left (old format) and rewarded_on_left (grating format)
+    trial_info_dict = neural_data['trial_info']
+    if 'white_on_left' in trial_info_dict:
+        condition_key = 'white_on_left'
+        left_label, right_label = 'White on Left', 'White on Right'
+    elif 'rewarded_on_left' in trial_info_dict:
+        condition_key = 'rewarded_on_left'
+        left_label, right_label = 'Rewarded on Left', 'Rewarded on Right'
+    else:
+        raise KeyError("trial_info must contain 'white_on_left' or 'rewarded_on_left'")
+
+    white_on_left = np.array(trial_info_dict[condition_key])
     n_trials = len(white_on_left)
     n_units = len(unit_ids)
-    
+
     # Print summary
     print(f"\nCalculating firing rates:")
     print(f"  Units: {n_units} | Trials: {n_trials}")
     print(f"  Window start: {window_start:.3f}s")
     print(f"  Conditions:")
-    print(f"    White on Left:  {np.sum(white_on_left)} trials")
-    print(f"    White on Right: {np.sum(~white_on_left)} trials")
+    print(f"    {left_label}:  {np.sum(white_on_left)} trials")
+    print(f"    {right_label}: {np.sum(~white_on_left)} trials")
     
     # Calculate firing rates
     firing_rates = np.full((n_trials, n_units), np.nan)
@@ -110,7 +129,7 @@ def calculate_firing_rates(neural_data, time_window=(0.0, None)):
     trial_info = {
         'valid_trials_mask': valid_mask,
         'unique_conditions': [0, 1],  # Right, Left
-        'condition_names': {0: 'White on Right', 1: 'White on Left'},
+        'condition_names': {0: right_label, 1: left_label},
         'experiment_parameters': neural_data.get('experiment_parameters', {}),
         'n_trials_per_condition': {
             0: int(np.sum(condition_labels == 0)),
@@ -437,7 +456,7 @@ def _plot_lda_coefficients(fig, results, unit_ids):
         
         ax.barh(range(len(sorted_idx)), coef[sorted_idx], color=colors_bar, alpha=0.7)
         ax.set(yticks=range(len(sorted_idx)),
-               yticklabels=[unit_ids[i].split('_')[-1] for i in sorted_idx],
+               yticklabels=[unit_ids[i] for i in sorted_idx],
                xlabel='LDA Coefficient',
                title='Top Discriminative Units (Positive=Left, Negative=Right)')
         ax.invert_yaxis()
@@ -511,7 +530,7 @@ def _plot_feature_importance(fig, results, unit_ids):
         
         ax.barh(range(len(top_idx)), importance[top_idx], alpha=0.7, color='orange')
         ax.set(yticks=range(len(top_idx)),
-               yticklabels=[unit_ids[i].split('_')[-1] for i in top_idx],
+               yticklabels=[unit_ids[i] for i in top_idx],
                xlabel='|LDA Coefficient|',
                title='Top Discriminative Units')
         ax.invert_yaxis()
@@ -565,7 +584,7 @@ def _plot_firing_rate_comparison(fig, results, unit_ids, labels):
     ax.set(ylabel='Mean Firing Rate (Hz)',
            title='Unit Firing Rates by Condition',
            xticks=x,
-           xticklabels=[unit_ids[i].split('_')[-1] for i in show_idx])
+           xticklabels=[unit_ids[i] for i in show_idx])
     ax.legend(fontsize=10)
     ax.grid(True, alpha=0.3, axis='y')
     plt.setp(ax.get_xticklabels(), rotation=90, fontsize=8)
@@ -718,7 +737,7 @@ def _save_individual_subfigures(results, unit_ids, trial_info, base_save_path):
             sorted_idx = np.argsort(np.abs(coef))[::-1][:20]
             colors_bar = ['#4ECDC4' if c > 0 else '#FF6B6B' for c in coef[sorted_idx]]
             ax.barh(range(len(sorted_idx)), coef[sorted_idx], color=colors_bar, alpha=0.7)
-            ax.set(yticks=range(len(sorted_idx)), yticklabels=[unit_ids[i].split('_')[-1] for i in sorted_idx],
+            ax.set(yticks=range(len(sorted_idx)), yticklabels=[unit_ids[i] for i in sorted_idx],
                    xlabel='LDA Coefficient', title='Top Discriminative Units (Positive=Left, Negative=Right)')
             ax.invert_yaxis()
             ax.axvline(x=0, color='black', linestyle='-', linewidth=1)
@@ -790,7 +809,7 @@ def _save_individual_subfigures(results, unit_ids, trial_info, base_save_path):
             importance = np.abs(results['lda_full'].coef_[0])
             top_idx = np.argsort(importance)[::-1][:15]
             ax.barh(range(len(top_idx)), importance[top_idx], alpha=0.7, color='orange')
-            ax.set(yticks=range(len(top_idx)), yticklabels=[unit_ids[i].split('_')[-1] for i in top_idx],
+            ax.set(yticks=range(len(top_idx)), yticklabels=[unit_ids[i] for i in top_idx],
                    xlabel='|LDA Coefficient|', title='Top Discriminative Units')
             ax.invert_yaxis()
             ax.grid(True, alpha=0.3, axis='x')
@@ -833,7 +852,7 @@ def _save_individual_subfigures(results, unit_ids, trial_info, base_save_path):
         ax.bar(x - width/2, mean_right[show_idx], width, label='Right', color='#FF6B6B', alpha=0.7)
         ax.bar(x + width/2, mean_left[show_idx], width, label='Left', color='#4ECDC4', alpha=0.7)
         ax.set(ylabel='Mean Firing Rate (Hz)', title='Unit Firing Rates by Condition',
-               xticks=x, xticklabels=[unit_ids[i].split('_')[-1] for i in show_idx])
+               xticks=x, xticklabels=[unit_ids[i] for i in show_idx])
         ax.legend(fontsize=10)
         ax.grid(True, alpha=0.3, axis='y')
         plt.setp(ax.get_xticklabels(), rotation=90, fontsize=8)
@@ -902,7 +921,7 @@ def run_analysis(data_path, time_window=(0.0, None), save_plots=True,
 
 if __name__ == "__main__":
     # Configure your data path here
-    DATA_PATH = r"\\10.129.151.108\xieluanlabs\xl_cl\sortout\CnL39SG\CnL39SG_20260107_163640\behavior_trial_embedding_20260108_1032.pkl"
+    DATA_PATH = r"/Volumes/xieluanlabs/xl_cl/sortout/CnL42SG/CnL42SG_20260304/behavior_trial_embedding_20260309_2000.pkl"
     
     # Or find the most recent PKL file
     # from pathlib import Path
@@ -915,7 +934,7 @@ if __name__ == "__main__":
     try:
         results = run_analysis(
             data_path=DATA_PATH,
-            time_window=(0.0, None),  # Use entire trial duration
+            time_window=(0.0, 1.0),  # Use entire trial duration
             save_plots=True
         )
         

@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 from scipy.ndimage import gaussian_filter1d
 import os
 
-from parse_grating_experiment import parse_grating_experiment
+from rf_recon.FreelyMovingProcessing.Grating.parse_grating_experiment import parse_grating_experiment
 from spikeinterface import load_sorting_analyzer
 from spikeinterface.extractors import PhySortingExtractor
 

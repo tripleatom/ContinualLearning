@@ -1,11 +1,11 @@
 from pathlib import Path
-from parse_grating_experiment import parse_grating_experiment
+from rf_recon.FreelyMovingProcessing.Grating.parse_grating_experiment import parse_grating_experiment
 import numpy as np
 from process_func.DIO import get_dio_folders, concatenate_din_data
 import matplotlib.pyplot as plt
 
-rec_folder = Path(r"Z:\xl_cl\Albert\20251031_psv;hf;sphr;2sides\CnL39SG\CnL39SG_20251031_085159.rec")
-task_file_Path = Path(r"Z:\xl_cl\Albert\20251031_psv;hf;sphr;2sides\CnL39SG\CnL39_drifting_grating_exp_20251031_085247.txt")
+rec_folder = Path(r"/Volumes/xieluanlabs/xl_cl/experiment_data/CnL42/260304/CnL42_20260304/CnL42SG_passive_20260304_142720.rec")
+task_file_Path = Path(r"/Volumes/xieluanlabs/xl_cl/experiment_data/CnL42/260304/CnL42_drifting_grating_exp_20260304_142748.txt")
 task_id = task_file_Path.stem
 folder_path = task_file_Path.parent
 
