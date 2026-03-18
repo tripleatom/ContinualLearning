@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 import pickle
 from scipy import stats
+from scipy.ndimage import gaussian_filter1d
 from matplotlib.gridspec import GridSpec
 import warnings
 import argparse
@@ -116,6 +117,24 @@ def calculate_tuning_curves(neural_data, time_window=(0.07, 0.16)):
         # Baseline firing rate (mean across all orientations)
         baseline_rate = np.mean(mean_rates_arr)
         
+        # PSTH: 20 ms bins, -0.2 to 1.5 s relative to stimulus onset
+        psth_bin_s = 0.02
+        psth_edges = np.arange(-0.2, 1.5 + psth_bin_s, psth_bin_s)
+        psth_t = (psth_edges[:-1] + psth_edges[1:]) / 2
+        psth_per_ori = {}
+        for ori in unique_orientations:
+            spikes_all = []
+            n_ori_trials = 0
+            for trial_data in unit_trials:
+                if trial_data['orientation'] == ori:
+                    spikes_all.append(np.array(trial_data['spike_times']))
+                    n_ori_trials += 1
+            if n_ori_trials > 0 and spikes_all:
+                counts, _ = np.histogram(np.concatenate(spikes_all), bins=psth_edges)
+                psth_per_ori[ori] = (counts / (n_ori_trials * psth_bin_s)).tolist()
+            else:
+                psth_per_ori[ori] = [0.0] * len(psth_t)
+
         unit_tuning_data[unit_id] = {
             'orientations': unique_orientations,
             'mean_rates': mean_rates,
@@ -128,7 +147,9 @@ def calculate_tuning_curves(neural_data, time_window=(0.07, 0.16)):
             'modulation_index': modulation_index,
             'max_rate': max_rate,
             'min_rate': min_rate,
-            'baseline_rate': baseline_rate
+            'baseline_rate': baseline_rate,
+            'psth_per_ori': psth_per_ori,
+            'psth_t': psth_t.tolist(),
         }
     
     experiment_info = {
@@ -148,150 +169,200 @@ def calculate_tuning_curves(neural_data, time_window=(0.07, 0.16)):
 # PLOTTING FUNCTIONS
 # =============================================================================
 
-def plot_single_tuning_curve(unit_id, tuning_data, save_path=None):
+def plot_single_tuning_curve(unit_id, tuning_data, unit_info=None,
+                             time_window=(0.07, 0.16), save_path=None):
     """
     Create a comprehensive tuning curve plot for a single unit.
-    
-    Includes:
-    - Cartesian tuning curve with error bars
-    - Polar tuning curve
-    - Raster plot of individual trials
-    - Summary statistics
+
+    Layout (3 rows × 4 columns):
+      Col 0-1: Cartesian tuning curve (rows 0-2)
+      Col 2:   Polar plot (row 0), Boxplot (row 1), Tuning statistics (row 2)
+      Col 3:   Waveform (row 0), ACG (row 1), Unit info (row 2)
+
+    Args:
+        unit_info: dict from neural_data['unit_info'] — may contain
+                   'waveform_template', 'waveform_t_ms', 'acg_counts',
+                   'acg_lags_ms', 'best_channel', 'channel_location_um',
+                   'shank', 'quality'.  Pass None to skip those panels.
     """
-    fig = plt.figure(figsize=(16, 10))
-    gs = GridSpec(3, 3, figure=fig, hspace=0.3, wspace=0.3)
-    
+    if unit_info is None:
+        unit_info = {}
+
+    fig = plt.figure(figsize=(22, 12))
+    gs = GridSpec(3, 4, figure=fig, hspace=0.4, wspace=0.35)
+
     orientations = tuning_data['orientations']
     mean_rates = np.array(tuning_data['mean_rates'])
     sem_rates = np.array(tuning_data['sem_rates'])
-    
-    # Main title
-    fig.suptitle(f'Orientation Tuning Curve: {unit_id}', 
-                 fontsize=16, fontweight='bold')
-    
-    # 1. Cartesian tuning curve (large, left side)
-    ax1 = fig.add_subplot(gs[0:2, 0:2])
-    ax1.errorbar(orientations, mean_rates, yerr=sem_rates, 
+
+    # Build a short header with unit identity
+    shank_str = f"shank{unit_info.get('shank', '?')}"
+    ch_str = (f"ch{unit_info.get('best_channel', '?')}"
+              if unit_info.get('best_channel') is not None else "")
+    loc = unit_info.get('channel_location_um')
+    loc_str = f"  [{loc[0]:.0f}, {loc[1]:.0f}] µm" if loc else ""
+    quality = unit_info.get('quality', '')
+    header = f"{unit_id}  |  {shank_str}  {ch_str}{loc_str}  {quality}"
+    fig.suptitle(header, fontsize=13, fontweight='bold')
+
+    # ------------------------------------------------------------------ #
+    # 1. Cartesian tuning curve (rows 0-2, cols 0-1)
+    # ------------------------------------------------------------------ #
+    ax1 = fig.add_subplot(gs[0:3, 0:2])
+    ax1.errorbar(orientations, mean_rates, yerr=sem_rates,
                  marker='o', markersize=8, linewidth=2, capsize=5,
                  color='#2E86AB', ecolor='#A23B72', capthick=2)
-    ax1.fill_between(orientations, 
-                      mean_rates - sem_rates, 
-                      mean_rates + sem_rates,
-                      alpha=0.2, color='#2E86AB')
-    
-    # Mark preferred orientation
+    ax1.fill_between(orientations,
+                     mean_rates - sem_rates,
+                     mean_rates + sem_rates,
+                     alpha=0.2, color='#2E86AB')
     pref_idx = np.argmax(mean_rates)
-    ax1.plot(orientations[pref_idx], mean_rates[pref_idx], 
-             '*', color='red', markersize=20, 
+    ax1.plot(orientations[pref_idx], mean_rates[pref_idx],
+             '*', color='red', markersize=20,
              label=f'Preferred: {orientations[pref_idx]}°')
-    
-    ax1.set_xlabel('Orientation (degrees)', fontsize=12, fontweight='bold')
-    ax1.set_ylabel('Firing Rate (Hz)', fontsize=12, fontweight='bold')
-    ax1.set_title('Tuning Curve (Cartesian)', fontsize=14, fontweight='bold')
+    ax1.set_xlabel('Orientation (degrees)', fontsize=11, fontweight='bold')
+    ax1.set_ylabel('Firing Rate (Hz)', fontsize=11, fontweight='bold')
+    ax1.set_title('Tuning Curve', fontsize=13, fontweight='bold')
     ax1.grid(True, alpha=0.3, linestyle='--')
-    ax1.legend(fontsize=10)
+    ax1.legend(fontsize=9)
     ax1.set_xticks(orientations)
-    
-    # 2. Polar tuning curve (top right)
+
+    # ------------------------------------------------------------------ #
+    # 2. Polar tuning curve (row 0, col 2)
+    # ------------------------------------------------------------------ #
     ax2 = fig.add_subplot(gs[0, 2], projection='polar')
-    theta = 2 * np.deg2rad(orientations)  # Double angle for orientation
-    
-    # Close the loop for polar plot
+    theta = 2 * np.deg2rad(orientations)
     theta_plot = np.concatenate([theta, [theta[0]]])
     rates_plot = np.concatenate([mean_rates, [mean_rates[0]]])
-    
-    ax2.plot(theta_plot, rates_plot, 'o-', linewidth=2, markersize=8, color='#2E86AB')
+    ax2.plot(theta_plot, rates_plot, 'o-', linewidth=2, markersize=6, color='#2E86AB')
     ax2.fill(theta_plot, rates_plot, alpha=0.25, color='#2E86AB')
-    
-    # Mark preferred orientation
     pref_theta = 2 * np.deg2rad(tuning_data['preferred_orientation_deg'])
-    pref_rate = np.max(mean_rates)
-    ax2.plot(pref_theta, pref_rate, '*', color='red', markersize=15)
-    
-    ax2.set_title('Polar Tuning Curve', fontsize=12, fontweight='bold', pad=20)
-    ax2.set_thetagrids(np.arange(0, 360, 45), 
+    ax2.plot(pref_theta, np.max(mean_rates), '*', color='red', markersize=12)
+    ax2.set_title('Polar', fontsize=11, fontweight='bold', pad=15)
+    ax2.set_thetagrids(np.arange(0, 360, 45),
                        [f'{int(a/2)}°' for a in np.arange(0, 360, 45)])
     ax2.grid(True)
-    
-    # 3. Box plot of firing rates (middle right)
+
+    # ------------------------------------------------------------------ #
+    # 3. PSTH (row 1, col 2)
+    # ------------------------------------------------------------------ #
     ax3 = fig.add_subplot(gs[1, 2])
-    trial_rates_list = [tuning_data['trial_rates'][ori] for ori in orientations]
-    
-    bp = ax3.boxplot(trial_rates_list, labels=[f'{ori}°' for ori in orientations],
-                      patch_artist=True, showmeans=True)
-    
-    # Color boxes
-    for patch, ori in zip(bp['boxes'], orientations):
-        color = plt.cm.hsv((ori % 180) / 180)
-        patch.set_facecolor(color)
-        patch.set_alpha(0.6)
-    
-    ax3.set_xlabel('Orientation', fontsize=10)
-    ax3.set_ylabel('Firing Rate (Hz)', fontsize=10)
-    ax3.set_title('Trial Distribution', fontsize=12, fontweight='bold')
-    ax3.grid(True, alpha=0.3, axis='y')
-    plt.setp(ax3.xaxis.get_majorticklabels(), rotation=45, ha='right')
-    
-    # 4. Raster plot (bottom left)
-    ax4 = fig.add_subplot(gs[2, 0:2])
-    
-    y_pos = 0
-    colors_raster = plt.cm.hsv(np.linspace(0, 1, len(orientations) + 1)[:-1])
-    orientation_positions = {}
-    
-    for i, ori in enumerate(orientations):
-        trials = tuning_data['trial_rates'][ori]
-        n_trials = len(trials)
-        
-        if n_trials > 0:
-            # Plot markers for each trial
-            trial_indices = np.arange(y_pos, y_pos + n_trials)
-            ax4.scatter([ori] * n_trials, trial_indices, 
-                       s=50, c=[colors_raster[i]], alpha=0.6, marker='|')
-            
-            orientation_positions[ori] = y_pos + n_trials / 2
-            y_pos += n_trials
-    
-    ax4.set_xlabel('Orientation (degrees)', fontsize=10, fontweight='bold')
-    ax4.set_ylabel('Trial Number', fontsize=10, fontweight='bold')
-    ax4.set_title('Trial Raster by Orientation', fontsize=12, fontweight='bold')
-    ax4.set_xticks(orientations)
-    ax4.grid(True, alpha=0.3, axis='x')
-    
-    # 5. Summary statistics (bottom right)
+    psth_t = np.array(tuning_data['psth_t'])
+    psth_colors = plt.cm.hsv(np.linspace(0, 1, len(orientations) + 1)[:-1])
+    for k, ori in enumerate(orientations):
+        psth_rate = gaussian_filter1d(np.array(tuning_data['psth_per_ori'][ori]), sigma=1.5)
+        ax3.plot(psth_t, psth_rate, color=psth_colors[k],
+                 linewidth=1.2, label=f'{ori}°', alpha=0.85)
+    ax3.axvline(0, color='black', linewidth=1.0, linestyle='--', label='onset')
+    ax3.axvspan(time_window[0], time_window[1], alpha=0.1, color='gray',
+                label='analysis\nwindow')
+    ax3.set_xlabel('Time re. onset (s)', fontsize=9)
+    ax3.set_ylabel('Firing Rate (Hz)', fontsize=9)
+    ax3.set_title('PSTH', fontsize=11, fontweight='bold')
+    ax3.legend(fontsize=6, loc='upper right', ncol=2)
+    ax3.grid(True, alpha=0.3)
+
+    # ------------------------------------------------------------------ #
+    # 5. Tuning statistics (row 2, col 2)
+    # ------------------------------------------------------------------ #
     ax5 = fig.add_subplot(gs[2, 2])
     ax5.axis('off')
-    
-    summary_text = f"""
-    TUNING STATISTICS
-    
-    Orientation Selectivity:
-    • OSI: {tuning_data['osi']:.3f}
-    • Preferred: {tuning_data['preferred_orientation_deg']:.1f}°
-    • Modulation Index: {tuning_data['modulation_index']:.3f}
-    
-    Firing Rates:
-    • Max: {tuning_data['max_rate']:.2f} Hz
-    • Min: {tuning_data['min_rate']:.2f} Hz
-    • Baseline: {tuning_data['baseline_rate']:.2f} Hz
-    • Range: {tuning_data['max_rate'] - tuning_data['min_rate']:.2f} Hz
-    
-    Trials:
-    • Total: {sum(tuning_data['trial_counts'])}
-    • Per orientation: {min(tuning_data['trial_counts'])}-{max(tuning_data['trial_counts'])}
-    """
-    
+    summary_text = (
+        f"TUNING STATISTICS\n\n"
+        f"OSI: {tuning_data['osi']:.3f}\n"
+        f"Preferred: {tuning_data['preferred_orientation_deg']:.1f}°\n"
+        f"Mod. Index: {tuning_data['modulation_index']:.3f}\n\n"
+        f"Max FR: {tuning_data['max_rate']:.2f} Hz\n"
+        f"Min FR: {tuning_data['min_rate']:.2f} Hz\n"
+        f"Baseline: {tuning_data['baseline_rate']:.2f} Hz\n\n"
+        f"Total trials: {sum(tuning_data['trial_counts'])}\n"
+        f"Per ori: {min(tuning_data['trial_counts'])}"
+        f"–{max(tuning_data['trial_counts'])}"
+    )
     ax5.text(0.05, 0.95, summary_text, transform=ax5.transAxes,
-             fontsize=10, verticalalignment='top', fontfamily='monospace',
+             fontsize=9, verticalalignment='top', fontfamily='monospace',
              bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.3))
-    
-    # Save if path provided
+
+    # ------------------------------------------------------------------ #
+    # 6. Waveform (row 0, col 3)
+    # ------------------------------------------------------------------ #
+    ax6 = fig.add_subplot(gs[0, 3])
+    wf = unit_info.get('waveform_template')
+    wf_t = unit_info.get('waveform_t_ms')
+    if wf is not None:
+        wf_arr = np.array(wf)
+        t_arr = np.array(wf_t) if wf_t is not None else np.arange(len(wf_arr))
+        wf_arr = wf_arr / (np.max(np.abs(wf_arr)) + 1e-12)   # normalize to ±1
+        ax6.plot(t_arr, wf_arr, color='#444', linewidth=1.5)
+        ax6.axhline(0, color='gray', linewidth=0.5, linestyle='--')
+        ax6.fill_between(t_arr, wf_arr, 0, where=(wf_arr < 0),
+                         alpha=0.25, color='steelblue')
+        ax6.fill_between(t_arr, wf_arr, 0, where=(wf_arr >= 0),
+                         alpha=0.25, color='coral')
+        xlabel = 'Time (ms)' if wf_t is not None else 'Sample'
+        ax6.set_xlabel(xlabel, fontsize=8)
+    else:
+        ax6.text(0.5, 0.5, 'no waveform', ha='center', va='center',
+                 transform=ax6.transAxes, color='gray', fontsize=9)
+    ax6.set_ylabel('Norm. amplitude', fontsize=8)
+    ax6.set_title('Waveform', fontsize=11, fontweight='bold')
+    ax6.grid(True, alpha=0.3)
+    ax6.tick_params(labelsize=7)
+
+    # ------------------------------------------------------------------ #
+    # 7. ACG (row 1, col 3)
+    # ------------------------------------------------------------------ #
+    ax7 = fig.add_subplot(gs[1, 3])
+    acg = unit_info.get('acg_counts')
+    acg_lags = unit_info.get('acg_lags_ms')
+    if acg is not None:
+        acg_arr = np.array(acg)
+        lags_arr = np.array(acg_lags)
+        # zero out the central bin (self-coincidence)
+        center = len(acg_arr) // 2
+        acg_arr[center] = 0
+        ax7.bar(lags_arr, acg_arr, width=(lags_arr[1] - lags_arr[0]) * 0.9,
+                color='#5B8DB8', edgecolor='none', alpha=0.8)
+        ax7.axvline(0, color='red', linewidth=0.8, linestyle='--')
+        ax7.set_xlim(-25, 25)
+        ax7.set_xlabel('Lag (ms)', fontsize=8)
+        ax7.set_ylabel('Rate (Hz)', fontsize=8)
+    else:
+        ax7.text(0.5, 0.5, 'no ACG', ha='center', va='center',
+                 transform=ax7.transAxes, color='gray', fontsize=9)
+    ax7.set_title('Autocorrelogram', fontsize=11, fontweight='bold')
+    ax7.grid(True, alpha=0.3)
+    ax7.tick_params(labelsize=7)
+
+    # ------------------------------------------------------------------ #
+    # 8. Unit info text (row 2, col 3)
+    # ------------------------------------------------------------------ #
+    ax8 = fig.add_subplot(gs[2, 3])
+    ax8.axis('off')
+    if unit_info:
+        loc = unit_info.get('channel_location_um')
+        loc_txt = (f"[{loc[0]:.0f}, {loc[1]:.0f}] µm" if loc
+                   else 'N/A')
+        info_text = (
+            f"UNIT INFO\n\n"
+            f"Shank:    {unit_info.get('shank', 'N/A')}\n"
+            f"Channel:  {unit_info.get('best_channel', 'N/A')}\n"
+            f"Position: {loc_txt}\n"
+            f"Quality:  {unit_info.get('quality', 'N/A')}\n"
+            f"N spikes: {unit_info.get('n_spikes_total', 'N/A')}"
+        )
+    else:
+        info_text = "UNIT INFO\n\n(not available)"
+    ax8.text(0.05, 0.95, info_text, transform=ax8.transAxes,
+             fontsize=9, verticalalignment='top', fontfamily='monospace',
+             bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.5))
+
     if save_path:
         save_path = Path(save_path)
         save_path.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(save_path, dpi=150, bbox_inches='tight')
         plt.close(fig)
-    
+
     return fig
 
 
@@ -389,32 +460,46 @@ def generate_tuning_curves(data_path, time_window=(0.07, 0.16),
     """
     # Load data
     data = load_neural_data(data_path)
-    
+    all_unit_info = data.get('unit_info', {})
+
     # Calculate tuning curves
     tuning_results = calculate_tuning_curves(data, time_window=time_window)
     unit_tuning_data = tuning_results['unit_tuning_data']
-    
+
     # Set up output folder
     if output_folder is None:
         output_folder = Path(data_path).parent / f"{Path(data_path).stem}_tuning_curves"
     else:
         output_folder = Path(output_folder)
-    
+
     output_folder.mkdir(parents=True, exist_ok=True)
     print(f"\nSaving tuning curves to: {output_folder}")
-    
-    # Generate individual plots
+
+    # Generate individual plots + per-unit pkl
     print(f"\nGenerating individual tuning curve plots...")
     unit_ids = sorted(unit_tuning_data.keys())
-    
+
     for i, unit_id in enumerate(unit_ids, 1):
-        # Clean unit_id for filename
         clean_id = unit_id.replace('/', '_').replace('\\', '_')
+        unit_info = all_unit_info.get(unit_id, {})
+
+        # PNG figure
         save_path = output_folder / f"{clean_id}_tuning_curve.png"
-        
-        plot_single_tuning_curve(unit_id, unit_tuning_data[unit_id], 
-                                save_path=save_path)
-        
+        plot_single_tuning_curve(unit_id, unit_tuning_data[unit_id],
+                                 unit_info=unit_info,
+                                 time_window=time_window,
+                                 save_path=save_path)
+
+        # Per-unit pkl: tuning data + unit identity/waveform/ACG
+        pkl_path = output_folder / f"{clean_id}_tuning.pkl"
+        unit_pkg = {
+            'unit_id': unit_id,
+            'tuning': unit_tuning_data[unit_id],
+            'unit_info': unit_info,
+        }
+        with open(pkl_path, 'wb') as f:
+            pickle.dump(unit_pkg, f, protocol=pickle.HIGHEST_PROTOCOL)
+
         if i % 10 == 0:
             print(f"  Processed {i}/{len(unit_ids)} units...")
     
@@ -482,7 +567,7 @@ if __name__ == "__main__":
     try:
         tuning_results = generate_tuning_curves(
             data_path=DATA_PATH,
-            time_window=(0.07, 0.16),
+            time_window=(0.05, 1.0),
             output_folder=OUTPUT_FOLDER,
             create_summary=True
         )

@@ -9,6 +9,110 @@ from spikeinterface.extractors import PhySortingExtractor
 from rf_recon.FreelyMovingProcessing.Grating.parse_grating_experiment import parse_grating_experiment
 
 
+def _compute_acg(spike_train_samples, fs, max_lag_ms=25.0, bin_ms=1.0):
+    """
+    Compute autocorrelogram from a spike train (in samples).
+
+    Returns:
+        acg_counts: normalized counts (Hz units, firing rate in each lag bin)
+        lags_ms: lag axis in milliseconds
+    """
+    n_bins = int(max_lag_ms / bin_ms)
+    bins_edges = np.arange(-n_bins - 0.5, n_bins + 1.5) * bin_ms
+
+    if len(spike_train_samples) == 0:
+        lags_ms = np.arange(-n_bins, n_bins + 1) * bin_ms
+        return np.zeros(2 * n_bins + 1), lags_ms
+
+    t_ms = np.sort(spike_train_samples.astype(float)) / fs * 1000.0
+
+    # Subsample for speed on very dense recordings
+    if len(t_ms) > 5000:
+        rng = np.random.default_rng(42)
+        idx = np.sort(rng.choice(len(t_ms), 5000, replace=False))
+        t_ms = t_ms[idx]
+
+    all_diffs = []
+    for i in range(len(t_ms)):
+        lo = np.searchsorted(t_ms, t_ms[i] - max_lag_ms, 'left')
+        hi = np.searchsorted(t_ms, t_ms[i] + max_lag_ms + 1e-6, 'right')
+        diffs = t_ms[lo:hi] - t_ms[i]
+        diffs = diffs[diffs != 0]
+        all_diffs.append(diffs)
+
+    all_diffs = np.concatenate(all_diffs) if all_diffs else np.array([])
+    counts, _ = np.histogram(all_diffs, bins=bins_edges)
+    lags_ms = np.arange(-n_bins, n_bins + 1) * bin_ms
+
+    # Normalize: counts / (n_spikes * bin_width_s) → Hz
+    counts_norm = counts.astype(float) / (len(t_ms) * bin_ms / 1000.0)
+    return counts_norm, lags_ms
+
+
+def _extract_waveform_info(unit_id, phy_folder, sorting_analyzer_path):
+    """
+    Extract mean waveform on the best channel and that channel's probe location.
+
+    Tries (in order):
+      1. sorting_analyzer templates extension
+      2. phy templates.npy + channel_positions.npy
+
+    Returns:
+        waveform: list[float] — mean waveform on best channel, or None
+        waveform_t_ms: list[float] — time axis in ms, or None
+        best_channel: int or None
+        channel_location_um: [x, y] in µm, or None
+    """
+    # --- try sorting_analyzer first ---
+    if sorting_analyzer_path and Path(sorting_analyzer_path).exists():
+        try:
+            analyzer = load_sorting_analyzer(sorting_analyzer_path)
+            templates_ext = analyzer.get_extension('templates')
+            if templates_ext is not None:
+                unit_ids_list = list(analyzer.unit_ids)
+                if unit_id in unit_ids_list:
+                    idx = unit_ids_list.index(unit_id)
+                    templates_data = templates_ext.get_data()   # (n_units, n_samples, n_channels)
+                    template = templates_data[idx]               # (n_samples, n_channels)
+                    best_ch = int(np.argmax(np.ptp(template, axis=0)))
+                    wf = template[:, best_ch].tolist()
+                    fs_wf = analyzer.sampling_frequency
+                    n_samples = template.shape[0]
+                    t_ms = (np.arange(n_samples) / fs_wf * 1000.0 - (n_samples / 2) / fs_wf * 1000.0).tolist()
+                    locs = analyzer.get_channel_locations()
+                    loc = locs[best_ch].tolist() if locs is not None else None
+                    return wf, t_ms, best_ch, loc
+        except Exception as e:
+            print(f"    [waveform] sorting_analyzer failed for unit {unit_id}: {e}")
+
+    # --- fall back to phy ---
+    if phy_folder and Path(phy_folder).exists():
+        try:
+            templates_file = Path(phy_folder) / 'templates.npy'
+            positions_file = Path(phy_folder) / 'channel_positions.npy'
+            if templates_file.exists():
+                templates = np.load(templates_file)   # (n_templates, n_samples, n_channels)
+                uid = int(unit_id)
+                if uid < templates.shape[0]:
+                    template = templates[uid]           # (n_samples, n_channels)
+                    best_ch = int(np.argmax(np.ptp(template, axis=0)))
+                    wf = template[:, best_ch].tolist()
+                    # phy templates have no guaranteed sample rate stored here;
+                    # use index as proxy and let the caller supply fs if needed
+                    n_samples = template.shape[0]
+                    t_ms = (np.arange(n_samples) - n_samples // 2).tolist()  # in samples, caller converts
+                    loc = None
+                    if positions_file.exists():
+                        positions = np.load(positions_file)
+                        if best_ch < len(positions):
+                            loc = positions[best_ch].tolist()
+                    return wf, t_ms, best_ch, loc
+        except Exception as e:
+            print(f"    [waveform] phy fallback failed for unit {unit_id}: {e}")
+
+    return None, None, None, None
+
+
 def extract_grating_neural_data_for_embedding(rec_folder, task_file_path, sortout_folder, task_start=0, task_end=None):
     rec_folder = Path(rec_folder)
     task_file_path = Path(task_file_path)
@@ -218,13 +322,30 @@ def extract_grating_neural_data_for_embedding(rec_folder, task_file_path, sortou
                 spike_train = spike_train[task_mask] - task_start
 
                 unique_unit_id = f"shank{ish}_unit{unit_id}"
+
+                # Waveform + channel location
+                wf, wf_t_ms, best_ch, ch_loc = _extract_waveform_info(
+                    unit_id, phy_folder, sorting_analyzer_path
+                )
+
+                # ACG from full (task-masked) spike train
+                acg_counts, acg_lags_ms = _compute_acg(spike_train, fs)
+
                 neural_data['unit_info'][unique_unit_id] = {
                     'original_unit_id': int(unit_id),
                     'shank': ish,
                     'quality': quality,
                     'sorting_folder': sorting_results_folder,
                     'n_spikes_total': len(spike_train),
-                    'unit_index': unit_counter
+                    'unit_index': unit_counter,
+                    # waveform / electrode
+                    'best_channel': best_ch,
+                    'channel_location_um': ch_loc,
+                    'waveform_template': wf,
+                    'waveform_t_ms': wf_t_ms,
+                    # autocorrelogram
+                    'acg_counts': acg_counts.tolist(),
+                    'acg_lags_ms': acg_lags_ms.tolist(),
                 }
 
                 window_pre_samples = int(window_pre * fs)
