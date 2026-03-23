@@ -82,29 +82,165 @@ def fix_rising_edges(rising_times, n_trials, trial_duration_samples, tolerance=0
     return np.array(fixed), log
 
 
+def segment_rising_edges_by_task(rising_times, task_n_trials_list, task_trial_durations_samples,
+                                  gap_factor=3.0):
+    """
+    Split a continuous array of rising edges into per-task segments.
+
+    Between tasks there is typically a large gap (experimenter switches tasks).
+    This function first finds candidate split points (intervals >> expected trial
+    duration), then assigns each segment to the corresponding task file in order.
+
+    Parameters
+    ----------
+    rising_times : np.ndarray
+        All rising edge sample indices from the full recording.
+    task_n_trials_list : list of int
+        Expected number of trials for each task, in time order.
+    task_trial_durations_samples : list of int
+        Expected trial duration (samples) for each task, in time order.
+    gap_factor : float
+        An inter-trial interval larger than gap_factor * expected_duration is
+        treated as a between-task gap (default 3.0).
+
+    Returns
+    -------
+    segments : list of np.ndarray
+        One rising-edge array per task.
+    """
+    n_tasks = len(task_n_trials_list)
+    if n_tasks == 1:
+        return [rising_times]
+
+    intervals = np.diff(rising_times)
+
+    # Use the average expected duration across tasks as a conservative threshold
+    avg_expected = np.mean(task_trial_durations_samples)
+    gap_threshold = gap_factor * avg_expected
+
+    # Indices where a between-task gap occurs (index i → gap between edge i and i+1)
+    gap_indices = np.where(intervals > gap_threshold)[0]
+
+    if len(gap_indices) >= n_tasks - 1:
+        # Use the n_tasks-1 largest gaps as split points
+        largest_gaps = np.argsort(intervals[gap_indices])[::-1][:n_tasks - 1]
+        split_after = sorted(gap_indices[largest_gaps])
+    else:
+        # Fewer gaps detected than expected — fall back to cumulative trial counts
+        print(f"  WARNING: found {len(gap_indices)} inter-task gaps, expected {n_tasks-1}. "
+              f"Falling back to cumulative trial-count split.")
+        split_after = []
+        cursor = 0
+        for n in task_n_trials_list[:-1]:
+            cursor += n
+            split_after.append(cursor - 1)  # split after edge index cursor-1
+
+    # Build segments
+    boundaries = [-1] + list(split_after) + [len(rising_times) - 1]
+    segments = []
+    for k in range(n_tasks):
+        start = boundaries[k] + 1
+        end = boundaries[k + 1] + 1
+        segments.append(rising_times[start:end])
+
+    return segments
+
+
+def process_task(task_file_path, rising_segment, fs=30000):
+    """
+    Fix DIO edges, plot diagnostics, and save results for a single task.
+
+    Parameters
+    ----------
+    task_file_path : Path
+        Path to the .txt task file.
+    rising_segment : np.ndarray
+        Rising edge sample indices that belong to this task.
+    fs : int
+        Sampling rate (default 30000).
+    """
+    task_file = parse_grating_experiment(task_file_path)
+    task_id = task_file_path.stem
+    folder_path = task_file_path.parent
+
+    stimulus_duration = float(task_file['parameters']['stimulus_duration'].rstrip('s'))
+    ITI_duration = float(task_file['parameters']['iti_duration'].rstrip('s'))
+    n_repeats = task_file['parameters']['total_trials']
+    trial_duration = stimulus_duration + ITI_duration
+
+    print(f"\n  Task: {task_id}")
+    print(f"  stimulus={stimulus_duration}s  ITI={ITI_duration}s  "
+          f"trial_duration={trial_duration}s  n_trials={n_repeats}")
+    print(f"  Segment edges: {len(rising_segment)} (expected {n_repeats})")
+
+    trial_duration_samples = int(trial_duration * fs)
+    rising_fixed, fix_log = fix_rising_edges(rising_segment, n_repeats, trial_duration_samples)
+
+    print("  Fix log:")
+    for entry in fix_log:
+        print(f"    {entry}")
+
+    falling_fixed = rising_fixed + int(stimulus_duration * fs)
+
+    # Diagnostics plot
+    fig, axes = plt.subplots(2, 1, figsize=(12, 6))
+    fig.suptitle(task_id)
+
+    raw_diff = np.diff(rising_segment) / fs
+    fixed_diff = np.diff(rising_fixed) / fs
+
+    axes[0].plot(raw_diff, marker='o', ms=3)
+    axes[0].axhline(trial_duration, color='r', linestyle='--', label=f'expected ({trial_duration}s)')
+    axes[0].set_title('Inter-trial intervals — RAW')
+    axes[0].set_ylabel('Interval (s)')
+    axes[0].legend()
+
+    axes[1].plot(fixed_diff, marker='o', ms=3, color='green')
+    axes[1].axhline(trial_duration, color='r', linestyle='--', label=f'expected ({trial_duration}s)')
+    axes[1].set_title('Inter-trial intervals — FIXED')
+    axes[1].set_ylabel('Interval (s)')
+    axes[1].legend()
+
+    plt.tight_layout()
+    fig.savefig(folder_path / f"{task_id}_DIO_fix.png", dpi=150)
+    plt.show()
+
+    save_path = folder_path / f"{task_id}_DIO.npz"
+    np.savez_compressed(save_path, rising_times=rising_fixed, falling_times=falling_fixed)
+    print(f"  Saved to {save_path}")
+
+    return {
+        'task_id': task_id,
+        'rising_times': rising_fixed,
+        'falling_times': falling_fixed,
+        'trial_duration_samples': trial_duration_samples,
+        'stimulus_duration': stimulus_duration,
+    }
+
+
 # ── Paths ──────────────────────────────────────────────────────────────────────
-rec_folder = Path(r"/Volumes/xieluanlabs/xl_cl/experiment_data/CnL42/260304/CnL42_20260304/CnL42SG_passive_20260304_142720.rec")
-task_file_Path = Path(r"/Volumes/xieluanlabs/xl_cl/experiment_data/CnL42/260304/CnL42_drifting_grating_exp_20260304_142748.txt")
-task_id = task_file_Path.stem
-folder_path = task_file_Path.parent
+rec_folder = Path(r"F:\CnL42SG\Cnl42SG_20260319\CnL42_passive_20260319_124530.rec")
+
+# For a single txt file use a list with one element.
+# For multiple tasks recorded in the same rec, list all txt files in time order.
+task_file_paths = [
+    Path(r"\\10.129.151.108\xieluanlabs\xl_cl\experiment_data\CnL42\260319\CnL42_drifting_grating_exp_20260319_124602.txt"),
+    Path(r"\\10.129.151.108\xieluanlabs\xl_cl\experiment_data\CnL42\260319\CnL42_drifting_grating_exp_20260319_140702.txt"),
+]
 
 animal_id = rec_folder.name.split('.')[0].split('_')[0]
 session_id = rec_folder.name.split('.')[0]
-print(f"Processing {animal_id}/{session_id}")
+print(f"Processing {animal_id}/{session_id}  —  {len(task_file_paths)} task(s)")
 
-# ── Task parameters ────────────────────────────────────────────────────────────
-task_file = parse_grating_experiment(task_file_Path)
-print(f"Animal: {task_file['metadata']['animal_id']}")
-print(f"Total trials: {task_file['parameters']['total_trials']}")
-
-df = task_file['trial_data']
-stimulus_duration = float(task_file['parameters']['stimulus_duration'].rstrip('s'))
-ITI_duration = float(task_file['parameters']['iti_duration'].rstrip('s'))
-n_repeats = task_file['parameters']['total_trials']
-trial_duration = stimulus_duration + ITI_duration
-
-print(f"stimulus_duration={stimulus_duration}s  ITI={ITI_duration}s  "
-      f"trial_duration={trial_duration}s  n_trials={n_repeats}")
+# ── Parse all task files ────────────────────────────────────────────────────────
+task_metas = []
+for p in task_file_paths:
+    tf = parse_grating_experiment(p)
+    stim = float(tf['parameters']['stimulus_duration'].rstrip('s'))
+    iti = float(tf['parameters']['iti_duration'].rstrip('s'))
+    n = tf['parameters']['total_trials']
+    task_metas.append({'path': p, 'n_trials': n, 'trial_duration': stim + iti})
+    print(f"  {p.stem}: {n} trials, {stim+iti}s/trial")
 
 # ── Raw DIO signal ─────────────────────────────────────────────────────────────
 fs = 30000
@@ -115,47 +251,22 @@ pd_time = pd_time - pd_time[0]
 rising_times = pd_time[np.where(pd_state == 1)[0]]
 falling_times = pd_time[np.where(pd_state == 0)[0]]
 
-# Ensure pairs start with a rising edge: discard leading falling edges
 if len(falling_times) > 0 and len(rising_times) > 0 and falling_times[0] < rising_times[0]:
     falling_times = falling_times[1:]
     print("Discarded leading falling edge (no matching rising edge)")
 
-print(f"Raw edges: {len(rising_times)} rising, {len(falling_times)} falling (expected {n_repeats})")
+total_expected = sum(m['n_trials'] for m in task_metas)
+print(f"Raw edges: {len(rising_times)} rising (total expected {total_expected})")
 
-# ── Auto-fix rising edges ──────────────────────────────────────────────────────
-trial_duration_samples = int(trial_duration * fs)
-rising_times_fixed, fix_log = fix_rising_edges(rising_times, n_repeats, trial_duration_samples)
+# ── Segment DIO by task ────────────────────────────────────────────────────────
+task_n_trials = [m['n_trials'] for m in task_metas]
+task_durations_samples = [int(m['trial_duration'] * fs) for m in task_metas]
 
-print("\nFix log:")
-for entry in fix_log:
-    print(f"  {entry}")
+segments = segment_rising_edges_by_task(rising_times, task_n_trials, task_durations_samples)
 
-# Falling times derived from fixed rising times (more reliable than raw falling edges)
-falling_times_fixed = rising_times_fixed + int(stimulus_duration * fs)
+for k, (meta, seg) in enumerate(zip(task_metas, segments)):
+    print(f"\nTask {k+1}/{len(task_metas)}: {meta['path'].stem}  —  {len(seg)} edges in segment")
 
-# ── Diagnostics plot ───────────────────────────────────────────────────────────
-fig, axes = plt.subplots(2, 1, figsize=(12, 6))
-
-raw_diff = np.diff(rising_times) / fs
-fixed_diff = np.diff(rising_times_fixed) / fs
-
-axes[0].plot(raw_diff, marker='o', ms=3)
-axes[0].axhline(trial_duration, color='r', linestyle='--', label=f'expected ({trial_duration}s)')
-axes[0].set_title('Inter-trial intervals — RAW')
-axes[0].set_ylabel('Interval (s)')
-axes[0].legend()
-
-axes[1].plot(fixed_diff, marker='o', ms=3, color='green')
-axes[1].axhline(trial_duration, color='r', linestyle='--', label=f'expected ({trial_duration}s)')
-axes[1].set_title('Inter-trial intervals — FIXED')
-axes[1].set_ylabel('Interval (s)')
-axes[1].legend()
-
-plt.tight_layout()
-fig.savefig(rec_folder / f"{task_id}_DIO_fix.png", dpi=150)
-plt.show()
-
-# ── Save ───────────────────────────────────────────────────────────────────────
-save_path = folder_path / f"{task_id}_DIO.npz"
-np.savez_compressed(save_path, rising_times=rising_times_fixed, falling_times=falling_times_fixed)
-print(f"Saved to {save_path}")
+# ── Per-task processing ────────────────────────────────────────────────────────
+for meta, seg in zip(task_metas, segments):
+    process_task(meta['path'], seg, fs=fs)
