@@ -424,12 +424,12 @@ def run_analysis(data_path, time_window=(0.07, 0.16), save_plots=True,
 # =============================================================================
 
 if __name__ == "__main__":
-    DATA_PATH = "//Volumes/xieluanlabs/xl_cl/sortout/CnL42SG/CnL42SG_20260304/passive_embedding_analysis/CnL42SG_CnL42SG_passive_20260304_142720_grating_data.pkl"
+    DATA_PATH = input("Enter path to neural data (.pkl file): ").strip().strip('"').strip("'")
 
     try:
         all_results = run_analysis(
             data_path=DATA_PATH,
-            time_window=(0.20, 1.5),
+            time_window=(0.05, 1.5),
             save_plots=True,
             kernel='rbf',
             C=1.0,

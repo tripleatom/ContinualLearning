@@ -383,13 +383,91 @@ def extract_grating_neural_data_for_embedding(rec_folder, task_file_path, sortou
 
     print(f"\nExtraction complete: {unit_counter} units, {n_trials} trials, orientations: {unique_orientations}, spatial_freqs: {unique_spatial_freqs}, phases: {unique_phases}")
 
-    base_filename = f"{animal_id}_{session_id}_grating_data"
-    filepath = output_dir / f"{base_filename}.pkl"
-    print(f"Saving to {filepath}")
-    with open(filepath, 'wb') as f:
-        pickle.dump(neural_data, f, protocol=pickle.HIGHEST_PROTOCOL)
-
     return neural_data
+
+
+def merge_grating_neural_data(data_list):
+    """
+    Merge neural data dicts from multiple experiments (same session, same sorting).
+
+    Trial info is concatenated in order. Spike data for each unit is concatenated
+    with trial indices re-numbered sequentially. Unit info is taken from the first
+    experiment that contains the unit (waveform/ACG are session-level, not trial-level).
+
+    Parameters
+    ----------
+    data_list : list of dict
+        Output of extract_grating_neural_data_for_embedding, one per experiment.
+
+    Returns
+    -------
+    merged : dict
+        Single merged neural_data dict.
+    """
+    if len(data_list) == 1:
+        return data_list[0]
+
+    base = data_list[0]
+
+    # Build merged trial_info and spike_data
+    orientations = []
+    trial_windows = []
+    all_trial_parameters = []
+    spike_data = {}
+    unit_info = {}
+    trial_offset = 0
+
+    for d in data_list:
+        ti = d['trial_info']
+        orientations.extend(ti['orientations'])
+        trial_windows.extend(ti['trial_windows'])
+        all_trial_parameters.extend(ti['all_trial_parameters'])
+
+        for uid, trials in d['spike_data'].items():
+            if uid not in spike_data:
+                spike_data[uid] = []
+            for t in trials:
+                t_copy = dict(t)
+                t_copy['trial_index'] = t['trial_index'] + trial_offset
+                spike_data[uid].append(t_copy)
+
+        for uid, info in d['unit_info'].items():
+            if uid not in unit_info:
+                unit_info[uid] = dict(info)
+            unit_info[uid]['n_spikes_total'] = (
+                unit_info[uid].get('n_spikes_total', 0) + info['n_spikes_total']
+            )
+
+        trial_offset += d['metadata']['n_trials']
+
+    total_trials = trial_offset
+    unique_orientations = np.unique(orientations).tolist()
+
+    merged = {
+        'metadata': {
+            **base['metadata'],
+            'task_file': [str(d['metadata']['task_file']) for d in data_list],
+            'n_trials': total_trials,
+        },
+        'experiment_parameters': {
+            **base['experiment_parameters'],
+            'total_trials': total_trials,
+        },
+        'trial_info': {
+            'orientations': orientations,
+            'unique_orientations': unique_orientations,
+            'trial_windows': trial_windows,
+            'all_trial_parameters': all_trial_parameters,
+        },
+        'spike_data': spike_data,
+        'unit_info': unit_info,
+        'extraction_params': {
+            **base['extraction_params'],
+            'total_units': len(spike_data),
+        },
+    }
+
+    return merged
 
 
 def load_neural_data(filepath):
@@ -399,35 +477,72 @@ def load_neural_data(filepath):
 
 if __name__ == "__main__":
     import traceback
+    from rf_recon.FreelyMovingProcessing.Grating.grating_utils import load_session_paths
     try:
-        rec_folder = Path(r"/Volumes/xieluanlabs/xl_cl/experiment_data/CnL42/260304/CnL42_20260304/CnL42SG_passive_20260304_142720.rec")
-        task_file_path = Path(r"/Volumes/xieluanlabs/xl_cl/experiment_data/CnL42/260304/CnL42_drifting_grating_exp_20260304_142748.txt")
+        # ── Animal / session config ────────────────────────────────────────────
+        from rf_recon.FreelyMovingProcessing.Grating.grating_config import ANIMAL_ID as Animal_id, EXPERIMENT_DATE as experiment_date
 
-        if not rec_folder.exists():
-            print(f"Recording folder does not exist: {rec_folder}")
-            exit(1)
-        if not task_file_path.exists():
-            print(f"Task file does not exist: {task_file_path}")
-            exit(1)
+        rec_folder, passive_log_paths = load_session_paths(Animal_id, experiment_date)
+
+        # task_start / task_end: sample offsets in the concatenated sorting space.
+        # Set task_start=0, task_end=None if sorting was done on this session alone.
+        passive_offsets = [
+            {'task_start': 0, 'task_end': None}
+            for _ in passive_log_paths
+        ]
+
+        for p in passive_log_paths:
+            if not p.exists():
+                print(f"Task file does not exist: {p}")
+                exit(1)
 
         sortout_folder = input("Please enter the path to the session sortout folder (parent of shank0, shank1, ... folders): ").strip().strip('"')
 
-        # Offset of this experiment in the concatenated recording (in sample points)
-        # Set task_start/task_end if sorting was done on a concatenated recording;
-        # use task_start=0, task_end=None if sorting was done on this session alone.
-        task_start = 0       # sample point where this experiment starts in the concatenated recording
-        task_end   = 149938305    # sample point where it ends; None = use last spike as upper bound
+        all_data = []
+        for task_file_path, offsets in zip(passive_log_paths, passive_offsets):
+            print(f"\n{'='*60}")
+            print(f"Extracting: {task_file_path.stem}")
+            nd = extract_grating_neural_data_for_embedding(
+                rec_folder, task_file_path, sortout_folder,
+                task_start=offsets['task_start'], task_end=offsets['task_end']
+            )
+            if nd is None:
+                print(f"Failed to extract {task_file_path.stem}, skipping.")
+                continue
+            all_data.append(nd)
 
-        neural_data = extract_grating_neural_data_for_embedding(rec_folder, task_file_path, sortout_folder, task_start=task_start, task_end=task_end)
-
-        if neural_data is None:
-            print("Failed to extract neural data")
+        if not all_data:
+            print("No data extracted.")
             exit(1)
 
-        print(f"\n- {len(neural_data['spike_data'])} units")
-        print(f"- {neural_data['metadata']['n_trials']} trials")
-        print(f"- Orientations: {neural_data['trial_info']['unique_orientations']}")
-        print(f"- Stimulus duration: {neural_data['experiment_parameters']['stimulus_duration']}s")
+        rec_name = rec_folder.name.replace('.rec', '')
+        animal_id = rec_name.split('_')[0]
+        output_dir = Path(sortout_folder) / 'passive_embedding_analysis'
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        # ── Save options ────────────────────────────────────────────────────────
+        # merge_output=True  → one merged pkl
+        # merge_output=False → one pkl per experiment
+        merge_output = True
+
+        if merge_output and len(all_data) > 1:
+            print(f"\nMerging {len(all_data)} experiments...")
+            neural_data = merge_grating_neural_data(all_data)
+            filepath = output_dir / f"{rec_name}_grating_data_merged.pkl"
+            print(f"Saving merged data to {filepath}")
+            with open(filepath, 'wb') as f:
+                pickle.dump(neural_data, f, protocol=pickle.HIGHEST_PROTOCOL)
+            print(f"\n- {len(neural_data['spike_data'])} units")
+            print(f"- {neural_data['metadata']['n_trials']} trials total")
+            print(f"- Orientations: {neural_data['trial_info']['unique_orientations']}")
+        else:
+            for nd, log_path in zip(all_data, passive_log_paths):
+                task_time = log_path.stem.rsplit('_', 1)[-1]  # just the HHmmss timestamp
+                filepath = output_dir / f"{rec_name}_{task_time}_grating_data.pkl"
+                print(f"Saving {filepath}")
+                with open(filepath, 'wb') as f:
+                    pickle.dump(nd, f, protocol=pickle.HIGHEST_PROTOCOL)
+                print(f"  - {len(nd['spike_data'])} units, {nd['metadata']['n_trials']} trials")
 
     except Exception as e:
         print(f"Error: {e}")

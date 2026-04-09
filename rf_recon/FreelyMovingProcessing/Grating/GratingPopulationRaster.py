@@ -504,7 +504,7 @@ if __name__ == "__main__":
     generate_population_rasters(
         data_path=DATA_PATH,
         time_window=(-0.2, 2.0),
-        preference_window=(0.07, 0.16),
+        preference_window=(0.07, 1.0),
         output_folder=None,
         include_psth=True,
         osi_threshold=0.2,

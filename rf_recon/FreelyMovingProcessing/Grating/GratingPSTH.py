@@ -1,19 +1,24 @@
 import numpy as np
+from tqdm import tqdm
 from pathlib import Path
 import matplotlib.pyplot as plt
 from scipy.ndimage import gaussian_filter1d
 import os
 
 from rf_recon.FreelyMovingProcessing.Grating.parse_grating_experiment import parse_grating_experiment
+from rf_recon.FreelyMovingProcessing.Grating.grating_utils import load_session_paths
 from spikeinterface import load_sorting_analyzer
 from spikeinterface.extractors import PhySortingExtractor
 
-rec_folder = Path(r"/Volumes/xieluanlabs/xl_cl/experiment_data/CnL42/260304/CnL42_20260304/CnL42SG_passive_20260304_142720.rec")
-task_file_path = Path(r"/Volumes/xieluanlabs/xl_cl/experiment_data/CnL42/260304/CnL42_drifting_grating_exp_20260304_142748.txt")
-animal_id = rec_folder.name.split('.')[0].split('_')[0]
-session_id = rec_folder.name.split('.')[0]
+# ── Paths ──────────────────────────────────────────────────────────────────────
+from rf_recon.FreelyMovingProcessing.Grating.grating_config import ANIMAL_ID as Animal_id, EXPERIMENT_DATE as experiment_date, SORTOUT_FOLDER
 
-print(f"Processing {animal_id}/{session_id}")
+rec_folder, task_file_paths = load_session_paths(Animal_id, experiment_date)
+task_file_path = task_file_paths[0]
+
+animal_id = Animal_id
+session_id = rec_folder.stem
+print(f"Processing {animal_id}/{session_id}  —  {len(task_file_paths)} task(s)")
 
 task_file = parse_grating_experiment(task_file_path)
 
@@ -51,8 +56,7 @@ print(f"Unique orientations: {np.unique(orientations)}")
 
 trial_windows = [(rising_times[i], falling_times[i]) for i in range(n_trials)]
 
-code_folder = Path(__file__).parent.parent.parent
-session_folder = code_folder / f"sortout/{animal_id}/{session_id}"
+session_folder = SORTOUT_FOLDER
 
 # Setup for visualization - use actual orientation values
 unique_orientations = np.unique(orientations)
@@ -63,7 +67,7 @@ orientation2color = dict(zip(unique_orientations, colors))
 print(f"Orientations to analyze: {unique_orientations}")
 print(f"Number of stimulus types: {n_stim_types}")
 
-out_folder = session_folder / f'L_Grating_Stim{n_stim_types}'
+out_folder = session_folder / 'passive_embedding_analysis' / 'grating_psth'
 out_folder.mkdir(parents=True, exist_ok=True)
 
 # Compute neural responses
@@ -121,19 +125,18 @@ for ish in ishs:
             
             # Get unit qualities for this sorting
             unit_ids = sorting.unit_ids
-            unit_qualities = sorting.get_property('quality') if hasattr(sorting, 'get_property') else ['good'] * len(unit_ids)
+            _q = sorting.get_property('quality') if hasattr(sorting, 'get_property') else None
+            unit_qualities = _q if _q is not None else ['unknown'] * len(unit_ids)
             
             # Window parameters (matching first file's style)
             window_pre = 0.2  # seconds before stimulus onset
             window_post = 1.0  # seconds after stimulus onset
             
-            for unit_idx, unit_id in enumerate(unit_ids):
-                print(f"Processing {animal_id}/{session_id}/shank{ish}/unit{unit_id}")
+            for unit_idx, unit_id in enumerate(tqdm(unit_ids, desc=f"shank{ish}", unit="units")):
                 spike_train = sorting.get_unit_spike_train(unit_id)
                 quality = unit_qualities[unit_idx] if unit_idx < len(unit_qualities) else 'unknown'
-                
+
                 if quality == 'noise':
-                    print(f"Skipping unit {unit_id} due to low quality")
                     continue
 
                 unit_trial_spikes = []
@@ -150,9 +153,6 @@ for ish in ishs:
                 # Group trials by orientation (actual values, not indices)
                 groups = {orientation: np.where(orientations == orientation)[0] for orientation in unique_orientations}
                 
-                # Verify grouping
-                for orientation in unique_orientations:
-                    print(f"Orientation {orientation}°: {len(groups[orientation])} trials")
                 
                 # --- Create combined figure (matching first file's style) ---
                 plt.style.use('default')
@@ -248,7 +248,6 @@ for ish in ishs:
                            dpi=300, bbox_inches='tight', facecolor='white', edgecolor='none')
                 plt.close(fig)
                 
-                print(f"Saved figure for shank{ish}_unit{unit_id}")
                 
         except Exception as e:
             print(f"Error processing {sorting_results_folder}: {e}")

@@ -4,6 +4,8 @@ Shared utilities for Grating neural data analysis.
 Provides data loading, feature extraction, orientation selectivity,
 and common visualization helpers used by GratingLDA and GratingSVM.
 """
+import csv
+import platform
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -14,6 +16,60 @@ import json
 from sklearn.metrics import accuracy_score
 import warnings
 warnings.filterwarnings('ignore')
+
+
+# =============================================================================
+# SESSION PATH RESOLUTION
+# =============================================================================
+
+def load_session_paths(animal_id, experiment_date, log_dir=None):
+    """
+    Resolve rec_folder and task_file_paths for a session from the experiment log CSV.
+
+    Parameters
+    ----------
+    animal_id : str
+        Animal identifier, e.g. "CnL43".
+    experiment_date : str
+        Date string as used in the CSV, e.g. "260408".
+    log_dir : Path or str, optional
+        Directory containing the experiment log CSVs.
+        Defaults to the experiment_log/ folder next to this file.
+
+    Returns
+    -------
+    rec_folder : Path
+        Path to the .rec folder for this session.
+    task_file_paths : list of Path
+        Paths to all .txt task files for this session.
+    """
+    if platform.system() == "Darwin":
+        parent_folder = Path(r"/Volumes/xieluanlabs/xl_cl/experiment_data")
+    else:
+        parent_folder = Path(r"\\10.129.151.108\xieluanlabs\xl_cl\experiment_data")
+
+    if log_dir is None:
+        log_dir = Path(__file__).parent / "experiment_log"
+    csv_path = Path(log_dir) / f"{animal_id}.csv"
+
+    with open(csv_path, newline='') as f:
+        reader = csv.DictReader(f, delimiter=',')
+        reader.fieldnames = [k.strip() for k in reader.fieldnames]
+        for row in reader:
+            row = {k.strip(): v.strip() for k, v in row.items()}
+            if row['date'] == experiment_date:
+                break
+        else:
+            raise ValueError(f"No entry for date {experiment_date} in {csv_path}")
+
+    session_base = parent_folder / animal_id / experiment_date
+    rec_folder = session_base / row['EphysFolder'] / row['PassiveFolder']
+    task_file_paths = [
+        session_base / f.strip()
+        for f in row['TaskFile'].split(';')
+        if f.strip().endswith('.txt')
+    ]
+    return rec_folder, task_file_paths
 
 
 # =============================================================================
