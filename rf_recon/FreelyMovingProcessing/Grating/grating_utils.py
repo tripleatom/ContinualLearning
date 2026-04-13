@@ -38,8 +38,8 @@ def load_session_paths(animal_id, experiment_date, log_dir=None):
 
     Returns
     -------
-    rec_folder : Path
-        Path to the .rec folder for this session.
+    rec_folders : list of Path
+        Paths to the .rec folder(s) for this session (one per passive recording).
     task_file_paths : list of Path
         Paths to all .txt task files for this session.
     """
@@ -63,13 +63,18 @@ def load_session_paths(animal_id, experiment_date, log_dir=None):
             raise ValueError(f"No entry for date {experiment_date} in {csv_path}")
 
     session_base = parent_folder / animal_id / experiment_date
-    rec_folder = session_base / row['EphysFolder'] / row['PassiveFolder']
+    ephys_folder = session_base / row['EphysFolder']
+    rec_folders = [
+        ephys_folder / f.strip()
+        for f in row['PassiveFolder'].split(';')
+        if f.strip()
+    ]
     task_file_paths = [
         session_base / f.strip()
         for f in row['TaskFile'].split(';')
         if f.strip().endswith('.txt')
     ]
-    return rec_folder, task_file_paths
+    return rec_folders, task_file_paths
 
 
 # =============================================================================
@@ -501,10 +506,13 @@ def plot_prediction_confidence(fig, results, labels, subplot_pos=(3, 4, 12)):
     confidence = np.max(results['prediction_proba'], axis=1)
     correct = results['predictions'] == labels
 
-    ax.hist(confidence[correct], bins=20, alpha=0.7, label='Correct',
-            color='green', density=True)
-    ax.hist(confidence[~correct], bins=20, alpha=0.7, label='Incorrect',
-            color='red', density=True)
+    def _safe_hist(ax, data, **kwargs):
+        if len(data) == 0:
+            return
+        ax.hist(data, bins=20, range=(0, 1), **kwargs)
+
+    _safe_hist(ax, confidence[correct],  alpha=0.7, label='Correct',   color='green', density=True)
+    _safe_hist(ax, confidence[~correct], alpha=0.7, label='Incorrect', color='red',   density=True)
 
     ax.set(xlabel='Prediction Confidence', ylabel='Density',
            title='Prediction Confidence Distribution')

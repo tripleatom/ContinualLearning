@@ -1,8 +1,8 @@
 import platform
 from pathlib import Path
 
-ANIMAL_ID = "CnL43"
-EXPERIMENT_DATE = "260408"
+ANIMAL_ID = "CnL42"
+EXPERIMENT_DATE = "260313"
 
 if platform.system() == "Darwin":
     _sortout_root = Path(r"/Volumes/xieluanlabs/xl_cl/sortout")

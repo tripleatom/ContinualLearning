@@ -618,10 +618,10 @@ def process_task(task_file_path, rising_segment, fs=30000):
 from grating_utils import load_session_paths
 from grating_config import ANIMAL_ID as Animal_id, EXPERIMENT_DATE as experiment_date
 
-rec_folder, task_file_paths = load_session_paths(Animal_id, experiment_date)
+rec_folders, task_file_paths = load_session_paths(Animal_id, experiment_date)
 animal_id = Animal_id
-session_id = rec_folder.stem
-print(f"Processing {animal_id}/{session_id}  —  {len(task_file_paths)} task(s)")
+session_id = rec_folders[0].parent.name  # EphysFolder name
+print(f"Processing {animal_id}/{session_id}  —  {len(rec_folders)} rec folder(s), {len(task_file_paths)} task(s)")
 
 # ── Parse all task files ────────────────────────────────────────────────────────
 task_metas = []
@@ -635,7 +635,10 @@ for p in task_file_paths:
 
 # ── Raw DIO signal ─────────────────────────────────────────────────────────────
 fs = 30000
-dio_folders = sorted(get_dio_folders(rec_folder), key=lambda x: x.name)
+dio_folders = sorted(
+    [dio for rf in rec_folders for dio in get_dio_folders(rf)],
+    key=lambda x: x.name,
+)
 pd_time, pd_state = concatenate_din_data(dio_folders, 3)
 pd_time = pd_time.ravel()
 pd_state = pd_state.ravel()
@@ -708,7 +711,7 @@ else:
         print("Set manual_task_edge_ranges to assign edges to tasks manually.\n")
 
 # ── Segment overview plot ──────────────────────────────────────────────────────
-seg_plot_path = rec_folder / f"{session_id}_DIO_segments.png"
+seg_plot_path = rec_folders[0].parent / f"{session_id}_DIO_segments.png"
 plot_rising_edge_segments(rising_prescreened, segments, task_metas, fs=fs,
                           gap_threshold_s=gap_threshold_s, save_path=seg_plot_path)
 

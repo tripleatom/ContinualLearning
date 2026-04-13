@@ -11,14 +11,16 @@ from spikeinterface import load_sorting_analyzer
 from spikeinterface.extractors import PhySortingExtractor
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
-from rf_recon.FreelyMovingProcessing.Grating.grating_config import ANIMAL_ID as Animal_id, EXPERIMENT_DATE as experiment_date, SORTOUT_FOLDER
+from rf_recon.FreelyMovingProcessing.Grating.grating_config import ANIMAL_ID as Animal_id, EXPERIMENT_DATE as experiment_date
 
-rec_folder, task_file_paths = load_session_paths(Animal_id, experiment_date)
+rec_folders, task_file_paths = load_session_paths(Animal_id, experiment_date)
 task_file_path = task_file_paths[0]
 
 animal_id = Animal_id
-session_id = rec_folder.stem
+session_id = rec_folders[0].parent.name
 print(f"Processing {animal_id}/{session_id}  —  {len(task_file_paths)} task(s)")
+
+session_folder = Path(input("Please enter the path to the sortout folder (parent of shank0, shank1, ... folders): ").strip().strip('"'))
 
 task_file = parse_grating_experiment(task_file_path)
 
@@ -56,7 +58,6 @@ print(f"Unique orientations: {np.unique(orientations)}")
 
 trial_windows = [(rising_times[i], falling_times[i]) for i in range(n_trials)]
 
-session_folder = SORTOUT_FOLDER
 
 # Setup for visualization - use actual orientation values
 unique_orientations = np.unique(orientations)

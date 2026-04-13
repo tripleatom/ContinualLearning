@@ -482,7 +482,8 @@ if __name__ == "__main__":
         # ── Animal / session config ────────────────────────────────────────────
         from rf_recon.FreelyMovingProcessing.Grating.grating_config import ANIMAL_ID as Animal_id, EXPERIMENT_DATE as experiment_date
 
-        rec_folder, passive_log_paths = load_session_paths(Animal_id, experiment_date)
+        rec_folders, passive_log_paths = load_session_paths(Animal_id, experiment_date)
+        rec_folder = rec_folders[0]
 
         # task_start / task_end: sample offsets in the concatenated sorting space.
         # Set task_start=0, task_end=None if sorting was done on this session alone.

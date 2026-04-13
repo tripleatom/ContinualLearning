@@ -57,6 +57,17 @@ def perform_lda_analysis(firing_rates, orientation_labels, n_components=None):
     print(f"  Min trials per class: {int(min_trials)}")
     print(f"  LDA components: {n_components}")
 
+    # Balance classes by subsampling each to min_trials
+    rng = np.random.default_rng(42)
+    balanced_idx = np.concatenate([
+        rng.choice(np.where(orientation_labels == ori)[0], size=int(min_trials), replace=False)
+        for ori in unique_orientations
+    ])
+    balanced_idx = np.sort(balanced_idx)
+    firing_rates = firing_rates[balanced_idx]
+    orientation_labels = orientation_labels[balanced_idx]
+    print(f"  Balanced to {int(min_trials)} trials/class → {len(orientation_labels)} total")
+
     scaler = StandardScaler()
     firing_rates_scaled = scaler.fit_transform(firing_rates)
 
@@ -263,6 +274,11 @@ def run_analysis(data_path, time_window=(0.07, 0.16), save_plots=True, output_pa
     sf_labels = trial_info['spatial_freq_labels']
     all_results = []
 
+    # ── Analysis 1: same SF, decode orientation ────────────────────────────────
+    print(f"\n{'#'*60}")
+    print(f"# ORIENTATION DECODING PER SF ({len(unique_sfs)} SF(s))")
+    print(f"{'#'*60}")
+
     for sf in unique_sfs:
         if sf is None:
             fr_sf, labels_sf, sf_tag, sf_display = firing_rates, orientation_labels, '', 'all SF'
@@ -282,6 +298,9 @@ def run_analysis(data_path, time_window=(0.07, 0.16), save_plots=True, output_pa
             continue
 
         unique_ori_sf = sorted(set(labels_sf.tolist()))
+        if len(unique_ori_sf) < 2:
+            print(f"  Only 1 orientation present for {sf_display} — skipping orientation decoding.")
+            continue
         trial_info_sf = {
             'unique_orientations': unique_ori_sf,
             'experiment_parameters': trial_info['experiment_parameters'],
@@ -307,7 +326,7 @@ def run_analysis(data_path, time_window=(0.07, 0.16), save_plots=True, output_pa
 
         all_results.append((lda_results, fr_sf, labels_sf, unit_ids))
 
-    # Per-orientation SF decoding
+    # ── Analysis 2: same orientation, decode SF ────────────────────────────────
     if sf_labels is not None and len(unique_sfs) > 1:
         unique_oris = sorted(set(orientation_labels.tolist()))
         print(f"\n{'#'*60}")
