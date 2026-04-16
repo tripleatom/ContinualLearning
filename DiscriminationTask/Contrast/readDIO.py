@@ -10,7 +10,7 @@ import os
 import numpy as np
 from datetime import datetime
 from pathlib import Path
-from spikeinterface.extractors import PhySortingExtractor
+from spikeinterface.extractors import read_phy
 from spikeinterface import load_sorting_analyzer
 from process_func import DIO
 from rec2nwb.preproc_func import parse_session_info
@@ -139,7 +139,7 @@ def process_behavior_trial_responses(rec_folder, trial_start, trial_end, white_o
             # Prioritize phy folder, then fall back to sorting_analyzer
             if phy_folder.exists():
                 try:
-                    sorting = PhySortingExtractor(phy_folder)
+                    sorting = read_phy(phy_folder)
                     print(f"Loaded from phy: {phy_folder}")
                 except Exception as e:
                     print(f"Failed to load from phy: {e}")

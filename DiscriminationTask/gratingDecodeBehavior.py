@@ -108,21 +108,93 @@ def load_grating_data(grating_pkl_path, time_window=(0.07, 0.16),
             sf_labels = sf_labels[sf_mask]
             print(f"  [Grating] SF filter = {spatial_freq_filter} cpd → {sf_mask.sum()} trials kept")
 
-    # Map orientations to binary labels: 45° → 1 (left-equiv), 135° → 0 (right-equiv)
-    binary_labels = (orientation_labels == 45.0).astype(int)
+    # Map orientations to binary labels: first target → 1 (left-equiv), second → 0
+    left_ori = float(target_orientations[0])
+    binary_labels = (orientation_labels == left_ori).astype(int)
 
-    n_45 = np.sum(binary_labels == 1)
-    n_135 = np.sum(binary_labels == 0)
+    n_left  = np.sum(binary_labels == 1)
+    n_right = np.sum(binary_labels == 0)
     sf_info = f", SF={spatial_freq_filter} cpd" if spatial_freq_filter is not None else ""
-    print(f"\n[Grating] Filtered to 45°/135° only{sf_info}:")
-    print(f"  45° (left-equiv):  {n_45} trials")
-    print(f"  135° (right-equiv): {n_135} trials")
+    print(f"\n[Grating] Filtered to {target_orientations[0]}°/{target_orientations[1]}° only{sf_info}:")
+    print(f"  {target_orientations[0]}° (left-equiv):  {n_left} trials")
+    print(f"  {target_orientations[1]}° (right-equiv): {n_right} trials")
     print(f"  Units: {len(unit_ids)}")
 
     trial_info['orientation_labels_deg'] = orientation_labels
     trial_info['binary_labels'] = binary_labels
-    trial_info['n_45'] = int(n_45)
-    trial_info['n_135'] = int(n_135)
+    trial_info['n_left']  = int(n_left)
+    trial_info['n_right'] = int(n_right)
+    trial_info['left_ori']  = target_orientations[0]
+    trial_info['right_ori'] = target_orientations[1]
+
+    return firing_rates, binary_labels, unit_ids, trial_info
+
+
+def load_grating_data_by_stim(grating_pkl_path, time_window, left_stim, right_stim):
+    """
+    Load grating data filtered to exactly the two (ori, SF) conditions
+    specified by left_stim and right_stim.
+
+    Parameters
+    ----------
+    left_stim  : dict with 'ori' and 'sf'  — mapped to class 1 (left-equiv)
+    right_stim : dict with 'ori' and 'sf'  — mapped to class 0 (right-equiv)
+
+    Returns
+    -------
+    firing_rates  : (n_trials, n_units)
+    binary_labels : (n_trials,)  1=left_stim, 0=right_stim
+    unit_ids      : list of str
+    trial_info    : dict
+    """
+    data = grating_utils.load_neural_data(grating_pkl_path)
+
+    unit_info = data.get('unit_info', {})
+    all_unit_ids = list(data['spike_data'].keys())
+    good_units = [u for u in all_unit_ids
+                  if unit_info.get(u, {}).get('quality', 'unknown') != 'noise']
+    n_noise = len(all_unit_ids) - len(good_units)
+    if n_noise:
+        print(f"  [Grating] Excluded {n_noise} noise unit(s)")
+        data_filtered = dict(data)
+        data_filtered['spike_data'] = {u: data['spike_data'][u] for u in good_units}
+    else:
+        data_filtered = data
+
+    firing_rates, ori_labels, unit_ids, trial_info = \
+        grating_utils.calculate_firing_rates(data_filtered, time_window=time_window)
+
+    ori_labels = ori_labels.astype(float)
+    sf_labels  = trial_info['spatial_freq_labels'].astype(float)
+
+    left_ori,  left_sf  = float(left_stim['ori']),  float(left_stim['sf'])
+    right_ori, right_sf = float(right_stim['ori']), float(right_stim['sf'])
+
+    left_mask  = (ori_labels == left_ori)  & (sf_labels == left_sf)
+    right_mask = (ori_labels == right_ori) & (sf_labels == right_sf)
+    keep_mask  = left_mask | right_mask
+
+    if not keep_mask.any():
+        raise ValueError(
+            f"No trials found for left_stim={left_stim} or right_stim={right_stim}. "
+            f"Available ori: {np.unique(ori_labels)}, SF: {np.unique(sf_labels)}"
+        )
+
+    firing_rates  = firing_rates[keep_mask]
+    binary_labels = np.where(left_mask[keep_mask], 1, 0)
+
+    n_left  = int(binary_labels.sum())
+    n_right = int((binary_labels == 0).sum())
+    print(f"\n[Grating] Filtered to target (ori, SF) conditions:")
+    print(f"  Left  ori={left_ori}°  SF={left_sf}:  {n_left} trials")
+    print(f"  Right ori={right_ori}°  SF={right_sf}: {n_right} trials")
+    print(f"  Units: {len(unit_ids)}")
+
+    trial_info['binary_labels'] = binary_labels
+    trial_info['n_left']  = n_left
+    trial_info['n_right'] = n_right
+    trial_info['left_stim']  = left_stim
+    trial_info['right_stim'] = right_stim
 
     return firing_rates, binary_labels, unit_ids, trial_info
 
@@ -357,6 +429,7 @@ def create_figure(grating_fr, grating_labels, grating_proj, grating_cv_scores,
                   shared_unit_ids, model, scaler, decoder_type,
                   grating_trial_info, behavior_trial_info,
                   run_params,
+                  behavior_left_stim=None, behavior_right_stim=None,
                   save_path=None):
     """
     Create comprehensive cross-decoder visualization.
@@ -364,10 +437,22 @@ def create_figure(grating_fr, grating_labels, grating_proj, grating_cv_scores,
     run_params : dict with keys grating_pkl, behavior_pkl,
                  grating_time_window, behavior_time_window, spatial_freq_filter
     """
+    # Build dynamic labels from stim dicts (fall back to trial_info if not provided)
+    if behavior_left_stim is not None:
+        _left_lbl  = f"ori={behavior_left_stim['ori']}° SF={behavior_left_stim['sf']} (left)"
+        _right_lbl = f"ori={behavior_right_stim['ori']}° SF={behavior_right_stim['sf']} (right)"
+        _left_ytick  = f"ori={behavior_right_stim['ori']}° SF={behavior_right_stim['sf']}"
+        _right_ytick = f"ori={behavior_left_stim['ori']}° SF={behavior_left_stim['sf']}"
+    else:
+        _left_lbl    = f"{grating_trial_info.get('left_ori', '?')}° (left)"
+        _right_lbl   = f"{grating_trial_info.get('right_ori', '?')}° (right)"
+        _left_ytick  = f"{grating_trial_info.get('right_ori', '?')}°"
+        _right_ytick = f"{grating_trial_info.get('left_ori', '?')}°"
+
     fig = plt.figure(figsize=(22, 16))
     gs = gridspec.GridSpec(3, 4, figure=fig, hspace=0.48, wspace=0.38)
 
-    colors_g = {'45': '#E74C3C', '135': '#3498DB'}
+    colors_g = {1: '#E74C3C', 0: '#3498DB'}
     colors_b = {1: '#E74C3C', 0: '#3498DB'}
     cond_names = behavior_trial_info['condition_names']
     proj_lbl = _proj_label(decoder_type)
@@ -377,14 +462,14 @@ def create_figure(grating_fr, grating_labels, grating_proj, grating_cv_scores,
 
     # --- 1. Grating projection scatter ---
     ax1 = fig.add_subplot(gs[0, 0])
-    for lbl, name, color in [(1, '45° (left)', colors_g['45']),
-                              (0, '135° (right)', colors_g['135'])]:
+    for lbl, name, color in [(1, _left_lbl, colors_g[1]),
+                              (0, _right_lbl, colors_g[0])]:
         mask = grating_labels == lbl
         y = np.random.normal(lbl, 0.08, mask.sum())
         ax1.scatter(grating_proj[mask, 0], y, c=color, alpha=0.6, s=25, label=name)
     ax1.set_xlabel(proj_lbl, fontsize=10)
     ax1.set_yticks([0, 1])
-    ax1.set_yticklabels(['135°', '45°'])
+    ax1.set_yticklabels([_left_ytick, _right_ytick])
     ax1.set_title(f'Grating: {decoder_type.upper()} Projection\n(train)', fontsize=11, fontweight='bold')
     ax1.legend(fontsize=8)
     ax1.grid(True, alpha=0.3)
@@ -405,8 +490,8 @@ def create_figure(grating_fr, grating_labels, grating_proj, grating_cv_scores,
 
     # --- 3. Score distribution overlay ---
     ax3 = fig.add_subplot(gs[0, 2])
-    for lbl, name, color in [(1, '45°/Left', colors_g['45']),
-                              (0, '135°/Right', colors_g['135'])]:
+    for lbl, name, color in [(1, 'Left', colors_g[1]),
+                              (0, 'Right', colors_g[0])]:
         ax3.hist(grating_proj[grating_labels == lbl, 0], bins=20, alpha=0.5, color=color,
                  density=True, histtype='stepfilled', label=f'Grating {name}')
         ax3.hist(behavior_proj[behavior_labels == lbl, 0], bins=20, alpha=0.5, color=color,
@@ -446,8 +531,8 @@ def create_figure(grating_fr, grating_labels, grating_proj, grating_cv_scores,
     im5 = ax5.imshow(g_conf, cmap='Blues', interpolation='nearest')
     fig.colorbar(im5, ax=ax5, fraction=0.046, pad=0.04)
     ax5.set(xticks=[0, 1], yticks=[0, 1],
-            xticklabels=['135°\n(right)', '45°\n(left)'],
-            yticklabels=['135°\n(right)', '45°\n(left)'],
+            xticklabels=[_left_ytick + '\n(right)', _right_ytick + '\n(left)'],
+            yticklabels=[_left_ytick + '\n(right)', _right_ytick + '\n(left)'],
             xlabel='Predicted', ylabel='True',
             title='Grating Confusion\n(train)')
     thresh5 = g_conf.max() / 2
@@ -506,10 +591,10 @@ def create_figure(grating_fr, grating_labels, grating_proj, grating_cv_scores,
     coef = None
     if decoder_type == 'lda' and hasattr(model, 'coef_'):
         coef = model.coef_[0]
-        coef_label = 'LDA Coefficient\n(positive = 45°/left, negative = 135°/right)'
+        coef_label = f'LDA Coefficient\n(positive = left, negative = right)'
     elif decoder_type == 'svm_linear' and hasattr(model, 'coef_'):
         coef = model.coef_[0]
-        coef_label = 'SVM Weight\n(positive = 45°/left, negative = 135°/right)'
+        coef_label = f'SVM Weight\n(positive = left, negative = right)'
 
     if coef is not None:
         top_n = min(20, len(shared_unit_ids))
@@ -533,7 +618,7 @@ def create_figure(grating_fr, grating_labels, grating_proj, grating_cv_scores,
         ax9.barh(range(len(top_idx)), imp_g[top_idx], alpha=0.8, color='purple')
         ax9.set(yticks=range(len(top_idx)),
                 yticklabels=[shared_unit_ids[i] for i in top_idx],
-                xlabel='Mean |FR difference| (45° vs 135°)',
+                xlabel='Mean |FR difference| (left vs right)',
                 title=f'Top Discriminative Units ({decoder_type.upper()}, n={len(shared_unit_ids)} shared)')
         ax9.invert_yaxis()
         ax9.grid(True, alpha=0.3, axis='x')
@@ -544,22 +629,21 @@ def create_figure(grating_fr, grating_labels, grating_proj, grating_cv_scores,
 
     g_win = run_params['grating_time_window']
     b_win = run_params['behavior_time_window']
-    sf_val = run_params['spatial_freq_filter']
-    sf_str = f"{sf_val} cpd" if sf_val is not None else "all"
     b_win_str = (f"{b_win[0]:.2f}–{b_win[1]:.2f} s" if b_win[1] is not None
                  else f"{b_win[0]:.2f} s – trial end")
-    n_left_b = behavior_trial_info['n_trials_per_condition'][1]
+    n_left_b  = behavior_trial_info['n_trials_per_condition'][1]
     n_right_b = behavior_trial_info['n_trials_per_condition'][0]
 
     meta = (
         f"Run Parameters\n"
         f"{'─'*36}\n"
         f"Decoder:       {decoder_type.upper()}\n"
-        f"SF filter:     {sf_str}\n\n"
+        f"Left stim:     {_left_lbl}\n"
+        f"Right stim:    {_right_lbl}\n\n"
         f"[Grating — train]\n"
         f"  Window:      {g_win[0]:.2f}–{g_win[1]:.2f} s\n"
-        f"  45° trials:  {grating_trial_info['n_45']}\n"
-        f"  135° trials: {grating_trial_info['n_135']}\n"
+        f"  Left trials:  {grating_trial_info['n_left']}\n"
+        f"  Right trials: {grating_trial_info['n_right']}\n"
         f"  CV acc:      {grating_cv_scores.mean():.3f} ± {grating_cv_scores.std():.3f}\n"
         f"  Train acc:   {grating_train_acc:.3f}\n\n"
         f"[Behavior — transfer]\n"
@@ -601,8 +685,7 @@ def create_figure(grating_fr, grating_labels, grating_proj, grating_cv_scores,
 
     fig.suptitle(
         f"Grating → Behavior Cross-Session Decoder  [{decoder_type.upper()}]\n"
-        f"trained on 45° vs 135° grating  •  tested on reward left vs right  "
-        f"•  SF={sf_str}",
+        f"Left: {_left_lbl}  •  Right: {_right_lbl}  •  tested on reward left vs right",
         fontsize=13, fontweight='bold', y=1.01
     )
 
@@ -620,16 +703,16 @@ def create_figure(grating_fr, grating_labels, grating_proj, grating_cv_scores,
 # =============================================================================
 
 def run_cross_decode(grating_pkl, behavior_pkl,
+                     behavior_left_stim,
+                     behavior_right_stim,
                      grating_time_window=(0.07, 0.16),
                      behavior_time_window=(0.0, 1.0),
-                     target_orientations=(45.0, 135.0),
-                     spatial_freq_filter=None,
                      decoder='lda',
                      save_plots=True,
                      output_path=None):
     """
     Full cross-session decode pipeline:
-      1. Load grating data → filter to 45°/135° → train decoder
+      1. Load grating data → filter to the two (ori, SF) conditions → train decoder
       2. Load behavior data → align units → apply decoder
       3. Evaluate and visualize
 
@@ -637,10 +720,10 @@ def run_cross_decode(grating_pkl, behavior_pkl,
     ----------
     grating_pkl : str or Path
     behavior_pkl : str or Path
+    behavior_left_stim  : dict with 'ori' and 'sf' — grating class for left (class 1)
+    behavior_right_stim : dict with 'ori' and 'sf' — grating class for right (class 0)
     grating_time_window : tuple  (start, end) in seconds
     behavior_time_window : tuple  (start, end) in seconds; end=None uses trial duration
-    target_orientations : tuple  default (45.0, 135.0)
-    spatial_freq_filter : float or None  e.g. 0.16 to restrict grating SF
     decoder : str  'lda', 'svm_linear', or 'svm_rbf'
     save_plots : bool
     output_path : str or Path, optional
@@ -654,15 +737,14 @@ def run_cross_decode(grating_pkl, behavior_pkl,
     """
     print("=" * 60)
     print(f"Cross-Session Grating → Behavior Decoder  [{decoder.upper()}]")
+    print(f"  Left  → ori={behavior_left_stim['ori']}°  SF={behavior_left_stim['sf']}")
+    print(f"  Right → ori={behavior_right_stim['ori']}°  SF={behavior_right_stim['sf']}")
     print("=" * 60)
-    print(f"  Grating PKL:  {grating_pkl}")
-    print(f"  Behavior PKL: {behavior_pkl}")
-    print(f"  Label mapping: 45° → left (1), 135° → right (0)")
 
     # 1. Load data
     grating_fr, grating_labels, grating_unit_ids, grating_trial_info = \
-        load_grating_data(grating_pkl, grating_time_window, target_orientations,
-                          spatial_freq_filter=spatial_freq_filter)
+        load_grating_data_by_stim(grating_pkl, grating_time_window,
+                                  behavior_left_stim, behavior_right_stim)
 
     behavior_fr, behavior_labels, behavior_unit_ids, behavior_trial_info = \
         load_behavior_data(behavior_pkl, behavior_time_window)
@@ -683,19 +765,17 @@ def run_cross_decode(grating_pkl, behavior_pkl,
 
     # 5. Visualize
     run_params = {
-        'grating_pkl': str(grating_pkl),
-        'behavior_pkl': str(behavior_pkl),
-        'grating_time_window': grating_time_window,
+        'grating_pkl':          str(grating_pkl),
+        'behavior_pkl':         str(behavior_pkl),
+        'grating_time_window':  grating_time_window,
         'behavior_time_window': behavior_time_window,
-        'spatial_freq_filter': spatial_freq_filter,
-        'decoder': decoder,
+        'decoder':              decoder,
     }
 
     if output_path is None and save_plots:
-        sf_tag = f'_sf{spatial_freq_filter}' if spatial_freq_filter is not None else ''
         dec_tag = f'_{decoder}'
         output_path = (Path(behavior_pkl).parent / 'passive-behavior' /
-                       (Path(behavior_pkl).stem + f'.grating_cross_decode{sf_tag}{dec_tag}.png'))
+                       (Path(behavior_pkl).stem + f'.grating_cross_decode{dec_tag}.png'))
 
     create_figure(
         grating_fr=grating_fr_shared,
@@ -717,6 +797,8 @@ def run_cross_decode(grating_pkl, behavior_pkl,
         grating_trial_info=grating_trial_info,
         behavior_trial_info=behavior_trial_info,
         run_params=run_params,
+        behavior_left_stim=behavior_left_stim,
+        behavior_right_stim=behavior_right_stim,
         save_path=output_path if save_plots else None,
     )
 
@@ -745,30 +827,17 @@ def run_cross_decode(grating_pkl, behavior_pkl,
 # =============================================================================
 
 if __name__ == "__main__":
-    # --- Configure paths ---
-    GRATING_PKL = (
-        "//Volumes/xieluanlabs/xl_cl/sortout/CnL42SG/CnL42SG_20260304/"
-        "passive_embedding_analysis/"
-        "CnL42SG_CnL42SG_passive_20260304_142720_grating_data.pkl"
-    )
-    BEHAVIOR_PKL = (
-        "//Volumes/xieluanlabs/xl_cl/sortout/CnL42SG/CnL42SG_20260304/"
-        "behavior_trial_embedding_20260309_2000.pkl"
-    )
-
-    # --- Choose decoder ---
-    # Options: 'lda'  |  'svm_linear'  |  'svm_rbf'
-    DECODER = 'svm_rbf'
+    import grating_config as cfg
 
     try:
         results = run_cross_decode(
-            grating_pkl=GRATING_PKL,
-            behavior_pkl=BEHAVIOR_PKL,
-            grating_time_window=(0.20, 1.5),
-            behavior_time_window=(0.20, 1.5),
-            target_orientations=(45.0, 135.0),
-            spatial_freq_filter=None,   # e.g. 0.16 to restrict SF, or None for all
-            decoder=DECODER,
+            grating_pkl=cfg.GRATING_PKL,
+            behavior_pkl=cfg.BEHAVIOR_PKL,
+            behavior_left_stim=cfg.BEHAVIOR_LEFT_STIM,
+            behavior_right_stim=cfg.BEHAVIOR_RIGHT_STIM,
+            grating_time_window=cfg.GRATING_TIME_WINDOW,
+            behavior_time_window=cfg.BEHAVIOR_TIME_WINDOW,
+            decoder=cfg.DECODER,
             save_plots=True,
         )
 

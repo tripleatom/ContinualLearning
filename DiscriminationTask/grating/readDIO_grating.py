@@ -10,7 +10,7 @@ import os
 import numpy as np
 from datetime import datetime
 from pathlib import Path
-from spikeinterface.extractors import PhySortingExtractor
+from spikeinterface.extractors import read_phy
 from spikeinterface import load_sorting_analyzer
 from process_func import DIO
 from rec2nwb.preproc_func import parse_session_info
@@ -78,8 +78,8 @@ def process_behavior_trial_responses(rec_folder, trial_start, trial_end, rewarde
     ishs = ['0', '1', '2', '3', '4', '5', '6', '7']  # Assuming 8 shanks
     
     # Convert to numpy arrays if not already
-    trial_start = np.array(trial_start)
-    trial_end = np.array(trial_end)
+    trial_start = np.array(trial_start).ravel()
+    trial_end = np.array(trial_end).ravel()
     rewarded_on_left = np.array(rewarded_on_left, dtype=bool)
 
     # Get number of trials
@@ -154,7 +154,7 @@ def process_behavior_trial_responses(rec_folder, trial_start, trial_end, rewarde
             loaded_from_phy = False
             if phy_folder.exists():
                 try:
-                    sorting = PhySortingExtractor(phy_folder)
+                    sorting = read_phy(phy_folder)
                     loaded_from_phy = True
                     print(f"Loaded from phy: {phy_folder}")
                 except Exception as e:
@@ -425,16 +425,18 @@ def save_behavior_trial_to_pkl(
 if __name__ == '__main__':
     # Example 1: Manual input
     # rec_folder = r"/Volumes/xieluanlabs/xl_cl/rf_reconstruction/head_fixed/251002/CnL42SG/CnL42SG_20251002_200839.rec"
-    rec_folder  = r"/Volumes/xieluanlabs/xl_cl/experiment_data/CnL42/260304/CnL42_20260304/CnL42_task_20260304_171711.rec"
+    rec_folder  = r"/Volumes/xieluanlabs/xl_cl/experiment_data/CnL42/260313/CnL42SG_20260313/CnL42_task_20260313_180022.rec"
     dio_folders = DIO.get_dio_folders(rec_folder)
     dio_folders = sorted(dio_folders, key=lambda x:x.name)
     trial_pd_time, trial_pd_state = DIO.concatenate_din_data(dio_folders, 5)
+    trial_pd_time = trial_pd_time.ravel()
+    trial_pd_state = trial_pd_state.ravel()
     trial_pd_time = trial_pd_time - trial_pd_time[0] # reset the time to start from 0
 
     trial_start = trial_pd_time[np.where(trial_pd_state==1)[0]]
     trial_end = trial_pd_time[np.where(trial_pd_state==0)[0][1:]]
     # rec_folder = Path(input("Please enter the full path to the recording folder: ").strip().strip('"'))
-    task_file = r"/Volumes/xieluanlabs/xl_cl/experiment_data/CnL42/260304/CnL42_2026-03-04_Session001_Data.json"
+    task_file = r"/Volumes/xieluanlabs/xl_cl/experiment_data/CnL42/260313/CnL42_2026-03-13_Session001_Data.json"
 
     rewarded_on_left = get_rewarded_on_left(task_file)
     # Load your trial data (modify this based on how you store your data)
@@ -469,8 +471,8 @@ if __name__ == '__main__':
     sortout_folder = input("Please enter the path to the session sortout folder (parent of shank0, shank1, ... folders): ").strip().strip('"')
 
     # Offset of this experiment in the concatenated recording (in sample points)
-    task_start = 259297964      # sample point where this experiment starts in the concatenated recording
-    task_end   = 323137986   # sample point where it ends; None = use last spike as upper bound
+    task_start = 312334828      # sample point where this experiment starts in the concatenated recording
+    task_end   = 407823003  # sample point where it ends; None = use last spike as upper bound
 
     # Process the data
     pkl_path = process_behavior_trial_responses(

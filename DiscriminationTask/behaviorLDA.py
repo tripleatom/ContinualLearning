@@ -593,7 +593,7 @@ def _plot_firing_rate_comparison(fig, results, unit_ids, labels):
 def _save_individual_subfigures(results, unit_ids, trial_info, base_save_path):
     """Save each subfigure as an individual file in an LDA folder."""
     base_path = Path(base_save_path)
-    lda_folder = base_path.parent / "LDA"
+    lda_folder = base_path.parent / "behavior-LDA"
     lda_folder.mkdir(parents=True, exist_ok=True)
 
     # Extract commonly used data
@@ -921,7 +921,7 @@ def run_analysis(data_path, time_window=(0.0, None), save_plots=True,
 
 if __name__ == "__main__":
     # Configure your data path here
-    DATA_PATH = r"/Volumes/xieluanlabs/xl_cl/sortout/CnL42SG/CnL42SG_20260304/behavior_trial_embedding_20260309_2000.pkl"
+    DATA_PATH = r"/Volumes/xieluanlabs/xl_cl/sortout/CnL42SG/CnL42SG_20260320/behavior_trial_embedding_20260323_0039.pkl"
     
     # Or find the most recent PKL file
     # from pathlib import Path
