@@ -1,3 +1,4 @@
+import re
 import spikeinterface.extractors as se
 from pathlib import Path
 import numpy as np
@@ -10,7 +11,11 @@ def get_dio_folders(rec_folder):
     # get the folder under rec_folder that ends with ".DIO"
     rec_folder = Path(rec_folder)
     dio_folders = [f for f in rec_folder.iterdir() if f.is_dir() and f.name.endswith(".DIO")]
-    return dio_folders
+    # sort by part number: no part suffix -> 1, .part2 -> 2, .part3 -> 3, etc.
+    def _part_num(f):
+        m = re.search(r'\.part(\d+)\.DIO$', f.name)
+        return int(m.group(1)) if m else 1
+    return sorted(dio_folders, key=_part_num)
 
 
 def extract_DIN(DIO_folder, channel_id):

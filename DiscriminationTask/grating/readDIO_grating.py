@@ -6,47 +6,41 @@ from pathlib import Path
 code_dir = Path(__file__).resolve().parent.parent.parent
 sys.path.append(str(code_dir))
 
-import os
 import numpy as np
 from datetime import datetime
 from pathlib import Path
-from spikeinterface.extractors import read_phy
 from spikeinterface import load_sorting_analyzer
 from process_func import DIO
 from rec2nwb.preproc_func import parse_session_info
 import pickle
 import json
 
-def get_rewarded_on_left(filepath):
+def get_trial_params(filepath):
     """
-    Extract rewarded on left values for all trials in a session
+    Extract per-trial behavioral and grating parameters from a session JSON file.
 
-    Parameters:
-    -----------
-    filepath : str
-        Path to JSON session file
-
-    Returns:
-    --------
-    list of bool
-        Array of True/False values indicating if white was on left for each trial
-        Length of array = number of trials
-
-    Example:
-    --------
-    >>> rewarded_positions = get_rewarded_on_left('session_data.json')
-    >>> print(f"Total trials: {len(rewarded_positions)}")
-    >>> print(f"First 10 trials: {rewarded_positions[:10]}")
+    Returns a list of dicts, one per trial, with keys:
+        rewardedOnLeft, leftOrientation, rightOrientation,
+        leftSpatialFreq, rightSpatialFreq, leftTemporalFreq, rightTemporalFreq,
+        leftContrast, rightContrast, rewardedOrientation, nonRewardedOrientation,
+        choice, correct, rewarded, stimulusOnsetTime, choiceTime, choiceLatency
     """
     with open(filepath, 'r') as f:
         data = json.load(f)
 
-    trials = data.get('trials', [])
-    rewarded_on_left = [trial.get('rewardedOnLeft', None) for trial in trials]
+    keys = [
+        'rewardedOnLeft',
+        'leftOrientation', 'rightOrientation',
+        'leftSpatialFreq', 'rightSpatialFreq',
+        'leftTemporalFreq', 'rightTemporalFreq',
+        'leftContrast', 'rightContrast',
+        'rewardedOrientation', 'nonRewardedOrientation',
+        'choice', 'correct', 'rewarded',
+        'stimulusOnsetTime', 'choiceTime', 'choiceLatency',
+    ]
+    return [{k: trial.get(k, None) for k in keys} for trial in data.get('trials', [])]
 
-    return rewarded_on_left
-
-def process_behavior_trial_responses(rec_folder, trial_start, trial_end, rewarded_on_left, sortout_folder, task_start=0, task_end=None, overwrite=True):
+def process_behavior_trial_responses(rec_folder, trial_start, trial_end, trial_params, sortout_folder, task_start=0, task_end=None, overwrite=True):
     """
     Process behavior trial responses from an experiment folder.
 
@@ -75,12 +69,11 @@ def process_behavior_trial_responses(rec_folder, trial_start, trial_end, rewarde
     
     # Parse session info (animal_id, session_id, folder_name)
     animal_id, session_id, folder_name = parse_session_info(rec_folder)
-    ishs = ['0', '1', '2', '3', '4', '5', '6', '7']  # Assuming 8 shanks
-    
+
     # Convert to numpy arrays if not already
     trial_start = np.array(trial_start).ravel()
     trial_end = np.array(trial_end).ravel()
-    rewarded_on_left = np.array(rewarded_on_left, dtype=bool)
+    rewarded_on_left = np.array([t['rewardedOnLeft'] for t in trial_params], dtype=bool)
 
     # Get number of trials
     n_trials = len(trial_start)
@@ -119,161 +112,107 @@ def process_behavior_trial_responses(rec_folder, trial_start, trial_end, rewarde
         return pkl_file
     
     all_units_data = []
-    fs = None  # Will be set from first valid sorting
 
-    # Load unit quality labels from session folder
-    labels_file = session_folder / 'unit_labels.json'
-    unit_labels = {}
-    if labels_file.exists():
-        with open(labels_file, 'r') as f:
-            unit_labels = json.load(f)
-        print(f"Loaded unit labels from {labels_file}")
-    else:
-        print(f"No unit_labels.json found in {session_folder}, quality will be 'unknown'")
+    curated_analyzer_folder = session_folder / 'curated_analyzer'
+    if not curated_analyzer_folder.exists():
+        raise FileNotFoundError(f"No curated_analyzer found in {session_folder}")
 
-    for ish in ishs:
-        print(f'Processing {animal_id}/{session_id}/{ish}')
-        shank_folder = session_folder / f'shank{ish}'
-        
-        if not shank_folder.exists():
-            print(f"Shank folder {shank_folder} does not exist, skipping...")
-            continue
-            
-        sorting_results_folders = []
-        for root, dirs, files in os.walk(shank_folder):
-            for dir_name in dirs:
-                if dir_name.startswith('sorting_results_'):
-                    sorting_results_folders.append(os.path.join(root, dir_name))
-        
-        for sorting_results_folder in sorting_results_folders:
-            # Look for phy and sorting_analyzer folders
-            phy_folder = Path(sorting_results_folder) / 'phy'
-            sorting_analyzer_folder = Path(sorting_results_folder) / 'sorting_analyzer'
+    sorting_analyzer = load_sorting_analyzer(curated_analyzer_folder)
+    sorting = sorting_analyzer.sorting
+    print(f"Loaded from curated_analyzer: {curated_analyzer_folder}")
 
-            # Prioritize phy folder, then fall back to sorting_analyzer
-            loaded_from_phy = False
-            if phy_folder.exists():
-                try:
-                    sorting = read_phy(phy_folder)
-                    loaded_from_phy = True
-                    print(f"Loaded from phy: {phy_folder}")
-                except Exception as e:
-                    print(f"Failed to load from phy: {e}")
-                    if sorting_analyzer_folder.exists():
-                        try:
-                            sorting_analyzer = load_sorting_analyzer(sorting_analyzer_folder)
-                            sorting = sorting_analyzer.sorting
-                            print(f"Loaded from sorting_analyzer: {sorting_analyzer_folder}")
-                        except Exception as e2:
-                            print(f"Failed to load from sorting_analyzer: {e2}")
-                            continue
-                    else:
-                        print(f"Could not load sorting from {sorting_results_folder}")
-                        continue
-            elif sorting_analyzer_folder.exists():
-                try:
-                    sorting_analyzer = load_sorting_analyzer(sorting_analyzer_folder)
-                    sorting = sorting_analyzer.sorting
-                    print(f"Loaded from sorting_analyzer: {sorting_analyzer_folder}")
-                except Exception as e:
-                    print(f"Failed to load from sorting_analyzer: {e}")
-                    continue
-            else:
-                print(f"No valid sorting folder found in {sorting_results_folder}")
-                continue
+    fs = sorting.sampling_frequency
+    print(f"Sampling frequency: {fs} Hz")
 
-            unit_ids = sorting.unit_ids
-            if loaded_from_phy:
-                phy_qualities = sorting.get_property('quality')
-                phy_quality_map = {uid: q for uid, q in zip(unit_ids, phy_qualities)} if phy_qualities is not None else {}
+    unit_ids = sorting.unit_ids
 
-            if fs is None:
-                fs = sorting.sampling_frequency
-                print(f"Sampling frequency: {fs} Hz")
+    # Read shank (group) and quality (unit_label) directly from sorting properties
+    group_prop = sorting.get_property('group')
+    label_prop = sorting.get_property('unit_label')
+    group_map = {uid: int(g) for uid, g in zip(unit_ids, group_prop)} if group_prop is not None else {}
+    label_map = {uid: str(l) for uid, l in zip(unit_ids, label_prop)} if label_prop is not None else {}
 
-            for unit_id in unit_ids:
-                spike_train = sorting.get_unit_spike_train(unit_id)
+    for unit_id in unit_ids:
+        spike_train = sorting.get_unit_spike_train(unit_id)
 
-                # Align spike train from concatenated space to experiment-local (0-based) space
-                task_end_eff = task_end if task_end is not None else int(spike_train[-1]) + 1
-                task_mask = (spike_train >= task_start) & (spike_train < task_end_eff)
-                spike_train = spike_train[task_mask] - task_start
+        # Align spike train from concatenated space to experiment-local (0-based) space
+        task_end_eff = task_end if task_end is not None else int(spike_train[-1]) + 1
+        task_mask = (spike_train >= task_start) & (spike_train < task_end_eff)
+        spike_train = spike_train[task_mask] - task_start
 
-                # Use phy quality if loaded from phy, otherwise use unit_labels.json
-                if loaded_from_phy:
-                    quality = phy_quality_map.get(unit_id, 'unknown')
-                else:
-                    quality = unit_labels.get(f'shank{ish}', {}).get(str(unit_id), 'unknown')
-                unit_data = {
-                    'unit_id': unit_id,
-                    'shank': ish,
-                    'quality': quality,
-                    'sorting_folder': str(sorting_results_folder),
-                    'sampling_rate': fs,
-                    'trials': []
-                }
-                
-                # Process each trial
-                for trial_idx in range(n_trials):
-                    t_start = trial_start[trial_idx]
-                    t_end = trial_end[trial_idx]
-                    
-                    # Define extended time windows (including pre/post periods)
-                    pre_start_idx = t_start - int(pre_trial_window * fs)
-                    post_end_idx = t_end + int(post_trial_window * fs)
-                    
-                    # Extract spikes in the extended trial window
-                    trial_spike_mask = (spike_train >= pre_start_idx) & (spike_train < post_end_idx)
-                    trial_spikes = spike_train[trial_spike_mask]
-                    
-                    # Convert spike times relative to trial start (in seconds)
-                    relative_spike_times = (trial_spikes - t_start) / fs
-                    
-                    # Get stimulus condition for this trial
-                    trial_rewarded_left = rewarded_on_left[trial_idx]
+        shank = group_map.get(unit_id, None)
+        quality = label_map.get(unit_id, 'unknown')
+        unit_data = {
+            'unit_id': unit_id,
+            'shank': shank,
+            'quality': quality,
+            'sorting_folder': str(curated_analyzer_folder),
+            'sampling_rate': fs,
+            'trials': []
+        }
 
-                    # Find condition index
-                    condition_idx = 1 if trial_rewarded_left else 0
+        for trial_idx in range(n_trials):
+            t_start = trial_start[trial_idx]
+            t_end = trial_end[trial_idx]
 
-                    # Calculate repeat number for this condition
-                    condition_trials = []
-                    for prev_trial in range(trial_idx):
-                        if rewarded_on_left[prev_trial] == trial_rewarded_left:
-                            condition_trials.append(prev_trial)
-                    repeat_idx = len(condition_trials)
+            pre_start_idx = t_start - int(pre_trial_window * fs)
+            post_end_idx = t_end + int(post_trial_window * fs)
 
-                    # Calculate trial duration
-                    trial_duration = (t_end - t_start) / fs
+            trial_spike_mask = (spike_train >= pre_start_idx) & (spike_train < post_end_idx)
+            trial_spikes = spike_train[trial_spike_mask]
 
-                    # Store trial information
-                    trial_info = {
-                        'trial_number': trial_idx,
-                        'trial_start_time': t_start,  # in samples
-                        'trial_end_time': t_end,      # in samples
-                        'trial_start_time_sec': t_start / fs,  # in seconds
-                        'trial_end_time_sec': t_end / fs,      # in seconds
-                        'trial_duration': trial_duration,
-                        'rewarded_on_left': bool(trial_rewarded_left),
-                        'condition_idx': condition_idx,
-                        'repeat_idx': repeat_idx,
-                        'spike_times': relative_spike_times,  # relative to trial start
-                        'pre_trial_spikes': relative_spike_times[relative_spike_times < 0],
-                        'during_trial_spikes': relative_spike_times[(relative_spike_times >= 0) & 
-                                                                    (relative_spike_times < trial_duration)],
-                        'post_trial_spikes': relative_spike_times[relative_spike_times >= trial_duration],
-                        'pre_trial_count': np.sum(relative_spike_times < 0),
-                        'during_trial_count': np.sum((relative_spike_times >= 0) & 
-                                                     (relative_spike_times < trial_duration)),
-                        'post_trial_count': np.sum(relative_spike_times >= trial_duration),
-                        'firing_rate_pre': np.sum(relative_spike_times < 0) / pre_trial_window,
-                        'firing_rate_during': np.sum((relative_spike_times >= 0) & 
-                                                     (relative_spike_times < trial_duration)) / trial_duration,
-                        'firing_rate_post': np.sum(relative_spike_times >= trial_duration) / post_trial_window,
-                    }
-                    
-                    unit_data['trials'].append(trial_info)
-                
-                all_units_data.append(unit_data)
+            relative_spike_times = (trial_spikes - t_start) / fs
+
+            trial_rewarded_left = rewarded_on_left[trial_idx]
+            condition_idx = 1 if trial_rewarded_left else 0
+            repeat_idx = sum(1 for prev in range(trial_idx) if rewarded_on_left[prev] == trial_rewarded_left)
+            trial_duration = (t_end - t_start) / fs
+            tp = trial_params[trial_idx]
+
+            trial_info = {
+                'trial_number': trial_idx,
+                'trial_start_time': t_start,
+                'trial_end_time': t_end,
+                'trial_start_time_sec': t_start / fs,
+                'trial_end_time_sec': t_end / fs,
+                'trial_duration': trial_duration,
+                'rewarded_on_left': bool(trial_rewarded_left),
+                'condition_idx': condition_idx,
+                'repeat_idx': repeat_idx,
+                'left_orientation': tp['leftOrientation'],
+                'right_orientation': tp['rightOrientation'],
+                'left_spatial_freq': tp['leftSpatialFreq'],
+                'right_spatial_freq': tp['rightSpatialFreq'],
+                'left_temporal_freq': tp['leftTemporalFreq'],
+                'right_temporal_freq': tp['rightTemporalFreq'],
+                'left_contrast': tp['leftContrast'],
+                'right_contrast': tp['rightContrast'],
+                'rewarded_orientation': tp['rewardedOrientation'],
+                'non_rewarded_orientation': tp['nonRewardedOrientation'],
+                'choice': tp['choice'],
+                'correct': tp['correct'],
+                'rewarded': tp['rewarded'],
+                'stimulus_onset_time': tp['stimulusOnsetTime'],
+                'choice_time': tp['choiceTime'],
+                'choice_latency': tp['choiceLatency'],
+                'spike_times': relative_spike_times,
+                'pre_trial_spikes': relative_spike_times[relative_spike_times < 0],
+                'during_trial_spikes': relative_spike_times[(relative_spike_times >= 0) &
+                                                            (relative_spike_times < trial_duration)],
+                'post_trial_spikes': relative_spike_times[relative_spike_times >= trial_duration],
+                'pre_trial_count': np.sum(relative_spike_times < 0),
+                'during_trial_count': np.sum((relative_spike_times >= 0) &
+                                             (relative_spike_times < trial_duration)),
+                'post_trial_count': np.sum(relative_spike_times >= trial_duration),
+                'firing_rate_pre': np.sum(relative_spike_times < 0) / pre_trial_window,
+                'firing_rate_during': np.sum((relative_spike_times >= 0) &
+                                             (relative_spike_times < trial_duration)) / trial_duration,
+                'firing_rate_post': np.sum(relative_spike_times >= trial_duration) / post_trial_window,
+            }
+
+            unit_data['trials'].append(trial_info)
+
+        all_units_data.append(unit_data)
     
     print(f"Processed {len(all_units_data)} units across {n_trials} trials")
     
@@ -286,6 +225,7 @@ def process_behavior_trial_responses(rec_folder, trial_start, trial_end, rewarde
         trial_start=trial_start,
         trial_end=trial_end,
         rewarded_on_left=rewarded_on_left,
+        trial_params=trial_params,
         unique_conditions=unique_conditions,
         pre_trial_window=pre_trial_window,
         post_trial_window=post_trial_window,
@@ -305,6 +245,7 @@ def save_behavior_trial_to_pkl(
     trial_start,
     trial_end,
     rewarded_on_left,
+    trial_params,
     unique_conditions,
     pre_trial_window,
     post_trial_window,
@@ -322,14 +263,30 @@ def save_behavior_trial_to_pkl(
     # Build all trial parameters list
     all_trial_parameters = []
     for trial_idx in range(len(trial_start)):
-        trial_params = {
+        tp = trial_params[trial_idx]
+        all_trial_parameters.append({
             'trial_index': trial_idx,
             'rewarded_on_left': bool(rewarded_on_left[trial_idx]),
             'trial_start': int(trial_start[trial_idx]),
             'trial_end': int(trial_end[trial_idx]),
             'trial_duration': float((trial_end[trial_idx] - trial_start[trial_idx]) / fs),
-        }
-        all_trial_parameters.append(trial_params)
+            'left_orientation': tp['leftOrientation'],
+            'right_orientation': tp['rightOrientation'],
+            'left_spatial_freq': tp['leftSpatialFreq'],
+            'right_spatial_freq': tp['rightSpatialFreq'],
+            'left_temporal_freq': tp['leftTemporalFreq'],
+            'right_temporal_freq': tp['rightTemporalFreq'],
+            'left_contrast': tp['leftContrast'],
+            'right_contrast': tp['rightContrast'],
+            'rewarded_orientation': tp['rewardedOrientation'],
+            'non_rewarded_orientation': tp['nonRewardedOrientation'],
+            'choice': tp['choice'],
+            'correct': tp['correct'],
+            'rewarded': tp['rewarded'],
+            'stimulus_onset_time': tp['stimulusOnsetTime'],
+            'choice_time': tp['choiceTime'],
+            'choice_latency': tp['choiceLatency'],
+        })
 
     # Calculate average trial duration
     avg_trial_duration = np.mean((trial_end - trial_start) / fs)
@@ -377,12 +334,13 @@ def save_behavior_trial_to_pkl(
     
     for unit in all_units_data:
         # Create unique unit identifier matching the embedding extractor format
-        unique_unit_id = f"shank{unit['shank']}_unit{unit['unit_id']}"
-        
+        shank = unit.get('shank')
+        unique_unit_id = f"shank{shank}_unit{unit['unit_id']}" if shank is not None else f"unit{unit['unit_id']}"
+
         # Store unit metadata
         neural_data['unit_info'][unique_unit_id] = {
             'original_unit_id': int(unit['unit_id']),
-            'shank': unit['shank'],
+            'shank': shank,
             'quality': unit.get('quality', 'unknown'),
             'sorting_folder': unit.get('sorting_folder', ''),
             'n_spikes_total': sum(len(t['spike_times']) for t in unit['trials']),
@@ -401,7 +359,22 @@ def save_behavior_trial_to_pkl(
                 'trial_start': t['trial_start_time'],
                 'trial_end': t['trial_end_time'],
                 'trial_duration': t['trial_duration'],
-                # Additional metrics preserved for analysis
+                'left_orientation': t.get('left_orientation'),
+                'right_orientation': t.get('right_orientation'),
+                'left_spatial_freq': t.get('left_spatial_freq'),
+                'right_spatial_freq': t.get('right_spatial_freq'),
+                'left_temporal_freq': t.get('left_temporal_freq'),
+                'right_temporal_freq': t.get('right_temporal_freq'),
+                'left_contrast': t.get('left_contrast'),
+                'right_contrast': t.get('right_contrast'),
+                'rewarded_orientation': t.get('rewarded_orientation'),
+                'non_rewarded_orientation': t.get('non_rewarded_orientation'),
+                'choice': t.get('choice'),
+                'correct': t.get('correct'),
+                'rewarded': t.get('rewarded'),
+                'stimulus_onset_time': t.get('stimulus_onset_time'),
+                'choice_time': t.get('choice_time'),
+                'choice_latency': t.get('choice_latency'),
                 'pre_trial_count': t.get('pre_trial_count'),
                 'during_trial_count': t.get('during_trial_count'),
                 'post_trial_count': t.get('post_trial_count'),
@@ -421,82 +394,45 @@ def save_behavior_trial_to_pkl(
     return output_path
 
 
-# Example usage:
 if __name__ == '__main__':
-    # Example 1: Manual input
-    # rec_folder = r"/Volumes/xieluanlabs/xl_cl/rf_reconstruction/head_fixed/251002/CnL42SG/CnL42SG_20251002_200839.rec"
-    rec_folder  = r"/Volumes/xieluanlabs/xl_cl/experiment_data/CnL42/260313/CnL42SG_20260313/CnL42_task_20260313_180022.rec"
+    from params import rec_folder, task_file, sortout_folder, task_start, task_end, din_channel
+
+    # Load DIO trial timestamps
     dio_folders = DIO.get_dio_folders(rec_folder)
-    dio_folders = sorted(dio_folders, key=lambda x:x.name)
-    trial_pd_time, trial_pd_state = DIO.concatenate_din_data(dio_folders, 5)
-    trial_pd_time = trial_pd_time.ravel()
+    dio_folders = sorted(dio_folders, key=lambda x: x.name)
+    trial_pd_time, trial_pd_state = DIO.concatenate_din_data(dio_folders, din_channel)
+    trial_pd_time = trial_pd_time.ravel() - trial_pd_time.ravel()[0]
     trial_pd_state = trial_pd_state.ravel()
-    trial_pd_time = trial_pd_time - trial_pd_time[0] # reset the time to start from 0
+    trial_start = trial_pd_time[np.where(trial_pd_state == 1)[0]]
+    trial_end   = trial_pd_time[np.where(trial_pd_state == 0)[0][1:]]
 
-    trial_start = trial_pd_time[np.where(trial_pd_state==1)[0]]
-    trial_end = trial_pd_time[np.where(trial_pd_state==0)[0][1:]]
-    # rec_folder = Path(input("Please enter the full path to the recording folder: ").strip().strip('"'))
-    task_file = r"/Volumes/xieluanlabs/xl_cl/experiment_data/CnL42/260313/CnL42_2026-03-13_Session001_Data.json"
+    # Load behavioral trial parameters from task JSON
+    trial_params = get_trial_params(task_file)
 
-    rewarded_on_left = get_rewarded_on_left(task_file)
-    # Load your trial data (modify this based on how you store your data)
-    # Option A: If you have a .mat file with trial info
-    # import scipy.io
-    # trial_data = scipy.io.loadmat('trial_info.mat')
-    # trial_start = trial_data['trial_start'].flatten()
-    # trial_end = trial_data['trial_end'].flatten()
-    # rewarded_on_left = trial_data['rewarded_on_left'].flatten().astype(bool)
-    
-    # Option B: If you have numpy arrays
-    # trial_start = np.load('trial_start.npy')
-    # trial_end = np.load('trial_end.npy')
-    # rewarded_on_left = np.load('rewarded_on_left.npy')
-    
-    # Option C: Example dummy data for testing
-    # n_trials = 160
-    # trial_start = np.array([i * 30000 for i in range(n_trials)])  # Example: trials every 30000 samples
-    # trial_end = np.array([i * 30000 + 15000 for i in range(n_trials)])  # Example: 15000 samples duration
-    # rewarded_on_left = np.random.rand(n_trials) > 0.5  # Random left/right
-    n_DIO = len(trial_start)
-    n_trials = len(rewarded_on_left)
-
+    n_DIO    = len(trial_start)
+    n_trials = len(trial_params)
     if n_DIO != n_trials:
         raise ValueError(f"DIO trials ({n_DIO}) != behavior trials ({n_trials}). Please check your data.")
-    else:
-        print(f"DIO and behavior trial counts match: {n_trials} trials.")
-    print(f"Processing {n_trials} trials...")
-    print(f"Trial start range: {trial_start[0]} to {trial_start[-1]}")
-    print(f"Trial end range: {trial_end[0]} to {trial_end[-1]}")
+    print(f"DIO and behavior trial counts match: {n_trials} trials.")
 
-    sortout_folder = input("Please enter the path to the session sortout folder (parent of shank0, shank1, ... folders): ").strip().strip('"')
-
-    # Offset of this experiment in the concatenated recording (in sample points)
-    task_start = 312334828      # sample point where this experiment starts in the concatenated recording
-    task_end   = 407823003  # sample point where it ends; None = use last spike as upper bound
-
-    # Process the data
+    # Process and save
     pkl_path = process_behavior_trial_responses(
         rec_folder=rec_folder,
         trial_start=trial_start,
         trial_end=trial_end,
-        rewarded_on_left=rewarded_on_left,
+        trial_params=trial_params,
         sortout_folder=sortout_folder,
         task_start=task_start,
         task_end=task_end,
-        overwrite=True
+        overwrite=True,
     )
 
     print(f"\nData saved to: {pkl_path}")
-    
-    # Load and verify the structure
+
     with open(pkl_path, 'rb') as f:
         data = pickle.load(f)
-    
     print("\nData structure verification:")
-    print(f"- Metadata keys: {list(data['metadata'].keys())}")
-    print(f"- Experiment type: {data['metadata']['experiment_type']}")
     print(f"- Total units: {len(data['spike_data'])}")
     print(f"- Total trials: {data['metadata']['n_trials']}")
-    print(f"- Conditions: {data['trial_info']['unique_conditions']}")
     print(f"- Left trials: {data['experiment_parameters']['n_left_trials']}")
     print(f"- Right trials: {data['experiment_parameters']['n_right_trials']}")

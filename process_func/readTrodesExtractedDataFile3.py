@@ -60,7 +60,7 @@ def parseFields(fieldstr):
             print(ftype + " is not a valid field type.\n")
             exit(1)
         else:
-            typearr.append((str(fieldname), fieldtype, repeats))
+            typearr.append((str(fieldname), fieldtype) if repeats == 1 else (str(fieldname), fieldtype, repeats))
     return np.dtype(typearr)
 
 
