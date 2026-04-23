@@ -79,8 +79,8 @@ def extract_session_spikes(
     print(f"Last stimulus offset at t={last_stim_offset_sec:.2f} s within window")
 
     # --- output file ---
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M")
-    pkl_file = session_folder / f'session_spikes_{timestamp}.pkl'
+    date_str = session_id.split('_')[0]   # e.g. '20260313' from '20260313_180022'
+    pkl_file = session_folder / f'task_spikes_{date_str}.pkl'
     if pkl_file.exists() and not overwrite:
         print(f"{pkl_file} exists and overwrite=False – skipping.")
         return pkl_file
