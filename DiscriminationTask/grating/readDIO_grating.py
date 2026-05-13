@@ -15,6 +15,31 @@ from rec2nwb.preproc_func import parse_session_info
 import pickle
 import json
 
+def get_session_position(filepath):
+    """
+    Return the full session DLC tracking (not sliced to stim windows).
+
+    Output dict keys:
+        dlc_x, dlc_y      : 1-D arrays, position samples
+        dlc_heading       : 1-D array, heading direction
+        dlc_head_angle    : 1-D array, head angle
+        dlc_signal        : 1-D array, tracking quality/confidence
+        step_time         : 1-D array, session-relative seconds (same frame as JSON's stepTime)
+        session_t0        : float, Unix-epoch session start (matches stimulusOnsetTime/choiceTime)
+    """
+    with open(filepath, 'r') as f:
+        data = json.load(f)
+    return {
+        'dlc_x':          np.asarray(data.get('dlcX', []),         dtype=float),
+        'dlc_y':          np.asarray(data.get('dlcY', []),         dtype=float),
+        'dlc_heading':    np.asarray(data.get('dlcHeading', []),   dtype=float),
+        'dlc_head_angle': np.asarray(data.get('dlcHeadAngle', []), dtype=float),
+        'dlc_signal':     np.asarray(data.get('dlcSignal', []),    dtype=float),
+        'step_time':      np.asarray(data.get('stepTime', []),     dtype=float),
+        'session_t0':     data.get('startTime'),
+    }
+
+
 def get_trial_params(filepath):
     """
     Extract per-trial behavioral and grating parameters from a session JSON file.
@@ -23,7 +48,15 @@ def get_trial_params(filepath):
         rewardedOnLeft, leftOrientation, rightOrientation,
         leftSpatialFreq, rightSpatialFreq, leftTemporalFreq, rightTemporalFreq,
         leftContrast, rightContrast, rewardedOrientation, nonRewardedOrientation,
-        choice, correct, rewarded, stimulusOnsetTime, choiceTime, choiceLatency
+        choice, correct, rewarded, stimulusOnsetTime, choiceTime, choiceLatency,
+        position_x, position_y, position_time
+
+    position_x/position_y/position_time cover only the visual-stim ON window:
+    samples whose stepTime falls in [stimulusOnsetTime, choiceTime]. The JSON
+    stores stepTime in session-relative seconds while stimulusOnsetTime and
+    choiceTime are Unix epoch seconds, so we subtract the session-level
+    startTime before searchsorted'ing. If either boundary is missing the
+    position arrays are returned empty.
     """
     with open(filepath, 'r') as f:
         data = json.load(f)
@@ -38,7 +71,46 @@ def get_trial_params(filepath):
         'choice', 'correct', 'rewarded',
         'stimulusOnsetTime', 'choiceTime', 'choiceLatency',
     ]
-    return [{k: trial.get(k, None) for k in keys} for trial in data.get('trials', [])]
+
+    dlc_x = np.asarray(data.get('dlcX', []), dtype=float)
+    dlc_y = np.asarray(data.get('dlcY', []), dtype=float)
+    dlc_heading = np.asarray(data.get('dlcHeading', []), dtype=float)
+    dlc_head_angle = np.asarray(data.get('dlcHeadAngle', []), dtype=float)
+    dlc_signal = np.asarray(data.get('dlcSignal', []), dtype=float)
+    step_time = np.asarray(data.get('stepTime', []), dtype=float)
+    session_t0 = data.get('startTime')  # Unix-epoch session start, matches stim/choice times
+
+    def _slice(arr, sl):
+        return arr[sl] if arr.size == step_time.size else np.array([], dtype=float)
+
+    out = []
+    for trial in data.get('trials', []):
+        td = {k: trial.get(k, None) for k in keys}
+        stim_on = trial.get('stimulusOnsetTime')
+        stim_off = trial.get('choiceTime')  # photodiode falls = stim off
+        if (stim_on is not None and stim_off is not None
+                and step_time.size > 0 and stim_off >= stim_on
+                and session_t0 is not None):
+            stim_on_rel = stim_on - session_t0
+            stim_off_rel = stim_off - session_t0
+            i0 = int(np.searchsorted(step_time, stim_on_rel, side='left'))
+            i1 = int(np.searchsorted(step_time, stim_off_rel, side='right'))
+            sl = slice(i0, i1)
+            td['position_x'] = dlc_x[sl]
+            td['position_y'] = dlc_y[sl]
+            td['position_time'] = step_time[sl]
+            td['heading'] = _slice(dlc_heading, sl)
+            td['head_angle'] = _slice(dlc_head_angle, sl)
+            td['dlc_signal'] = _slice(dlc_signal, sl)
+        else:
+            td['position_x'] = np.array([], dtype=float)
+            td['position_y'] = np.array([], dtype=float)
+            td['position_time'] = np.array([], dtype=float)
+            td['heading'] = np.array([], dtype=float)
+            td['head_angle'] = np.array([], dtype=float)
+            td['dlc_signal'] = np.array([], dtype=float)
+        out.append(td)
+    return out
 
 def process_behavior_trial_responses(rec_folder, trial_start, trial_end, trial_params, sortout_folder, task_start=0, task_end=None, overwrite=True):
     """
@@ -98,15 +170,14 @@ def process_behavior_trial_responses(rec_folder, trial_start, trial_end, trial_p
     print(f"Trials with rewarded on right: {n_right}")
     
     # Define time windows (relative to trial start/end)
-    pre_trial_window = 0.2    # 200ms before trial start
-    post_trial_window = 0.2   # 200ms after trial end
+    pre_trial_window = 2.0    # 2s before trial start
+    post_trial_window = 2.0   # 2s after trial end
     
     # Construct session folder for sorting results
     session_folder = Path(sortout_folder)
     
     # Check if the output file already exists
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M")
-    pkl_file = session_folder / f'behavior_trial_embedding_{timestamp}.pkl'
+    pkl_file = session_folder / f'task_spikes_trial_{session_folder.name}.pkl'
     if pkl_file.exists() and not overwrite:
         print(f"File {pkl_file} already exists and overwrite=False. Skipping computation and returning existing file.")
         return pkl_file
@@ -258,7 +329,7 @@ def save_behavior_trial_to_pkl(
     """
 
     # Create trial windows
-    trial_windows = [(int(start), int(end)) for start, end in zip(trial_start, trial_end)]
+    trial_windows = [(int(start), int(end)) for start, end in zip(triasorl_start, trial_end)]
 
     # Build all trial parameters list
     all_trial_parameters = []
@@ -286,6 +357,12 @@ def save_behavior_trial_to_pkl(
             'stimulus_onset_time': tp['stimulusOnsetTime'],
             'choice_time': tp['choiceTime'],
             'choice_latency': tp['choiceLatency'],
+            'position_x': np.asarray(tp['position_x']).tolist(),
+            'position_y': np.asarray(tp['position_y']).tolist(),
+            'position_time': np.asarray(tp['position_time']).tolist(),
+            'heading': np.asarray(tp.get('heading', [])).tolist(),
+            'head_angle': np.asarray(tp.get('head_angle', [])).tolist(),
+            'dlc_signal': np.asarray(tp.get('dlc_signal', [])).tolist(),
         })
 
     # Calculate average trial duration

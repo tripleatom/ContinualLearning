@@ -11,3 +11,4 @@ passive_view_video/logs
 *.pkl
 *.png
 experiment_patterns_code
+.claude
