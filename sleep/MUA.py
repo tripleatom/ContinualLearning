@@ -2,7 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import spikeinterface.extractors as se
 import spikeinterface.preprocessing as spre
-from spikeinterface.extractors import PhySortingExtractor
+from spikeinterface.extractors import read_phy
 from pathlib import Path
 import pickle
 import os
@@ -68,7 +68,7 @@ for ish in shanks:
     print(f"  Loading sorting from: {phy_folder}")
     
     # Load sorting
-    sorting = PhySortingExtractor(phy_folder)
+    sorting = read_phy(phy_folder)
     unit_ids = sorting.unit_ids
     unit_qualities = sorting.get_property('quality')
     fs_spikes = sorting.sampling_frequency

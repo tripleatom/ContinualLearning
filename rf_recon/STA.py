@@ -6,7 +6,7 @@ from pathlib import Path
 import os
 import h5py
 from rf_func import find_stim_index, moving_average, schmitt_trigger
-from spikeinterface.extractors import PhySortingExtractor
+from spikeinterface.extractors import read_phy
 from rec2nwb.preproc_func import parse_session_info
 
 rec_folder = Path(input("Please enter the full path to the recording folder: ").strip().strip('"'))
@@ -114,7 +114,7 @@ for ish in ishs:
         # sorting_anaylzer = load_sorting_analyzer(
         #     Path(sorting_results_folder) / 'sorting_analyzer')
 
-        sorting = PhySortingExtractor(phy_folder)
+        sorting = read_phy(phy_folder)
         qualities = sorting.get_property('quality')
         # sorting = sorting_anaylzer.sorting
 

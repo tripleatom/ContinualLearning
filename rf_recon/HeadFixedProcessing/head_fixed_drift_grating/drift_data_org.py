@@ -4,7 +4,7 @@ import scipy.io
 import h5py
 from datetime import datetime
 from pathlib import Path
-from spikeinterface.extractors import PhySortingExtractor
+from spikeinterface.extractors import read_phy
 from rec2nwb.preproc_func import parse_session_info
 from rf_recon.rf_func import dereference
 import pickle
@@ -116,7 +116,7 @@ def process_drifting_grating_responses(rec_folder, stimdata_file, peaks_file, ov
             phy_folder = Path(sorting_results_folder) / 'phy'
             
             # Load sorting
-            sorting = PhySortingExtractor(phy_folder)
+            sorting = read_phy(phy_folder)
             unit_ids = sorting.unit_ids
             unit_qualities_this_sort = sorting.get_property('quality')
             

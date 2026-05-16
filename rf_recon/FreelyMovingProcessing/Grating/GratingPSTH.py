@@ -8,7 +8,7 @@ import os
 from rf_recon.FreelyMovingProcessing.Grating.parse_grating_experiment import parse_grating_experiment
 from rf_recon.FreelyMovingProcessing.Grating.grating_utils import load_session_paths
 from spikeinterface import load_sorting_analyzer
-from spikeinterface.extractors import PhySortingExtractor
+from spikeinterface.extractors import read_phy
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
 from rf_recon.FreelyMovingProcessing.Grating.grating_config import ANIMAL_ID as Animal_id, EXPERIMENT_DATE as experiment_date
@@ -107,7 +107,7 @@ for ish in ishs:
             sorting_analyzer_path = Path(sorting_results_folder) / 'sorting_analyzer'
 
             if phy_folder.exists():
-                sorting = PhySortingExtractor(phy_folder)
+                sorting = read_phy(phy_folder)
 
             elif sorting_analyzer_path.exists():
                 sorting_analyzer = load_sorting_analyzer(sorting_analyzer_path)

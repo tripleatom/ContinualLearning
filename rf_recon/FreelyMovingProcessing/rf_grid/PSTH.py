@@ -6,7 +6,7 @@ import os
 
 from task_file_reader import load_task_file
 from spikeinterface import load_sorting_analyzer
-from spikeinterface.extractors import PhySortingExtractor
+from spikeinterface.extractors import read_phy
 
 rec_folder = Path(r"/Volumes/xieluanlabs/xl_cl/RF_GRID/250821/CnL39SG/CnL39SG_20250821_163039.rec")
 task_file_Path = Path(r"/Volumes/xieluanlabs/xl_cl/RF_GRID/250821/CnL39_20250821_3.txt")
@@ -90,7 +90,7 @@ for ish in ishs:
             sorting_analyzer_path = Path(sorting_results_folder) / 'sorting_analyzer'
 
             if phy_folder.exists():
-                sorting = PhySortingExtractor(phy_folder)
+                sorting = read_phy(phy_folder)
 
             elif sorting_analyzer_path.exists():
                 sorting_analyzer = load_sorting_analyzer(sorting_analyzer_path)

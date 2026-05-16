@@ -5,7 +5,7 @@ import pandas as pd
 from pathlib import Path
 
 from spikeinterface import load_sorting_analyzer
-from spikeinterface.extractors import PhySortingExtractor
+from spikeinterface.extractors import read_phy
 
 from process_func.DIO import get_dio_folders, concatenate_din_data
 
@@ -125,7 +125,7 @@ def process_new_experiment(rec_folder, task_file,
                 
                 # Alternative: load from Phy if needed
                 if phy_folder.exists():
-                    sorting = PhySortingExtractor(phy_folder)
+                    sorting = read_phy(phy_folder)
 
                 # Set sampling freq
                 if fs is None:

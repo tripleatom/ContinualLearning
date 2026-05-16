@@ -3,7 +3,7 @@ import numpy as np
 from pathlib import Path
 import h5py
 from rf_recon.rf_func import dereference
-from spikeinterface.extractors import PhySortingExtractor
+from spikeinterface.extractors import read_phy
 from rec2nwb.preproc_func import parse_session_info
 import scipy
 import os
@@ -79,7 +79,7 @@ for ish in ishs:
             out_fig_folder.mkdir(parents=True)
         
         # Load the sorting extractor from the phy folder
-        sorting = PhySortingExtractor(phy_folder)
+        sorting = read_phy(phy_folder)
         unit_ids = sorting.unit_ids
         fs = sorting.sampling_frequency
         qualities = sorting.get_property('quality')

@@ -3,7 +3,7 @@ import h5py
 from pathlib import Path
 from rec2nwb.preproc_func import parse_session_info
 import os
-from spikeinterface.extractors import PhySortingExtractor
+from spikeinterface.extractors import read_phy
 from spikeinterface.core import load_sorting_analyzer
 import matplotlib.pyplot as plt
 import numpy as np
@@ -83,7 +83,7 @@ for ish in ishs:
         
         # Load sorting analyzer (optionally use curated data)
         if phy_folder.exists():
-            sorting = PhySortingExtractor(phy_folder)
+            sorting = read_phy(phy_folder)
         else:
             sorting_anaylzer = load_sorting_analyzer(Path(sorting_results_folder) / 'sorting_analyzer')
             sorting = sorting_anaylzer.sorting

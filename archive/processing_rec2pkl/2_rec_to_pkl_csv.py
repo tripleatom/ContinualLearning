@@ -12,7 +12,7 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 from spikeinterface import load_sorting_analyzer
-from spikeinterface.extractors import PhySortingExtractor
+from spikeinterface.extractors import read_phy
 
 # ---------------------------
 # USER INPUTS
@@ -205,7 +205,7 @@ def extract_grating_neural_data_from_csv(
 
             if phy_dir.exists():
                 print(f"Loading Phy sorting from {phy_dir}")
-                sorting  = PhySortingExtractor(phy_dir)
+                sorting  = read_phy(phy_dir)
                 fs_spike = sorting.sampling_frequency
             elif sa_dir.exists():
                 print(f"Loading SortingAnalyzer from {sa_dir}")

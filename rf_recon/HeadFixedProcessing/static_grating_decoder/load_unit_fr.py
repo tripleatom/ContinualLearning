@@ -4,7 +4,7 @@ import scipy.io
 import h5py
 from pathlib import Path
 from spikeinterface import load_sorting_analyzer
-from spikeinterface.extractors import PhySortingExtractor
+from spikeinterface.extractors import read_phy
 from rec2nwb.preproc_func import parse_session_info
 from rf_recon.rf_func import dereference
 
@@ -115,7 +115,7 @@ def process_static_grating_responses(rec_folder, stimdata_file, overwrite=True):
             # Load sorting analyzer (optionally use curated data)
             sorting_anaylzer = load_sorting_analyzer(Path(sorting_results_folder) / 'sorting_analyzer')
             sorting = sorting_anaylzer.sorting
-            sorting = PhySortingExtractor(phy_folder)
+            sorting = read_phy(phy_folder)
             unit_ids = sorting.unit_ids
             # Get the quality for all units in this sorting result
             unit_qualities_this_sort = sorting.get_property('quality')

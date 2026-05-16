@@ -8,7 +8,7 @@ from collections import defaultdict
 import h5py
 from datetime import datetime
 from spikeinterface import load_sorting_analyzer
-from spikeinterface.extractors import PhySortingExtractor
+from spikeinterface.extractors import read_phy
 from rf_recon.rf_grid.task_file_reader import load_task_file
 
 
@@ -123,7 +123,7 @@ def extract_neural_data_for_embedding(rec_folder, task_file_path, output_format=
                 sorting_analyzer_path = Path(sorting_results_folder) / 'sorting_analyzer'
                 
                 if phy_folder.exists():
-                    sorting = PhySortingExtractor(phy_folder)
+                    sorting = read_phy(phy_folder)
                 elif sorting_analyzer_path.exists():
                     sorting_analyzer = load_sorting_analyzer(sorting_analyzer_path)
                     sorting = sorting_analyzer.sorting

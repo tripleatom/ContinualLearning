@@ -8,7 +8,7 @@ import pickle
 from process_func.DIO import get_dio_folders, concatenate_din_data
 from task_file_reader import load_task_file
 from spikeinterface import load_sorting_analyzer
-from spikeinterface.extractors import PhySortingExtractor
+from spikeinterface.extractors import read_phy
 
 rec_folder = Path(r"/Volumes/xieluanlabs/xl_cl/RF_GRID/250821/CnL39SG/CnL39SG_20250821_163039.rec")
 task_file_Path = Path(r"/Volumes/xieluanlabs/xl_cl/RF_GRID/250821/CnL39_20250821_3.txt")

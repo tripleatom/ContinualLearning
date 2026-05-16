@@ -6,7 +6,7 @@ from pathlib import Path
 import os
 import h5py
 from rf_recon.rf_func import find_stim_index, h5py_to_dict, hex_offsets
-from spikeinterface.extractors import PhySortingExtractor
+from spikeinterface.extractors import read_phy
 from rec2nwb.preproc_func import parse_session_info
 from matplotlib.colors import Normalize, LinearSegmentedColormap
 import matplotlib.colors as mcolors
@@ -111,7 +111,7 @@ for ish in ishs:
             out_fig_folder.mkdir(parents=True)
         
         # Load the sorting extractor from the phy folder
-        sorting = PhySortingExtractor(phy_folder)
+        sorting = read_phy(phy_folder)
         unit_ids = sorting.unit_ids
         fs = sorting.sampling_frequency
         qualities = sorting.get_property('quality')

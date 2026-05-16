@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from datetime import datetime
 from spikeinterface import load_sorting_analyzer
-from spikeinterface.extractors import PhySortingExtractor
+from spikeinterface.extractors import read_phy
 from rf_recon.FreelyMovingProcessing.Grating.parse_grating_experiment import parse_grating_experiment
 
 
@@ -265,7 +265,7 @@ def extract_grating_neural_data_for_embedding(rec_folder, task_file_path, sortou
             loaded_from_phy = False
             if phy_folder.exists():
                 try:
-                    sorting = PhySortingExtractor(phy_folder)
+                    sorting = read_phy(phy_folder)
                     loaded_from_phy = True
                     print(f"Loaded from phy: {phy_folder}")
                 except Exception as e:

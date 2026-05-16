@@ -4,7 +4,7 @@ import scipy.io
 import h5py
 from pathlib import Path
 from spikeinterface import load_sorting_analyzer
-from spikeinterface.extractors import PhySortingExtractor
+from spikeinterface.extractors import read_phy
 from rec2nwb.preproc_func import parse_session_info
 import pandas as pd
 import pickle
@@ -228,7 +228,7 @@ def process_object_discrimination_with_temporal_features(rec_folder, task_file, 
                 
                 # Alternative: load from Phy if needed
                 if phy_folder.exists():
-                    sorting = PhySortingExtractor(phy_folder)
+                    sorting = read_phy(phy_folder)
                 
                 unit_ids = sorting.unit_ids
                 unit_qualities_this_sort = sorting.get_property('quality') if hasattr(sorting, 'get_property') else ['good'] * len(unit_ids)
