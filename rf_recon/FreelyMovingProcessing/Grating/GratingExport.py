@@ -1,11 +1,8 @@
 import numpy as np
 import pickle
-import os
-import json
 from pathlib import Path
 from datetime import datetime
 from spikeinterface import load_sorting_analyzer
-from spikeinterface.extractors import read_phy
 from rf_recon.FreelyMovingProcessing.Grating.parse_grating_experiment import parse_grating_experiment
 
 
@@ -49,74 +46,70 @@ def _compute_acg(spike_train_samples, fs, max_lag_ms=25.0, bin_ms=1.0):
     return counts_norm, lags_ms
 
 
-def _extract_waveform_info(unit_id, phy_folder, sorting_analyzer_path):
+def _extract_waveform_info(unit_id, sorting_analyzer):
     """
-    Extract mean waveform on the best channel and that channel's probe location.
+    Extract mean waveform on the best channel plus full-channel templates.
 
-    Tries (in order):
-      1. sorting_analyzer templates extension
-      2. phy templates.npy + channel_positions.npy
+    Uses the curated sorting_analyzer templates extension.
 
     Returns:
         waveform: list[float] — mean waveform on best channel, or None
         waveform_t_ms: list[float] — time axis in ms, or None
         best_channel: int or None
         channel_location_um: [x, y] in µm, or None
+        waveform_template_all_channels: list[list[float]] — samples x channels, or None
+        channel_locations_um: list[list[float]], or None
+        waveform_channel_ids: list, or None
+        waveform_channel_groups: list, or None
     """
-    # --- try sorting_analyzer first ---
-    if sorting_analyzer_path and Path(sorting_analyzer_path).exists():
-        try:
-            analyzer = load_sorting_analyzer(sorting_analyzer_path)
-            templates_ext = analyzer.get_extension('templates')
-            if templates_ext is not None:
-                unit_ids_list = list(analyzer.unit_ids)
-                if unit_id in unit_ids_list:
-                    idx = unit_ids_list.index(unit_id)
-                    templates_data = templates_ext.get_data()   # (n_units, n_samples, n_channels)
-                    template = templates_data[idx]               # (n_samples, n_channels)
-                    best_ch = int(np.argmax(np.ptp(template, axis=0)))
-                    wf = template[:, best_ch].tolist()
-                    fs_wf = analyzer.sampling_frequency
-                    n_samples = template.shape[0]
-                    t_ms = (np.arange(n_samples) / fs_wf * 1000.0 - (n_samples / 2) / fs_wf * 1000.0).tolist()
-                    locs = analyzer.get_channel_locations()
-                    loc = locs[best_ch].tolist() if locs is not None else None
-                    return wf, t_ms, best_ch, loc
-        except Exception as e:
-            print(f"    [waveform] sorting_analyzer failed for unit {unit_id}: {e}")
+    try:
+        templates_ext = sorting_analyzer.get_extension('templates')
+        if templates_ext is not None:
+            unit_ids_list = list(sorting_analyzer.unit_ids)
+            if unit_id in unit_ids_list:
+                idx = unit_ids_list.index(unit_id)
+                templates_data = templates_ext.get_data()   # (n_units, n_samples, n_channels)
+                template = templates_data[idx]               # (n_samples, n_channels)
+                best_ch = int(np.argmax(np.ptp(template, axis=0)))
+                wf = template[:, best_ch].tolist()
+                fs_wf = sorting_analyzer.sampling_frequency
+                n_samples = template.shape[0]
+                t_ms = (np.arange(n_samples) / fs_wf * 1000.0 - (n_samples / 2) / fs_wf * 1000.0).tolist()
+                locs = sorting_analyzer.get_channel_locations()
+                loc = locs[best_ch].tolist() if locs is not None else None
+                all_locs = locs.tolist() if locs is not None else None
+                channel_ids = list(getattr(sorting_analyzer, 'channel_ids', [])) or None
+                channel_groups = None
+                recording = getattr(sorting_analyzer, 'recording', None)
+                if recording is not None:
+                    try:
+                        groups = recording.get_property('group')
+                        channel_groups = groups.tolist() if hasattr(groups, 'tolist') else list(groups)
+                    except Exception:
+                        channel_groups = None
+                return wf, t_ms, best_ch, loc, template.tolist(), all_locs, channel_ids, channel_groups
+    except Exception as e:
+        print(f"    [waveform] sorting_analyzer failed for unit {unit_id}: {e}")
 
-    # --- fall back to phy ---
-    if phy_folder and Path(phy_folder).exists():
-        try:
-            templates_file = Path(phy_folder) / 'templates.npy'
-            positions_file = Path(phy_folder) / 'channel_positions.npy'
-            if templates_file.exists():
-                templates = np.load(templates_file)   # (n_templates, n_samples, n_channels)
-                uid = int(unit_id)
-                if uid < templates.shape[0]:
-                    template = templates[uid]           # (n_samples, n_channels)
-                    best_ch = int(np.argmax(np.ptp(template, axis=0)))
-                    wf = template[:, best_ch].tolist()
-                    # phy templates have no guaranteed sample rate stored here;
-                    # use index as proxy and let the caller supply fs if needed
-                    n_samples = template.shape[0]
-                    t_ms = (np.arange(n_samples) - n_samples // 2).tolist()  # in samples, caller converts
-                    loc = None
-                    if positions_file.exists():
-                        positions = np.load(positions_file)
-                        if best_ch < len(positions):
-                            loc = positions[best_ch].tolist()
-                    return wf, t_ms, best_ch, loc
-        except Exception as e:
-            print(f"    [waveform] phy fallback failed for unit {unit_id}: {e}")
-
-    return None, None, None, None
+    return None, None, None, None, None, None, None, None
 
 
-def extract_grating_neural_data_for_embedding(rec_folder, task_file_path, sortout_folder, task_start=0, task_end=None):
+def extract_grating_neural_data_for_embedding(
+    rec_folder,
+    task_file_path,
+    sortout_folder,
+    passive_start=0,
+    passive_end=None,
+):
     rec_folder = Path(rec_folder)
     task_file_path = Path(task_file_path)
-    session_folder = Path(sortout_folder)
+    sortout_path = Path(sortout_folder)
+    curated_analyzer_path = (
+        sortout_path if sortout_path.name == 'curated_analyzer'
+        else sortout_path / 'curated_analyzer'
+    )
+    if not curated_analyzer_path.exists():
+        raise FileNotFoundError(f"curated_analyzer path does not exist: {curated_analyzer_path}")
 
     rec_name = rec_folder.name
     if rec_name.endswith('.rec'):
@@ -202,19 +195,6 @@ def extract_grating_neural_data_for_embedding(rec_folder, task_file_path, sortou
 
     trial_windows = [(rising_times[i], falling_times[i]) for i in range(n_trials)]
 
-    output_dir = session_folder / 'passive_embedding_analysis'
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    # Load unit quality labels from session folder
-    labels_file = session_folder / 'unit_labels.json'
-    unit_labels = {}
-    if labels_file.exists():
-        with open(labels_file, 'r') as f:
-            unit_labels = json.load(f)
-        print(f"Loaded unit labels from {labels_file}")
-    else:
-        print(f"No unit_labels.json found in {session_folder}, quality will be 'unknown'")
-
     neural_data = {
         'metadata': {
             'animal_id': animal_id,
@@ -244,141 +224,114 @@ def extract_grating_neural_data_for_embedding(rec_folder, task_file_path, sortou
     window_pre = 0.2   # seconds before stimulus onset
     window_post = 2.0  # seconds after stimulus onset
     unit_counter = 0
-    ishs = ['0', '1', '2', '3', '4', '5', '6', '7']
+    shanks_processed = []
 
-    for ish in ishs:
-        shank_folder = session_folder / f'shank{ish}'
-        if not shank_folder.exists():
+    sorting_analyzer = load_sorting_analyzer(curated_analyzer_path)
+    sorting = sorting_analyzer.sorting
+    sorting_folder = curated_analyzer_path
+    print(f"Loaded curated_analyzer: {curated_analyzer_path}")
+
+    fs = sorting.sampling_frequency
+    neural_data['metadata']['sampling_frequency'] = fs
+    unit_ids = sorting.unit_ids
+
+    group_prop = sorting.get_property('group')
+    group_map = (
+        {uid: int(g) for uid, g in zip(unit_ids, group_prop)}
+        if group_prop is not None else {}
+    )
+    label_prop = sorting.get_property('unit_label')
+    if label_prop is None:
+        raise ValueError(
+            f"curated_analyzer is missing required sorting property 'unit_label': "
+            f"{curated_analyzer_path}"
+        )
+    label_map = {uid: str(l) for uid, l in zip(unit_ids, label_prop)}
+
+    window_pre_samples = int(window_pre * fs)
+    window_post_samples = int(window_post * fs)
+
+    for unit_id in unit_ids:
+        shank = group_map.get(unit_id, None)
+        shank_key = f'shank{shank}' if shank is not None else 'unknown'
+        quality = label_map[unit_id]
+
+        if shank_key not in shanks_processed:
+            shanks_processed.append(shank_key)
+
+        try:
+            spike_train = sorting.get_unit_spike_train(unit_id)
+        except Exception as e:
+            print(f"Error getting spike train for unit {unit_id}: {e}")
             continue
 
-        sorting_results_folders = [
-            os.path.join(root, d)
-            for root, dirs, _ in os.walk(shank_folder)
-            for d in dirs if d.startswith('sorting_results_')
-        ]
+        if len(spike_train) == 0:
+            continue
 
-        for sorting_results_folder in sorting_results_folders:
-            phy_folder = Path(sorting_results_folder) / 'phy'
-            sorting_analyzer_path = Path(sorting_results_folder) / 'sorting_analyzer'
+        # Align spike train from concatenated sorting space to passive-local space
+        passive_end_eff = passive_end if passive_end is not None else int(spike_train[-1]) + 1
+        passive_mask = (spike_train >= passive_start) & (spike_train < passive_end_eff)
+        spike_train = spike_train[passive_mask] - passive_start
 
-            sorting = None
-            loaded_from_phy = False
-            if phy_folder.exists():
-                try:
-                    sorting = read_phy(phy_folder)
-                    loaded_from_phy = True
-                    print(f"Loaded from phy: {phy_folder}")
-                except Exception as e:
-                    print(f"Failed to load from phy: {e}")
-                    if sorting_analyzer_path.exists():
-                        try:
-                            sorting = load_sorting_analyzer(sorting_analyzer_path).sorting
-                            # print(f"Loaded from sorting_analyzer: {sorting_analyzer_path}")
-                        except Exception as e2:
-                            print(f"Failed to load from sorting_analyzer: {e2}")
-                    else:
-                        print(f"Could not load sorting from {sorting_results_folder}")
-            elif sorting_analyzer_path.exists():
-                try:
-                    sorting = load_sorting_analyzer(sorting_analyzer_path).sorting
-                    # print(f"Loaded from sorting_analyzer: {sorting_analyzer_path}")
-                except Exception as e:
-                    print(f"Failed to load from sorting_analyzer: {e}")
-            else:
-                print(f"No valid sorting folder found in {sorting_results_folder}")
+        unique_unit_id = f"{shank_key}_unit{unit_id}"
 
-            if sorting is None:
-                continue
+        # Waveform + channel location
+        wf, wf_t_ms, best_ch, ch_loc, wf_all_ch, ch_locs, wf_ch_ids, wf_ch_groups = _extract_waveform_info(
+            unit_id, sorting_analyzer
+        )
 
-            fs = sorting.sampling_frequency
-            neural_data['metadata']['sampling_frequency'] = fs
-            unit_ids = sorting.unit_ids
+        # ACG from full (task-masked) spike train
+        acg_counts, acg_lags_ms = _compute_acg(spike_train, fs)
 
-            if loaded_from_phy:
-                phy_qualities = sorting.get_property('quality')
-                phy_quality_map = {uid: q for uid, q in zip(unit_ids, phy_qualities)} if phy_qualities is not None else {}
+        neural_data['unit_info'][unique_unit_id] = {
+            'original_unit_id': int(unit_id),
+            'shank': shank,
+            'quality': quality,
+            'sorting_folder': str(sorting_folder),
+            'n_spikes_total': len(spike_train),
+            'unit_index': unit_counter,
+            # waveform / electrode
+            'best_channel': best_ch,
+            'channel_location_um': ch_loc,
+            'waveform_template': wf,
+            'waveform_template_all_channels': wf_all_ch,
+            'waveform_t_ms': wf_t_ms,
+            'channel_locations_um': ch_locs,
+            'waveform_channel_ids': wf_ch_ids,
+            'waveform_channel_groups': wf_ch_groups,
+            # autocorrelogram
+            'acg_counts': acg_counts.tolist(),
+            'acg_lags_ms': acg_lags_ms.tolist(),
+        }
 
-            for unit_id in unit_ids:
-                # Use phy quality if loaded from phy, otherwise use unit_labels.json
-                if loaded_from_phy:
-                    quality = phy_quality_map.get(unit_id, 'unknown')
-                else:
-                    quality = unit_labels.get(f'shank{ish}', {}).get(str(unit_id), 'unknown')
-                if quality == 'noise':
-                    continue
+        trial_spike_data = []
+        for i_trial, (start, end) in enumerate(trial_windows):
+            start_samples = int(start)
+            trial_spikes = spike_train[
+                (spike_train >= start_samples - window_pre_samples) &
+                (spike_train < start_samples + window_post_samples)
+            ]
+            trial_spikes_relative = (trial_spikes - start_samples) / fs if len(trial_spikes) > 0 else np.array([])
+            trial_spike_data.append({
+                'trial_index': i_trial,
+                'orientation': orientations[i_trial] if i_trial < len(orientations) else None,
+                'spatial_freq': spatial_freqs[i_trial] if i_trial < len(spatial_freqs) else None,
+                'contrast': contrasts[i_trial] if i_trial < len(contrasts) else None,
+                'phase': phases[i_trial] if i_trial < len(phases) else None,
+                'spike_times': trial_spikes_relative.tolist(),
+                'spike_count': len(trial_spikes_relative),
+                'trial_start': start,
+                'trial_end': end
+            })
 
-                try:
-                    spike_train = sorting.get_unit_spike_train(unit_id)
-                except Exception as e:
-                    print(f"Error getting spike train for unit {unit_id}: {e}")
-                    continue
-
-                if len(spike_train) == 0:
-                    continue
-
-                # Align spike train from concatenated space to experiment-local space
-                task_end_eff = task_end if task_end is not None else int(spike_train[-1]) + 1
-                task_mask = (spike_train >= task_start) & (spike_train < task_end_eff)
-                spike_train = spike_train[task_mask] - task_start
-
-                unique_unit_id = f"shank{ish}_unit{unit_id}"
-
-                # Waveform + channel location
-                wf, wf_t_ms, best_ch, ch_loc = _extract_waveform_info(
-                    unit_id, phy_folder, sorting_analyzer_path
-                )
-
-                # ACG from full (task-masked) spike train
-                acg_counts, acg_lags_ms = _compute_acg(spike_train, fs)
-
-                neural_data['unit_info'][unique_unit_id] = {
-                    'original_unit_id': int(unit_id),
-                    'shank': ish,
-                    'quality': quality,
-                    'sorting_folder': sorting_results_folder,
-                    'n_spikes_total': len(spike_train),
-                    'unit_index': unit_counter,
-                    # waveform / electrode
-                    'best_channel': best_ch,
-                    'channel_location_um': ch_loc,
-                    'waveform_template': wf,
-                    'waveform_t_ms': wf_t_ms,
-                    # autocorrelogram
-                    'acg_counts': acg_counts.tolist(),
-                    'acg_lags_ms': acg_lags_ms.tolist(),
-                }
-
-                window_pre_samples = int(window_pre * fs)
-                window_post_samples = int(window_post * fs)
-                trial_spike_data = []
-
-                for i_trial, (start, end) in enumerate(trial_windows):
-                    start_samples = int(start)
-                    trial_spikes = spike_train[
-                        (spike_train >= start_samples - window_pre_samples) &
-                        (spike_train < start_samples + window_post_samples)
-                    ]
-                    trial_spikes_relative = (trial_spikes - start_samples) / fs if len(trial_spikes) > 0 else np.array([])
-                    trial_spike_data.append({
-                        'trial_index': i_trial,
-                        'orientation': orientations[i_trial] if i_trial < len(orientations) else None,
-                        'spatial_freq': spatial_freqs[i_trial] if i_trial < len(spatial_freqs) else None,
-                        'contrast': contrasts[i_trial] if i_trial < len(contrasts) else None,
-                        'phase': phases[i_trial] if i_trial < len(phases) else None,
-                        'spike_times': trial_spikes_relative.tolist(),
-                        'spike_count': len(trial_spikes_relative),
-                        'trial_start': start,
-                        'trial_end': end
-                    })
-
-                neural_data['spike_data'][unique_unit_id] = trial_spike_data
-                unit_counter += 1
+        neural_data['spike_data'][unique_unit_id] = trial_spike_data
+        unit_counter += 1
 
     neural_data['extraction_params'] = {
         'window_pre': window_pre,
         'window_post': window_post,
         'total_units': unit_counter,
-        'shanks_processed': ishs
+        'shanks_processed': shanks_processed
     }
 
     print(f"\nExtraction complete: {unit_counter} units, {n_trials} trials, orientations: {unique_orientations}, spatial_freqs: {unique_spatial_freqs}, phases: {unique_phases}")
@@ -475,37 +428,100 @@ def load_neural_data(filepath):
         return pickle.load(f)
 
 
+def _rec_folders_for_task_files(rec_folders, task_file_paths):
+    """
+    Match rec folders to task files.
+
+    If the CSV has one passive recording and multiple task files, reuse that
+    recording for every task. If it has one passive recording per task, keep
+    them paired in CSV order.
+    """
+    if not rec_folders:
+        raise ValueError("No passive recording folders were found in the CSV.")
+    if not task_file_paths:
+        raise ValueError("No task files were found in the CSV.")
+    if len(rec_folders) == 1:
+        return [rec_folders[0] for _ in task_file_paths]
+    if len(rec_folders) == len(task_file_paths):
+        return list(rec_folders)
+    raise ValueError(
+        f"Found {len(rec_folders)} passive recording folder(s) and "
+        f"{len(task_file_paths)} task file(s). Use either one passive folder "
+        "for all tasks or one passive folder per task."
+    )
+
+
+def _normalize_passive_window(window):
+    """Accept {'passive_start': x, 'passive_end': y} or (x, y)."""
+    if isinstance(window, dict):
+        return {
+            'passive_start': window.get('passive_start', window.get('start')),
+            'passive_end': window.get('passive_end', window.get('end')),
+        }
+    if isinstance(window, (list, tuple)) and len(window) == 2:
+        return {'passive_start': window[0], 'passive_end': window[1]}
+    raise ValueError(
+        "Each PASSIVE_WINDOWS entry must be a dict with passive_start/passive_end "
+        "or a two-item tuple/list."
+    )
+
+
 if __name__ == "__main__":
     import traceback
     from rf_recon.FreelyMovingProcessing.Grating.grating_utils import load_session_paths
     try:
         # ── Animal / session config ────────────────────────────────────────────
-        from rf_recon.FreelyMovingProcessing.Grating.grating_config import ANIMAL_ID as Animal_id, EXPERIMENT_DATE as experiment_date
+        from rf_recon.FreelyMovingProcessing.Grating.grating_config import (
+            ANIMAL_ID as Animal_id,
+            EXPERIMENT_DATE as experiment_date,
+            SORTOUT_FOLDER,
+            PASSIVE_START,
+            PASSIVE_END,
+            PASSIVE_WINDOWS,
+        )
 
         rec_folders, passive_log_paths = load_session_paths(Animal_id, experiment_date)
-        rec_folder = rec_folders[0]
+        rec_folders_for_tasks = _rec_folders_for_task_files(rec_folders, passive_log_paths)
+        rec_folder = rec_folders_for_tasks[0]
 
-        # task_start / task_end: sample offsets in the concatenated sorting space.
-        # Set task_start=0, task_end=None if sorting was done on this session alone.
-        passive_offsets = [
-            {'task_start': 0, 'task_end': None}
-            for _ in passive_log_paths
-        ]
+        # passive_start / passive_end: sample offsets in the concatenated sorting space.
+        # Set passive_start=0, passive_end=None if sorting was done on passive only.
+        if PASSIVE_WINDOWS is None:
+            passive_windows = [
+                {'passive_start': PASSIVE_START, 'passive_end': PASSIVE_END}
+                for _ in passive_log_paths
+            ]
+        else:
+            if len(PASSIVE_WINDOWS) != len(passive_log_paths):
+                raise ValueError(
+                    f"PASSIVE_WINDOWS has {len(PASSIVE_WINDOWS)} entries, but "
+                    f"{len(passive_log_paths)} task file(s) were found in the CSV."
+                )
+            passive_windows = [_normalize_passive_window(w) for w in PASSIVE_WINDOWS]
 
         for p in passive_log_paths:
             if not p.exists():
                 print(f"Task file does not exist: {p}")
                 exit(1)
 
-        sortout_folder = input("Please enter the path to the session sortout folder (parent of shank0, shank1, ... folders): ").strip().strip('"')
+        sortout_folder = Path(SORTOUT_FOLDER)
+        print(f"Using sortout folder: {sortout_folder}")
 
         all_data = []
-        for task_file_path, offsets in zip(passive_log_paths, passive_offsets):
+        print(f"Task files found: {len(passive_log_paths)}")
+        for task_file_path, passive_window, rec_folder_for_task in zip(
+            passive_log_paths, passive_windows, rec_folders_for_tasks
+        ):
             print(f"\n{'='*60}")
             print(f"Extracting: {task_file_path.stem}")
+            print(
+                f"Passive window: start={passive_window['passive_start']} "
+                f"end={passive_window['passive_end']}"
+            )
             nd = extract_grating_neural_data_for_embedding(
-                rec_folder, task_file_path, sortout_folder,
-                task_start=offsets['task_start'], task_end=offsets['task_end']
+                rec_folder_for_task, task_file_path, sortout_folder,
+                passive_start=passive_window['passive_start'],
+                passive_end=passive_window['passive_end'],
             )
             if nd is None:
                 print(f"Failed to extract {task_file_path.stem}, skipping.")
@@ -518,7 +534,8 @@ if __name__ == "__main__":
 
         rec_name = rec_folder.name.replace('.rec', '')
         animal_id = rec_name.split('_')[0]
-        output_dir = Path(sortout_folder) / 'passive_embedding_analysis'
+        output_base = sortout_folder.parent if sortout_folder.name == 'curated_analyzer' else sortout_folder
+        output_dir = output_base / 'passive_embedding_analysis'
         output_dir.mkdir(parents=True, exist_ok=True)
 
         # ── Save options ────────────────────────────────────────────────────────

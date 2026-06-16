@@ -1,32 +1,13 @@
-from pathlib import Path
 import numpy as np
 from scipy import signal
 
-# === CONFIGURATION ===
-rec_folder = r"D:\cl\ephys\sleep\CnL42SG_20251112_170949.rec"
-session_name = Path(rec_folder).stem.split('.')[0]
-shanks = [0, 1, 2, 3, 4, 5, 6, 7]
-
-# === OPTIMAL SPECTROGRAM PARAMETERS FOR SLEEP ANALYSIS ===
-# These parameters give:
-#   • ~4 s window smoothing
-#   • ~0.25 Hz freq resolution
-#   • ~0.5 s time steps
-spec_params = {
-    "nperseg": 1024,       # 1024 samples / 500 Hz ≈ 2.048 s 
-    "noverlap": 768,       # 75% overlap = 1.5 s overlap
-    "nfft": 2048,          # gives ~0.24 Hz freq resolution
-    "scaling": "density",
-    "mode": "psd",
-}
+from sleep_params import session_name, shanks, low_freq_folder, spec_params
 
 # === MAIN LOOP ===
 for ish in shanks:
     print(f"\n{'='*70}")
     print(f"PROCESSING SHANK {ish}")
     print(f"{'='*70}\n")
-
-    low_freq_folder = Path(rec_folder) / "low_freq"
 
     # Load LFP file
     lfp_file = low_freq_folder / f"{session_name}_sh{ish}_lfp_traces.npz"

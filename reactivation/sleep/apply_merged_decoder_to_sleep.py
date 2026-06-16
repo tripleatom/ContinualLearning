@@ -1,25 +1,27 @@
 """
-Train the best merged task+passive visual-stimulus decoder, apply it to a
-continuous sleep/rest interval, and visualize predicted reactivation patterns.
+Apply the best merged-context visual-stimulus decoder (trained by
+train_task_test_passive.py) to sleep blocks, and visualize predicted
+reactivation patterns.
 
 Workflow
 --------
-1. Prepare task and passive stim-type data at several bin sizes.
-2. Align units shared by task and passive recordings.
-3. Evaluate all classifiers on merged task+passive data.
-4. Pick the best classifier and its best bin size.
-5. Refit that classifier on balanced merged data at the best bin size.
-6. Bin sleep spikes over [sleep_start_sec, sleep_end_sec] in the same spike-time
-   frame as the sleep pickle, then decode each sleep bin.
-7. Report predicted +1 and -1 events and save summary figures.
-
-Expected pickle format
-----------------------
-The task/passive/sleep pickle files should contain:
-    data["spike_data"][unit_label]["spike_times_sec"]
-
-For task/passive files, the existing prepare_* scripts also require
-trial_params and window timing fields.
+1. Locate the CV results pickle saved by train_task_test_passive.py
+   (same out_dir / stem convention as that script).
+2. Read best_per_condition[MERGED_CONDITION] to get the winning
+   (classifier, bin_ms) for the merged task+passive decoder.
+   Default condition is 'merged_neural_cv' — neural-only merged decoder,
+   no kinematic columns, which is the natural input shape for sleep
+   (sleep has no kinematics). Switch to 'merged_cv' to additionally
+   zero-fill the kinematic columns at sleep time, matching how the
+   passive half is zero-filled at train time.
+3. Rebuild the merged training matrix at that bin size, aligned to the
+   common task n passive units.
+4. Re-balance via (class x group) undersampling (same scheme as the CV
+   training folds in train_task_test_passive.py) and refit the chosen
+   classifier on the full balanced pool.
+5. For each sleep block: bin spikes at the same bin size in the sleep
+   pkl's own spike-time frame, decode each bin, locate reactivation
+   events, save figures + a results pickle.
 """
 
 import sys
@@ -29,6 +31,8 @@ from pathlib import Path
 code_dir = Path(__file__).resolve().parent.parent.parent
 sys.path.append(str(code_dir))
 sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(code_dir / 'reactivation' / 'VStimOnDecoding'))
+sys.path.insert(0, str(code_dir / 'DiscriminationTask' / 'grating'))
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -39,23 +43,71 @@ from sklearn.metrics import confusion_matrix
 
 from decode_aode import AODEClassifier, binarize
 from decode_utils import (
-    balance_by_undersampling,
+    balance_by_class_group_undersampling,
     bin_spikes,
     make_classifiers,
-    run_cv_balanced_train,
 )
 from prepare_passive_stimtype import prepare_passive_stim_type
 from prepare_task_stimtype import prepare_task_stim_type
-
+from kinematics_utils import (
+    N_KINEMATIC_FEATURES,
+    build_task_kinematics,
+    load_task_kinematic_samples,
+)
 
 from params import (
     task_pkl, passive_pkl, sleep_blocks,
-    bin_sizes_ms, n_splits, random_state,
-    task_feature_col, passive_feature_col, class_pos, class_neg,
-    task_constraints, passive_constraints,
+    n_splits, random_state,
+    class_pos, class_neg, TASK_COL_MAP, PASSIVE_COL_MAP,
     event_threshold, event_min_distance_sec, top_n_events_per_class,
     plot_window_sec,
 )
+
+
+# Which merged condition (from train_task_test_passive.py) to apply to sleep:
+#   'merged_neural_cv' : task neural + passive neural, no kin columns (default)
+#   'merged_cv'        : task (neural+kin) + passive (neural + kin=0);
+#                        sleep is decoded with kin columns zero-filled
+MERGED_CONDITION = 'merged_neural_cv'
+
+
+def _stem_part(d):
+    return '_'.join(f'{k}{v:g}' for k, v in d.items())
+
+
+def _cv_pkl_path():
+    session = Path(task_pkl).parent.name
+    stem = (f"train_task_test_passive_{session}_pos-{_stem_part(class_pos)}_"
+            f"neg-{_stem_part(class_neg)}_{n_splits}fold")
+    return Path(task_pkl).parent / 'reactivation' / f"{stem}.pkl"
+
+
+def load_best_merged_from_cv(condition=MERGED_CONDITION):
+    """Load the saved CV summary and return best_per_condition[condition]."""
+    p = _cv_pkl_path()
+    if not p.exists():
+        raise FileNotFoundError(
+            f"CV results pickle not found at:\n  {p}\n"
+            "Run reactivation/VStimOnDecoding/train_task_test_passive.py first."
+        )
+    with open(p, 'rb') as f:
+        cv = pickle.load(f)
+    if condition not in cv.get('best_per_condition', {}):
+        raise KeyError(
+            f"Condition '{condition}' missing from best_per_condition in {p}. "
+            f"Available: {sorted(cv.get('best_per_condition', {}).keys())}"
+        )
+    best = dict(cv['best_per_condition'][condition])
+    best['condition'] = condition
+    print(f"Loaded CV results from:\n  {p}")
+    print(f"Best {condition}: {best['classifier']} @ {best['bin_ms']} ms "
+          f"-> acc={best['mean_acc']:.3f} +/- {best['std_acc']:.3f}")
+    print(f"Best overall (across all conditions): "
+          f"{cv['best_overall']['condition']} / "
+          f"{cv['best_overall']['classifier']} @ "
+          f"{cv['best_overall']['bin_ms']} ms = "
+          f"{cv['best_overall']['mean_acc']:.3f}")
+    return best, cv
 
 
 def _softmax_scores(scores):
@@ -81,7 +133,8 @@ def _fit_classifier(name, clf_proto, X, y):
         prior_probs = {str(c): float(np.mean(y == c)) for c in classes}
         clf = AODEClassifier()
         clf.train(tevents)
-        return {"name": name, "clf": clf, "classes": np.array(classes), "prior_probs": prior_probs}
+        return {"name": name, "clf": clf, "classes": np.array(classes),
+                "prior_probs": prior_probs}
 
     clf = clone(clf_proto)
     clf.fit(X, y)
@@ -129,93 +182,81 @@ def _align_columns(X, units, common_units):
     return X[:, idx]
 
 
-def _prepare_merged_training(bin_size_sec):
-    X_t, y_t, _, units_t = prepare_task_stim_type(
-        task_pkl,
-        task_feature_col,
-        class_pos,
-        class_neg,
+def _prepare_merged_training(bin_size_sec, condition):
+    """Rebuild the merged training matrix for the chosen condition,
+    matching train_task_test_passive.py."""
+    X_t, y_t, bc_t, units_t = prepare_task_stim_type(
+        task_pkl, class_pos, class_neg, TASK_COL_MAP,
         bin_size_sec=bin_size_sec,
-        constraints=task_constraints,
         balance_classes=False,
         random_state=random_state,
     )
     X_p, y_p, _, units_p = prepare_passive_stim_type(
-        passive_pkl,
-        passive_feature_col,
-        class_pos,
-        class_neg,
+        passive_pkl, class_pos, class_neg, PASSIVE_COL_MAP,
         bin_size_sec=bin_size_sec,
-        constraints=passive_constraints,
         balance_classes=False,
         random_state=random_state,
     )
 
     common_units = sorted(set(units_t) & set(units_p))
     if not common_units:
-        raise RuntimeError("No common units between task and passive data.")
+        raise RuntimeError("No common units between task and passive recordings.")
+    X_t_a = _align_columns(X_t, units_t, common_units)
+    X_p_a = _align_columns(X_p, units_p, common_units)
 
-    X_t = _align_columns(X_t, units_t, common_units)
-    X_p = _align_columns(X_p, units_p, common_units)
-    X = np.vstack([X_t, X_p])
-    y = np.concatenate([y_t, y_p])
-    return X, y, common_units
-
-
-def choose_best_merged_decoder():
-    classifiers = make_classifiers(random_state)
-    rows = []
-    best = None
-
-    for bms in bin_sizes_ms:
-        print(f"\n=== Merged CV: bin {bms} ms ===")
-        X, y, common_units = _prepare_merged_training(bms / 1000.0)
-        print(
-            f"  X={X.shape}  +1={np.sum(y == 1)}  "
-            f"-1={np.sum(y == -1)}  0={np.sum(y == 0)}"
+    n_kin = 0
+    if condition == 'merged_cv':
+        kin_samples, _, _ = load_task_kinematic_samples(task_pkl)
+        kin_t, keep_t = build_task_kinematics(bc_t, bin_size_sec, kin_samples)
+        n_kin = N_KINEMATIC_FEATURES
+        X_t_a = X_t_a[keep_t]
+        y_t = y_t[keep_t]
+        kin_t = kin_t[keep_t]
+        kin_p_zero = np.zeros((X_p_a.shape[0], n_kin), dtype=np.float64)
+        X_t_use = np.hstack([X_t_a, kin_t.astype(X_t_a.dtype)])
+        X_p_use = np.hstack([X_p_a, kin_p_zero.astype(X_p_a.dtype)])
+    elif condition == 'merged_neural_cv':
+        X_t_use = X_t_a
+        X_p_use = X_p_a
+    else:
+        raise ValueError(
+            f"Unsupported MERGED_CONDITION={condition!r}. "
+            "Use 'merged_neural_cv' or 'merged_cv'."
         )
 
-        for name, clf_proto in classifiers.items():
-            folds, mean, chance, pc_means, pc_stds = run_cv_balanced_train(
-                name,
-                clf_proto,
-                X,
-                y,
-                n_splits=n_splits,
-                random_state=random_state,
-            )
-            row = {
-                "classifier": name,
-                "bin_ms": bms,
-                "mean_acc": mean,
-                "std_acc": float(np.std(folds)),
-                "chance": chance,
-                "per_class_means": pc_means,
-                "per_class_stds": pc_stds,
-                "n_units": len(common_units),
-            }
-            rows.append(row)
-            print(f"  [{name}] mean={mean:.3f} +/- {row['std_acc']:.3f}")
-            if best is None or mean > best["mean_acc"]:
-                best = row
+    X = np.vstack([X_t_use, X_p_use])
+    y = np.concatenate([y_t, y_p])
+    groups = np.concatenate([
+        np.zeros(X_t_use.shape[0], dtype=int),
+        np.ones(X_p_use.shape[0], dtype=int),
+    ])
+    return X, y, groups, common_units, n_kin
 
-    print(
-        "\nBest merged decoder: "
-        f"{best['classifier']} @ {best['bin_ms']} ms, acc={best['mean_acc']:.3f}"
+
+def fit_best_model(best, condition):
+    X, y, groups, common_units, n_kin = _prepare_merged_training(
+        best['bin_ms'] / 1000.0, condition,
     )
-    return best, rows
+    print(f"Merged training pool ({condition}): X={X.shape}, "
+          f"task bins={int(np.sum(groups == 0))}, "
+          f"passive bins={int(np.sum(groups == 1))}")
 
-
-def fit_best_model(best):
-    X, y, common_units = _prepare_merged_training(best["bin_ms"] / 1000.0)
     rng = np.random.default_rng(random_state)
-    X_bal, y_bal = balance_by_undersampling(X, y, rng)
-    clf_proto = make_classifiers(random_state)[best["classifier"]]
-    model = _fit_classifier(best["classifier"], clf_proto, X_bal, y_bal)
-    return model, X, y, X_bal, y_bal, common_units
+    X_bal, y_bal, g_bal = balance_by_class_group_undersampling(X, y, groups, rng)
+    cell_counts = {
+        (int(c), int(g)): int(np.sum((y_bal == c) & (g_bal == g)))
+        for c in np.unique(y_bal) for g in (0, 1)
+    }
+    print(f"After (class x group) balancing: X={X_bal.shape}, "
+          f"per-cell counts={cell_counts}")
+
+    clf_proto = make_classifiers(random_state)[best['classifier']]
+    model = _fit_classifier(best['classifier'], clf_proto, X_bal, y_bal)
+    return model, X, y, X_bal, y_bal, common_units, n_kin
 
 
-def load_sleep_matrix(sleep_pkl_path, start_sec, end_sec, common_units, bin_size_sec):
+def load_sleep_matrix(sleep_pkl_path, start_sec, end_sec, common_units,
+                      bin_size_sec, n_kin_zero_fill):
     if not sleep_pkl_path:
         raise ValueError("Set sleep_pkl_path before running.")
 
@@ -243,6 +284,11 @@ def load_sleep_matrix(sleep_pkl_path, start_sec, end_sec, common_units, bin_size
         raise ValueError("Sleep interval is shorter than the selected decoder bin size.")
     edges = float(start_sec) + np.arange(n_bins + 1) * bin_size_sec
     X_sleep, units_sleep = bin_spikes(spike_data, edges, bin_size_sec)
+    if n_kin_zero_fill > 0:
+        X_sleep = np.hstack([
+            X_sleep,
+            np.zeros((X_sleep.shape[0], n_kin_zero_fill), dtype=X_sleep.dtype),
+        ])
     centers = 0.5 * (edges[:-1] + edges[1:])
     return X_sleep, centers, units_sleep, float(start_sec), float(end_sec)
 
@@ -274,7 +320,8 @@ def _class_templates(X_train, y_train):
     return templates
 
 
-def plot_sleep_summary(out_dir, best, centers, X_sleep, pred, proba, classes, events, X_train, y_train):
+def plot_sleep_summary(out_dir, best, centers, X_sleep, pred, proba, classes, events,
+                       X_train, y_train):
     c_pos = _class_col(classes, 1)
     c_neg = _class_col(classes, -1)
     c_iti = _class_col(classes, 0)
@@ -288,7 +335,7 @@ def plot_sleep_summary(out_dir, best, centers, X_sleep, pred, proba, classes, ev
     axes[0].set_ylabel("Decoder confidence")
     axes[0].set_title(
         f"Sleep decoding: {best['classifier']} @ {best['bin_ms']} ms "
-        f"(merged CV acc={best['mean_acc']:.3f})"
+        f"(merged CV acc={best['mean_acc']:.3f}, condition={best['condition']})"
     )
     axes[0].legend(loc="upper right", ncol=3)
 
@@ -332,12 +379,11 @@ def _zscore_rows(M):
 
 
 def plot_event_patterns(out_dir, X_sleep, events, X_train, y_train):
-    """Separate figure: training templates + sleep-event firing patterns,
-    z-scored per row and with units sorted by (+1 minus -1) template
-    so signal-discriminating columns are visually grouped."""
+    """Training templates + sleep-event firing patterns, z-scored per row,
+    with units sorted by (+1 minus -1) template."""
     templates = _class_templates(X_train, y_train)
     if -1 not in templates or 1 not in templates:
-        print("Event-pattern figure skipped — training set lacks +1 or -1 class.")
+        print("Event-pattern figure skipped - training set lacks +1 or -1 class.")
         return
 
     diff = templates[1] - templates[-1]
@@ -373,7 +419,8 @@ def plot_event_patterns(out_dir, X_sleep, events, X_train, y_train):
     axes[0].imshow(template_mat_z, aspect="auto", cmap=cmap, vmin=-vmax, vmax=vmax)
     axes[0].set_yticks(range(len(template_order)))
     axes[0].set_yticklabels([label_names[lab] for lab in template_order], fontsize=9)
-    axes[0].set_title("Training templates (rows z-scored across units; units sorted by +1 − -1 template)",
+    axes[0].set_title("Training templates (rows z-scored across units; "
+                      "units sorted by +1 minus -1 template)",
                       fontsize=10)
 
     if n_pos:
@@ -395,7 +442,7 @@ def plot_event_patterns(out_dir, X_sleep, events, X_train, y_train):
         axes[2].set_axis_off()
         im = axes[0].images[0]
 
-    axes[2].set_xlabel("Common units (sorted: -1 preferring  →  +1 preferring)")
+    axes[2].set_xlabel("Common units (sorted: -1 preferring  ->  +1 preferring)")
 
     fig.subplots_adjust(right=0.9)
     cbar_ax = fig.add_axes([0.92, 0.15, 0.012, 0.7])
@@ -404,6 +451,7 @@ def plot_event_patterns(out_dir, X_sleep, events, X_train, y_train):
     fig_path = out_dir / "sleep_event_patterns.png"
     fig.savefig(fig_path, dpi=150, bbox_inches="tight")
     print(f"Event-pattern figure saved -> {fig_path}")
+
 
 def plot_event_confidence_heatmaps(out_dir, best, centers, proba, classes, events):
     """Per-class event-centered decoder confidence heatmap (one PNG per class)."""
@@ -436,6 +484,7 @@ def plot_event_confidence_heatmaps(out_dir, best, centers, proba, classes, event
 
 def print_report(best, events, pred, proba, classes, centers, start_sec, end_sec):
     print("\n=== Sleep decoding report ===")
+    print(f"Condition       : {best['condition']}")
     print(f"Best classifier : {best['classifier']}")
     print(f"Best bin size   : {best['bin_ms']} ms")
     print(f"Merged CV acc   : {best['mean_acc']:.3f} +/- {best['std_acc']:.3f}")
@@ -458,11 +507,14 @@ def print_report(best, events, pred, proba, classes, centers, start_sec, end_sec
 
 
 def main():
-    best, cv_rows = choose_best_merged_decoder()
-    model, X_train, y_train, X_bal, y_bal, common_units = fit_best_model(best)
+    best, cv = load_best_merged_from_cv(MERGED_CONDITION)
+    model, X_train, y_train, X_bal, y_bal, common_units, n_kin = fit_best_model(
+        best, MERGED_CONDITION,
+    )
 
     session = Path(task_pkl).parent.name
-    base_out_dir = Path(task_pkl).parent / "reactivation" / f"sleep_merged_decoder_{session}"
+    base_out_dir = (Path(task_pkl).parent / "reactivation"
+                    / f"sleep_{MERGED_CONDITION}_{session}")
 
     training_confusion = confusion_matrix(
         y_bal, _predict_with_confidence(model, X_bal)[0], labels=[-1, 0, 1]
@@ -470,12 +522,13 @@ def main():
 
     for label, pkl_path, start_sec, end_sec in sleep_blocks:
         if not pkl_path:
-            print(f"\n[{label}] Skipped — no sleep_pkl path.")
+            print(f"\n[{label}] Skipped - no sleep_pkl path.")
             continue
 
         print(f"\n========== Decoding sleep block '{label}' ==========")
         X_sleep, centers, _, start_sec_eff, end_sec_eff = load_sleep_matrix(
-            pkl_path, start_sec, end_sec, common_units, best["bin_ms"] / 1000.0
+            pkl_path, start_sec, end_sec, common_units,
+            best["bin_ms"] / 1000.0, n_kin_zero_fill=n_kin,
         )
         pred, proba, classes = _predict_with_confidence(model, X_sleep)
         events = find_sleep_events(centers, proba, classes)
@@ -484,12 +537,16 @@ def main():
         out_dir.mkdir(parents=True, exist_ok=True)
 
         print_report(best, events, pred, proba, classes, centers, start_sec_eff, end_sec_eff)
-        plot_sleep_summary(out_dir, best, centers, X_sleep, pred, proba, classes, events, X_bal, y_bal)
+        plot_sleep_summary(out_dir, best, centers, X_sleep, pred, proba, classes, events,
+                           X_bal, y_bal)
 
         out = {
             "best": best,
-            "cv_rows": cv_rows,
+            "cv_best_per_condition": cv['best_per_condition'],
+            "cv_best_overall": cv['best_overall'],
+            "merged_condition": MERGED_CONDITION,
             "common_units": common_units,
+            "n_kin_zero_fill": n_kin,
             "sleep_label": label,
             "sleep_pkl": pkl_path,
             "sleep_start_sec": start_sec_eff,

@@ -6,8 +6,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from pathlib import Path
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
-from sklearn.model_selection import StratifiedKFold, cross_val_score, cross_validate
-from sklearn.metrics import accuracy_score, confusion_matrix
+from sklearn.model_selection import StratifiedKFold, cross_val_score
 from sklearn.preprocessing import StandardScaler
 import warnings
 warnings.filterwarnings('ignore')
@@ -16,14 +15,9 @@ from grating_utils import (
     load_neural_data,
     calculate_firing_rates,
     calculate_orientation_selectivity,
-    plot_confusion_matrix,
     plot_cv_scores,
-    plot_per_class_accuracy,
-    plot_polar_accuracy,
-    plot_sf_accuracy_bar,
     plot_trial_distribution,
     plot_summary_text,
-    plot_prediction_confidence,
 )
 
 
@@ -36,8 +30,9 @@ def perform_lda_analysis(firing_rates, orientation_labels, n_components=None):
     Perform LDA analysis with cross-validation.
 
     Returns:
-        Dictionary with LDA results including:
-        - transformed_data, predictions, cv_scores, confusion_matrix, etc.
+        Dictionary with LDA results: transformed_data, cv_scores,
+        cv_scores_shuffled (label-permuted baseline), and the fitted model
+        (for projection/coefficient visualization only — never for metrics).
     """
     unique_orientations = np.array([str(x) for x in np.unique(orientation_labels)])
     orientation_labels = np.array([str(x) for x in orientation_labels])
@@ -71,33 +66,31 @@ def perform_lda_analysis(firing_rates, orientation_labels, n_components=None):
     scaler = StandardScaler()
     firing_rates_scaled = scaler.fit_transform(firing_rates)
 
+    # Fit on all data — used only for projection/coefficient visualization,
+    # NOT for any performance metric.
     lda = LinearDiscriminantAnalysis(n_components=n_components)
     lda_transformed = lda.fit_transform(firing_rates_scaled, orientation_labels)
+    lda_full = LinearDiscriminantAnalysis()
+    lda_full.fit(firing_rates_scaled, orientation_labels)
 
     cv_folds = max(2, min(5, int(min_trials)))
     cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=42)
 
-    lda_full = LinearDiscriminantAnalysis()
-    cv_scores = cross_val_score(lda_full, firing_rates_scaled, orientation_labels,
+    cv_scores = cross_val_score(LinearDiscriminantAnalysis(),
+                                firing_rates_scaled, orientation_labels,
                                 cv=cv, scoring='accuracy')
-    cv_results = cross_validate(lda_full, firing_rates_scaled, orientation_labels,
-                                cv=cv, scoring=['accuracy', 'f1_macro'],
-                                return_train_score=True, return_estimator=True)
 
-    lda_full.fit(firing_rates_scaled, orientation_labels)
-    predictions = lda_full.predict(firing_rates_scaled)
-    prediction_proba = lda_full.predict_proba(firing_rates_scaled)
+    # Shuffled-label baseline (same CV folds, permuted labels)
+    shuffled_labels = rng.permutation(orientation_labels)
+    cv_scores_shuffled = cross_val_score(LinearDiscriminantAnalysis(),
+                                         firing_rates_scaled, shuffled_labels,
+                                         cv=cv, scoring='accuracy')
 
-    conf_matrix = confusion_matrix(orientation_labels, predictions,
-                                   labels=unique_orientations)
-    orientation_accuracies = conf_matrix.diagonal() / conf_matrix.sum(axis=1)
     chance_accuracy = 1.0 / n_orientations
-    overall_accuracy = accuracy_score(orientation_labels, predictions)
 
-    print(f"  CV accuracy: {cv_scores.mean():.3f} ± {cv_scores.std():.3f}")
-    print(f"  Overall accuracy: {overall_accuracy:.3f}")
-    print(f"  Chance level: {chance_accuracy:.3f}")
-    print(f"  Above chance: {overall_accuracy - chance_accuracy:+.3f}")
+    print(f"  CV accuracy:    {cv_scores.mean():.3f} ± {cv_scores.std():.3f}")
+    print(f"  Shuffled CV:    {cv_scores_shuffled.mean():.3f} ± {cv_scores_shuffled.std():.3f}")
+    print(f"  Chance level:   {chance_accuracy:.3f}")
 
     return {
         'lda_model': lda,
@@ -106,12 +99,8 @@ def perform_lda_analysis(firing_rates, orientation_labels, n_components=None):
         'transformed_data': lda_transformed,
         'original_data': firing_rates_scaled,
         'orientation_labels': orientation_labels,
-        'predictions': predictions,
-        'prediction_proba': prediction_proba,
         'cv_scores': cv_scores,
-        'cv_results': cv_results,
-        'confusion_matrix': conf_matrix,
-        'orientation_accuracies': orientation_accuracies,
+        'cv_scores_shuffled': cv_scores_shuffled,
         'unique_orientations': unique_orientations,
         'n_components': n_components,
         'chance_accuracy': chance_accuracy,
@@ -124,12 +113,12 @@ def perform_lda_analysis(firing_rates, orientation_labels, n_components=None):
 # =============================================================================
 
 def create_analysis_figure(results, unit_ids, trial_info, save_path=None,
-                           label_suffix='°', is_orientation=True):
-    """Create comprehensive LDA analysis visualization."""
+                           label_suffix='°'):
+    """Create LDA analysis visualization (leakage-free)."""
     plt.style.use('default')
     sns.set_palette("husl")
 
-    fig = plt.figure(figsize=(20, 16))
+    fig = plt.figure(figsize=(26, 14))
 
     transformed = results['transformed_data']
     labels = results['orientation_labels']
@@ -137,30 +126,39 @@ def create_analysis_figure(results, unit_ids, trial_info, save_path=None,
     n_comp = results['n_components']
     colors = plt.cm.hsv(np.linspace(0, 1, len(unique_ori) + 1)[:-1])
 
-    _plot_3d_scatter(fig, transformed, labels, unique_ori, colors, n_comp, label_suffix)
-    _plot_2d_scatter(fig, transformed, labels, unique_ori, colors, n_comp, label_suffix)
-    plot_confusion_matrix(fig, results['confusion_matrix'], unique_ori, label_suffix)
-    plot_cv_scores(fig, results)
-    plot_per_class_accuracy(fig, results, unique_ori, colors, label_suffix)
-
-    if is_orientation:
-        plot_polar_accuracy(fig, results, unique_ori)
-    else:
-        plot_sf_accuracy_bar(fig, results, unique_ori, colors, label_suffix)
-
+    ax3d = _plot_3d_scatter(fig, transformed, labels, unique_ori, colors, n_comp, label_suffix)
+    ax2d = _plot_2d_scatter(fig, transformed, labels, unique_ori, colors, n_comp, label_suffix)
+    plot_cv_scores(fig, results, subplot_pos=(2, 4, 3))
+    ax_td = plot_trial_distribution(fig, trial_info, unique_ori, colors, label_suffix,
+                                    subplot_pos=(2, 4, 4))
     _plot_lda_coefficients(fig, results, unit_ids, unique_ori, label_suffix)
-    plot_trial_distribution(fig, trial_info, unique_ori, colors, label_suffix)
-    plot_summary_text(fig, results, labels, unit_ids, trial_info, label_suffix,
-                      model_params={'LDA components': results['n_components']})
     _plot_feature_importance(fig, results, unit_ids)
-    plot_prediction_confidence(fig, results, labels)
+    plot_summary_text(fig, results, labels, unit_ids, trial_info, label_suffix,
+                      model_params={'LDA components': results['n_components']},
+                      subplot_pos=(2, 4, 8))
 
-    plt.tight_layout()
+    # Strip grids from shared util plots for consistent look
+    if ax_td is not None:
+        ax_td.grid(False)
+
+    # Single shared legend for 3D + 2D scatters, placed between the two panels
+    handles, leg_labels = ax2d.get_legend_handles_labels()
+    if handles:
+        fig.legend(handles, leg_labels,
+                   loc='center', bbox_to_anchor=(0.30, 0.97),
+                   ncol=min(len(handles), 8),
+                   frameon=False, fontsize=16,
+                   handletextpad=0.5, columnspacing=1.4)
+
+    plt.tight_layout(rect=(0, 0, 1, 0.94))
 
     if save_path:
         save_path = Path(save_path)
         save_path.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(save_path, dpi=200, bbox_inches='tight')
+        is_svg = save_path.suffix.lower() == '.svg'
+        fig.savefig(save_path, dpi=300, bbox_inches='tight',
+                    transparent=is_svg,
+                    facecolor='none' if is_svg else 'white')
         print(f"Saved figure to: {save_path}")
 
     return fig
@@ -168,84 +166,119 @@ def create_analysis_figure(results, unit_ids, trial_info, save_path=None,
 
 def _plot_3d_scatter(fig, data, labels, orientations, colors, n_comp, label_suffix='°'):
     """Plot 3D LDA scatter."""
-    ax = fig.add_subplot(3, 4, 1, projection='3d')
+    ax = fig.add_subplot(2, 4, 1, projection='3d')
 
     if n_comp >= 3:
         for i, ori in enumerate(orientations):
             mask = labels == ori
             ax.scatter(data[mask, 0], data[mask, 1], data[mask, 2],
-                       c=[colors[i]], label=f'{ori}{label_suffix}', alpha=0.7, s=30)
-        ax.set_xlabel('LD1')
-        ax.set_ylabel('LD2')
-        ax.set_zlabel('LD3')
-        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=8)
+                       c=[colors[i]], label=f'{ori}{label_suffix}', alpha=0.85, s=70,
+                       edgecolors='none')
+        ax.set_xlabel('LD1', fontsize=20, fontweight='bold', labelpad=10)
+        ax.set_ylabel('LD2', fontsize=20, fontweight='bold', labelpad=10)
+        ax.set_zlabel('LD3', fontsize=20, fontweight='bold', labelpad=10)
     else:
         ax.text(0.5, 0.5, 0.5, 'Need ≥3 components\nfor 3D visualization',
-                ha='center', va='center', transform=ax.transAxes)
+                ha='center', va='center', transform=ax.transAxes, fontsize=16)
 
-    ax.set_title('LDA 3D Projection', fontsize=14, fontweight='bold')
+    ax.set_title('LDA 3D Projection', fontsize=24, fontweight='bold', pad=14)
+    ax.tick_params(axis='both', labelsize=14)
+    from matplotlib.ticker import MaxNLocator
+    ax.xaxis.set_major_locator(MaxNLocator(nbins=4))
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=4))
+    ax.zaxis.set_major_locator(MaxNLocator(nbins=4))
+    ax.grid(False)
+    for pane in (ax.xaxis.pane, ax.yaxis.pane, ax.zaxis.pane):
+        pane.set_edgecolor('lightgray')
+        pane.set_facecolor((1.0, 1.0, 1.0, 0.0))
+    return ax
 
 
 def _plot_2d_scatter(fig, data, labels, orientations, colors, n_comp, label_suffix='°'):
     """Plot 2D LDA scatter or 1D jitter."""
-    ax = fig.add_subplot(3, 4, 2)
+    ax = fig.add_subplot(2, 4, 2)
 
     if n_comp >= 2:
         for i, ori in enumerate(orientations):
             mask = labels == ori
             ax.scatter(data[mask, 0], data[mask, 1],
-                       c=[colors[i]], label=f'{ori}{label_suffix}', alpha=0.7, s=30)
-        ax.set_xlabel('LD1')
-        ax.set_ylabel('LD2')
-        ax.set_title('LDA 2D Projection', fontsize=14, fontweight='bold')
+                       c=[colors[i]], label=f'{ori}{label_suffix}',
+                       alpha=0.85, s=70, edgecolors='none')
+        ax.set_xlabel('LD1', fontsize=22, fontweight='bold')
+        ax.set_ylabel('LD2', fontsize=22, fontweight='bold')
+        ax.set_title('LDA 2D Projection', fontsize=24, fontweight='bold', pad=12)
     else:
         for i, ori in enumerate(orientations):
             mask = labels == ori
             y_jitter = np.random.normal(0, 0.1, np.sum(mask))
             ax.scatter(data[mask, 0], y_jitter,
-                       c=[colors[i]], label=f'{ori}{label_suffix}', alpha=0.7, s=30)
-        ax.set_xlabel('LD1')
-        ax.set_ylabel('Random jitter')
-        ax.set_title('LDA 1D Projection', fontsize=14, fontweight='bold')
+                       c=[colors[i]], label=f'{ori}{label_suffix}',
+                       alpha=0.85, s=70, edgecolors='none')
+        ax.set_xlabel('LD1', fontsize=22, fontweight='bold')
+        ax.set_ylabel('Random jitter', fontsize=22, fontweight='bold')
+        ax.set_title('LDA 1D Projection', fontsize=24, fontweight='bold', pad=12)
 
-    ax.legend(fontsize=8)
-    ax.grid(True, alpha=0.3)
+    ax.grid(False)
+    for spine in ('top', 'right'):
+        ax.spines[spine].set_visible(False)
+    for spine in ('left', 'bottom'):
+        ax.spines[spine].set_linewidth(2.0)
+    ax.tick_params(labelsize=18, width=2.0, length=7)
+    from matplotlib.ticker import MaxNLocator
+    ax.xaxis.set_major_locator(MaxNLocator(nbins=4))
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=4))
+    return ax
 
 
 def _plot_lda_coefficients(fig, results, unit_ids, orientations, label_suffix='°'):
     """Plot LDA coefficient heatmap."""
-    ax = fig.add_subplot(3, 4, (7, 8))
+    ax = fig.add_subplot(2, 4, (5, 6))
 
     if hasattr(results['lda_full'], 'coef_'):
         im = ax.imshow(results['lda_full'].coef_, cmap='RdBu_r', aspect='auto')
-        fig.colorbar(im, ax=ax)
+        cb = fig.colorbar(im, ax=ax)
+        cb.ax.tick_params(labelsize=16, width=1.8, length=6)
 
-        ax.set(ylabel='Discriminant', xlabel='Units',
-               title='LDA Coefficients',
-               yticks=range(len(orientations)),
-               yticklabels=[f'{ori}{label_suffix}' for ori in orientations])
+        ax.set_xlabel('Units', fontsize=22, fontweight='bold')
+        ax.set_ylabel('Discriminant', fontsize=22, fontweight='bold')
+        ax.set_title('LDA Coefficients', fontsize=24, fontweight='bold', pad=12)
+        ax.set_yticks(range(len(orientations)))
+        ax.set_yticklabels([f'{ori}{label_suffix}' for ori in orientations],
+                           fontsize=18)
 
         if len(unit_ids) <= 20:
             ax.set_xticks(range(len(unit_ids)))
             ax.set_xticklabels([uid.split('_')[-1] for uid in unit_ids],
-                               rotation=45, ha='right')
+                               rotation=45, ha='right', fontsize=16)
+        else:
+            ax.tick_params(axis='x', labelsize=16)
+        ax.tick_params(axis='both', width=2.0, length=7)
 
 
 def _plot_feature_importance(fig, results, unit_ids):
     """Plot feature importance based on mean absolute LDA coefficients."""
-    ax = fig.add_subplot(3, 4, 11)
+    ax = fig.add_subplot(2, 4, 7)
 
     if hasattr(results['lda_full'], 'coef_'):
         importance = np.mean(np.abs(results['lda_full'].coef_), axis=0)
         top_idx = np.argsort(importance)[::-1][:15]
 
-        ax.barh(range(len(top_idx)), importance[top_idx], alpha=0.7, color='orange')
-        ax.set(yticks=range(len(top_idx)),
-               yticklabels=[unit_ids[i].split('_')[-1] for i in top_idx],
-               xlabel='Mean |Coefficient|',
-               title='Top Discriminative Units')
+        ax.barh(range(len(top_idx)), importance[top_idx],
+                color='#E69F00', edgecolor='black', linewidth=1.0)
+        ax.set_yticks(range(len(top_idx)))
+        ax.set_yticklabels([unit_ids[i].split('_')[-1] for i in top_idx],
+                           fontsize=16)
+        ax.set_xlabel('Mean |Coefficient|', fontsize=22, fontweight='bold')
+        ax.set_title('Top Discriminative Units', fontsize=24,
+                     fontweight='bold', pad=12)
         ax.invert_yaxis()
-        ax.grid(True, alpha=0.3, axis='x')
+        ax.grid(False)
+        for spine in ('top', 'right'):
+            ax.spines[spine].set_visible(False)
+        for spine in ('left', 'bottom'):
+            ax.spines[spine].set_linewidth(2.0)
+        ax.tick_params(axis='x', labelsize=18, width=2.0, length=7)
+        ax.tick_params(axis='y', width=2.0, length=7)
 
 
 # =============================================================================
@@ -319,7 +352,7 @@ def run_analysis(data_path, time_window=(0.07, 0.16), save_plots=True, output_pa
 
         fig = create_analysis_figure(lda_results, unit_ids, trial_info_sf,
                                      save_path=fig_path)
-        fig.suptitle(f"LDA Analysis — {sf_display}", fontsize=14, y=1.01)
+        fig.suptitle(f"LDA Analysis — {sf_display}", fontsize=26, fontweight='bold', y=1.01)
 
         print(f"\nCalculating orientation selectivity for {sf_display}...")
         calculate_orientation_selectivity(unit_ids, labels_sf, fr_sf)
@@ -365,9 +398,8 @@ def run_analysis(data_path, time_window=(0.07, 0.16), save_plots=True, output_pa
 
             fig = create_analysis_figure(lda_sf, unit_ids, trial_info_ori,
                                          save_path=fig_path,
-                                         label_suffix=' cpd',
-                                         is_orientation=False)
-            fig.suptitle(f"SF Decoding — Orientation={ori}°", fontsize=14, y=1.01)
+                                         label_suffix=' cpd')
+            fig.suptitle(f"SF Decoding — Orientation={ori}°", fontsize=26, fontweight='bold', y=1.01)
 
             all_results.append((lda_sf, fr_ori, sf_ori, unit_ids))
 

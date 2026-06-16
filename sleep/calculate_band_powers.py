@@ -1,26 +1,15 @@
-from pathlib import Path
 import numpy as np
 import pickle
 from scipy import signal
 from sklearn.decomposition import PCA
 
-# === CONFIGURATION ===
-rec_folder = r"D:\cl\ephys\sleep\CnL42SG_20251112_170949.rec"
-session_name = Path(rec_folder).stem.split('.')[0]
-shanks = [0, 1, 2, 3, 4, 5, 6, 7]  # Loop through multiple shanks
-
-# === BAND DEFINITIONS ===
-band_params = {
-    'bands': {
-        'delta': (0.5, 4),
-        'theta': (5, 10),
-        'sigma': (9, 25),
-        'gamma': (40, 100),
-        # (num_low, num_high, den_low, den_high)
-        'theta_ratio': (5, 10, 2, 15),
-    },
-    'smoothing_window': 10,  # seconds for band power smoothing
-}
+from sleep_params import (
+    rec_folder,
+    session_name,
+    shanks,
+    low_freq_folder,
+    band_params,
+)
 
 # === DEFINE FILTERING FUNCTIONS ===
 
@@ -44,7 +33,6 @@ def compute_band_power(trace, fs, low, high, window_sec=10):
 
 
 # === PROCESS ALL SHANKS ===
-low_freq_folder = Path(rec_folder) / "low_freq"
 print(f"Processing data from: {low_freq_folder}")
 
 all_shanks_data = {}

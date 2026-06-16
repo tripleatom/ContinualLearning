@@ -187,7 +187,7 @@ def show_vstim_fraction(trial_start, trial_end, fs, task_start_sample, task_end_
 
 
 if __name__ == '__main__':
-    from params import rec_folder, task_file, sortout_folder, din_channel, task_start, task_end
+    from DiscriminationTask.grating.task_params import rec_folder, task_file, sortout_folder, din_channel, task_start, task_end
 
     # Load DIO trial timestamps
     dio_folders = DIO.get_dio_folders(rec_folder)

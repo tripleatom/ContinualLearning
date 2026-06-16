@@ -63,6 +63,36 @@ def balance_by_undersampling(X, y, rng, bin_centers=None):
     return X[sel], y[sel]
 
 
+def balance_by_class_group_undersampling(X, y, groups, rng):
+    """Undersample every (class, group) cell to the size of the smallest
+    non-empty cell. Decouples the class signal from the group signal in
+    the training set (used by the merged-CV runner to prevent the decoder
+    from cheating via task-vs-passive base-rate differences).
+
+    Empty cells stay empty. Returns (X_balanced, y_balanced, groups_balanced).
+    """
+    classes = np.unique(y)
+    gs      = np.unique(groups)
+    cell_counts = []
+    for c in classes:
+        for g in gs:
+            n = int(np.sum((y == c) & (groups == g)))
+            if n > 0:
+                cell_counts.append(n)
+    if not cell_counts:
+        raise ValueError("All (class, group) cells are empty.")
+    min_cell = min(cell_counts)
+    picks = []
+    for c in classes:
+        for g in gs:
+            idx = np.where((y == c) & (groups == g))[0]
+            if len(idx) == 0:
+                continue
+            picks.append(rng.choice(idx, size=min_cell, replace=False))
+    sel = np.sort(np.concatenate(picks))
+    return X[sel], y[sel], groups[sel]
+
+
 # ------------------------------------------------------------------ #
 #  Classifiers                                                         #
 # ------------------------------------------------------------------ #
@@ -225,6 +255,119 @@ def run_cv_balanced_train(name, clf_proto, X, y, n_splits, random_state):
     per_class_stds  = {c: float(np.nanstd(per_class_fold[c]))  for c in classes}
 
     return fold_accs, float(np.mean(fold_accs)), chance, per_class_means, per_class_stds
+
+
+def run_cv_balanced_train_grouped(name, clf_proto, X, y, groups, n_splits, random_state):
+    """Stratified k-fold CV for a multi-group dataset (e.g. task + passive
+    merged). Each training fold is undersampled to balance every
+    (class x group) cell to the smallest non-empty cell, which keeps the
+    decoder from cheating via class/group correlation. The held-out test
+    fold stays at natural ratio, and test-set accuracy is also split by
+    `groups` (e.g., 0=task, 1=passive).
+
+    Returns
+    -------
+    mean_acc        : float                            overall mean across folds
+    per_class       : dict {class: float}              mean per-fold recall
+    group_means     : dict {group: float}              mean per-fold acc, per group
+    group_per_class : dict {group: {class: float}}     per-fold recall, per group
+    """
+    classes = sorted(int(c) for c in np.unique(y))
+    group_ids = sorted(int(g) for g in np.unique(groups))
+    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
+    rng = np.random.default_rng(random_state)
+
+    fold_accs = []
+    per_class_fold = {c: [] for c in classes}
+    g_fold_accs = {g: [] for g in group_ids}
+    g_per_class_fold = {g: {c: [] for c in classes} for g in group_ids}
+
+    use_aode = (name == 'AODE')
+    X_use = binarize(X).astype(np.float64) if use_aode else X
+    str_to_int = {str(c): c for c in classes}
+
+    for train_idx, test_idx in skf.split(X_use, y):
+        X_tr_full, y_tr_full = X_use[train_idx], y[train_idx]
+        g_tr_full            = groups[train_idx]
+        X_te, y_te = X_use[test_idx], y[test_idx]
+        g_te = groups[test_idx]
+
+        X_tr, y_tr, _ = balance_by_class_group_undersampling(
+            X_tr_full, y_tr_full, g_tr_full, rng,
+        )
+
+        if use_aode:
+            tevents = {str(c): X_tr[y_tr == c][:, :, np.newaxis] for c in classes}
+            prior_probs = {str(c): float(np.mean(y_tr == c)) for c in classes}
+            clf = AODEClassifier()
+            clf.train(tevents)
+            preds = np.array([str_to_int[p] for p in clf.predict(X_te, prior_probs)])
+        else:
+            clf = clone(clf_proto)
+            clf.fit(X_tr, y_tr)
+            preds = clf.predict(X_te)
+
+        fold_accs.append(float(np.mean(preds == y_te)))
+        for c in classes:
+            mask = y_te == c
+            per_class_fold[c].append(
+                float(np.mean(preds[mask] == c)) if mask.any() else np.nan)
+
+        for g in group_ids:
+            gmask = g_te == g
+            g_fold_accs[g].append(
+                float(np.mean(preds[gmask] == y_te[gmask])) if gmask.any() else np.nan)
+            for c in classes:
+                gcmask = gmask & (y_te == c)
+                g_per_class_fold[g][c].append(
+                    float(np.mean(preds[gcmask] == c)) if gcmask.any() else np.nan)
+
+    return (
+        float(np.mean(fold_accs)),
+        {c: float(np.nanmean(per_class_fold[c])) for c in classes},
+        {g: float(np.nanmean(g_fold_accs[g])) for g in group_ids},
+        {g: {c: float(np.nanmean(g_per_class_fold[g][c])) for c in classes}
+         for g in group_ids},
+    )
+
+
+def run_cv_balanced_train_shuffle_grouped(name, clf_proto, X, y, groups, n_splits,
+                                           random_state, n_shuffles=10):
+    """Permutation null for run_cv_balanced_train_grouped.
+
+    Permutes y globally each shuffle (groups stay fixed since they encode the
+    real recording context). Runs the full grouped CV pipeline n_shuffles
+    times and returns null distribution statistics for both the overall
+    accuracy and per-group accuracy.
+
+    Returns
+    -------
+    shuf_mean        : float           mean overall null accuracy
+    shuf_std         : float           std overall null accuracy
+    group_shuf_means : dict {g: float}
+    group_shuf_stds  : dict {g: float}
+    """
+    group_ids = sorted(int(g) for g in np.unique(groups))
+    rng = np.random.default_rng(random_state + 99999)
+
+    all_means = []
+    g_all_means = {g: [] for g in group_ids}
+
+    for i in range(n_shuffles):
+        y_shuf = rng.permutation(y)
+        mean, _, g_means, _ = run_cv_balanced_train_grouped(
+            name, clf_proto, X, y_shuf, groups, n_splits, random_state + i,
+        )
+        all_means.append(mean)
+        for g in group_ids:
+            g_all_means[g].append(g_means[g])
+
+    return (
+        float(np.mean(all_means)),
+        float(np.std(all_means)),
+        {g: float(np.mean(g_all_means[g])) for g in group_ids},
+        {g: float(np.std(g_all_means[g])) for g in group_ids},
+    )
 
 
 def run_cv_balanced_train_shuffle(name, clf_proto, X, y, n_splits, random_state, n_shuffles=10):

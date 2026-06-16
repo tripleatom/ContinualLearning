@@ -320,6 +320,181 @@ def calculate_orientation_selectivity(unit_ids, orientation_labels, firing_rates
     }
 
 
+def tuning_curve_from_psth(tuning, window=(0.05, 0.5)):
+    """
+    Recompute an orientation tuning curve (and its metrics) from a unit's stored
+    PSTHs, averaging firing rate over a post-stimulus time window.
+
+    This is the single shared definition used by the matched-unit plotting
+    scripts (plot_matched_unit_tuning_tracks.py, plot_unit_overlay_across_time.py)
+    so they draw identical curves. It operates on the per-unit ``tuning`` dict
+    saved inside each ``*_tuning.pkl`` (keys ``psth_per_ori`` / ``psth_t``, with
+    ``orientations`` / ``mean_rates`` as a fallback). The metric formulas (OSI,
+    preferred orientation, modulation index, baseline) match
+    GratingTuningCurve.calculate_tuning_curves, but evaluated over ``window``.
+
+    Note: ``psth_per_ori`` is a trial-averaged trace, so per-trial SEM cannot be
+    reconstructed here. For a window-matched SEM, compute the curve directly from
+    per-trial spike times with ``tuning_curve_from_spikes`` (fed by the per-day
+    merged grating pickle), which is what the matched-unit row plot uses.
+
+    Parameters
+    ----------
+    tuning : dict
+        Per-unit tuning dict from a ``*_tuning.pkl``.
+    window : (float, float)
+        (start, end) seconds relative to stimulus onset. Bins with
+        ``start <= t < end`` are averaged.
+
+    Returns
+    -------
+    dict with keys: orientations, mean_rates (np.ndarray), osi,
+    preferred_orientation_deg, modulation_index, max_rate, min_rate,
+    baseline_rate, window. Falls back to the pickle's precomputed values if no
+    usable PSTHs are present.
+    """
+    time = np.asarray(tuning.get('psth_t', []), dtype=float)
+    psth_per_ori = tuning.get('psth_per_ori', {})
+
+    orientations, mean_rates = [], []
+    if time.size and psth_per_ori:
+        start, end = window
+        mask = (time >= start) & (time < end)
+        if mask.any():
+            for ori, psth in psth_per_ori.items():
+                values = np.asarray(psth, dtype=float)
+                if values.size != time.size:
+                    continue
+                orientations.append(float(ori))
+                mean_rates.append(float(np.nanmean(values[mask])))
+
+    if not orientations:
+        # Fallback: precomputed curve/metrics straight from the pickle.
+        return {
+            'orientations': np.asarray(tuning.get('orientations', []), dtype=float),
+            'mean_rates': np.asarray(tuning.get('mean_rates', []), dtype=float),
+            'osi': tuning.get('osi', np.nan),
+            'preferred_orientation_deg': tuning.get('preferred_orientation_deg', np.nan),
+            'modulation_index': tuning.get('modulation_index', np.nan),
+            'max_rate': tuning.get('max_rate', np.nan),
+            'min_rate': tuning.get('min_rate', np.nan),
+            'baseline_rate': tuning.get('baseline_rate', np.nan),
+            'window': tuple(window),
+        }
+
+    order = np.argsort(orientations)
+    orientations = np.asarray(orientations)[order]
+    mean_rates = np.asarray(mean_rates)[order]
+
+    # Metrics — same formulas as GratingTuningCurve.calculate_tuning_curves.
+    theta_rad = 2 * np.deg2rad(orientations)
+    complex_sum = np.sum(mean_rates * np.exp(1j * theta_rad))
+    osi = float(np.abs(complex_sum) / (np.sum(mean_rates) + 1e-12))
+    preferred_ori_deg = float(np.rad2deg((np.angle(complex_sum) / 2.0) % np.pi))
+    max_rate = float(np.max(mean_rates))
+    min_rate = float(np.min(mean_rates))
+    modulation_index = float((max_rate - min_rate) / (max_rate + min_rate + 1e-12))
+    baseline_rate = float(np.mean(mean_rates))
+
+    return {
+        'orientations': orientations,
+        'mean_rates': mean_rates,
+        'osi': osi,
+        'preferred_orientation_deg': preferred_ori_deg,
+        'modulation_index': modulation_index,
+        'max_rate': max_rate,
+        'min_rate': min_rate,
+        'baseline_rate': baseline_rate,
+        'window': tuple(window),
+    }
+
+
+def tuning_curve_from_spikes(ori_spikes, window=(0.05, 0.5)):
+    """
+    Compute an orientation tuning curve (with window-matched SEM) directly from
+    per-trial spike times.
+
+    Unlike ``tuning_curve_from_psth`` (which works off the trial-averaged PSTH and
+    therefore cannot recover per-trial variability), this takes the raw per-trial
+    spike-time arrays — e.g. from the per-day merged grating pickle
+    (``spike_data[unit_key]`` -> trials with ``spike_times``) — so the mean rate
+    and its SEM are computed over the *same* window. The per-orientation firing
+    rate per trial is ``(# spikes in [start, end)) / (end - start)``, matching
+    GratingTuningCurve.calculate_tuning_curves; the metric formulas (OSI,
+    preferred orientation, modulation index, baseline) are identical too.
+
+    Parameters
+    ----------
+    ori_spikes : dict[float, list[np.ndarray]]
+        Orientation (deg) -> list of spike-time arrays (s, relative to stim onset),
+        one array per trial.
+    window : (float, float)
+        (start, end) seconds relative to stimulus onset.
+
+    Returns
+    -------
+    dict with keys: orientations, mean_rates, sem_rates (np.ndarray), osi,
+    preferred_orientation_deg, modulation_index, max_rate, min_rate,
+    baseline_rate, n_trials (per orientation), window.
+    """
+    start, end = window
+    duration = float(end - start)
+
+    orientations, mean_rates, sem_rates, n_trials = [], [], [], []
+    for ori in sorted(ori_spikes):
+        trials = ori_spikes[ori]
+        if not trials:
+            continue
+        rates = np.array(
+            [np.sum((s >= start) & (s < end)) / duration for s in
+             (np.asarray(t, dtype=float) for t in trials)],
+            dtype=float,
+        )
+        n = rates.size
+        orientations.append(float(ori))
+        mean_rates.append(float(np.mean(rates)))
+        sem_rates.append(float(np.std(rates, ddof=1) / np.sqrt(n)) if n > 1 else 0.0)
+        n_trials.append(int(n))
+
+    orientations = np.asarray(orientations, dtype=float)
+    mean_rates = np.asarray(mean_rates, dtype=float)
+    sem_rates = np.asarray(sem_rates, dtype=float)
+
+    if orientations.size == 0:
+        nan = float('nan')
+        return {
+            'orientations': orientations, 'mean_rates': mean_rates,
+            'sem_rates': sem_rates, 'osi': nan, 'preferred_orientation_deg': nan,
+            'modulation_index': nan, 'max_rate': nan, 'min_rate': nan,
+            'baseline_rate': nan, 'n_trials': np.asarray(n_trials, dtype=int),
+            'window': tuple(window),
+        }
+
+    # Metrics — same formulas as GratingTuningCurve.calculate_tuning_curves.
+    theta_rad = 2 * np.deg2rad(orientations)
+    complex_sum = np.sum(mean_rates * np.exp(1j * theta_rad))
+    osi = float(np.abs(complex_sum) / (np.sum(mean_rates) + 1e-12))
+    preferred_ori_deg = float(np.rad2deg((np.angle(complex_sum) / 2.0) % np.pi))
+    max_rate = float(np.max(mean_rates))
+    min_rate = float(np.min(mean_rates))
+    modulation_index = float((max_rate - min_rate) / (max_rate + min_rate + 1e-12))
+    baseline_rate = float(np.mean(mean_rates))
+
+    return {
+        'orientations': orientations,
+        'mean_rates': mean_rates,
+        'sem_rates': sem_rates,
+        'osi': osi,
+        'preferred_orientation_deg': preferred_ori_deg,
+        'modulation_index': modulation_index,
+        'max_rate': max_rate,
+        'min_rate': min_rate,
+        'baseline_rate': baseline_rate,
+        'n_trials': np.asarray(n_trials, dtype=int),
+        'window': tuple(window),
+    }
+
+
 # =============================================================================
 # SHARED VISUALIZATION HELPERS
 # =============================================================================
@@ -329,44 +504,95 @@ def plot_confusion_matrix(fig, conf_matrix, orientations, label_suffix='°', sub
     ax = fig.add_subplot(*subplot_pos)
 
     im = ax.imshow(conf_matrix, interpolation='nearest', cmap='Blues')
-    fig.colorbar(im, ax=ax)
+    cb = fig.colorbar(im, ax=ax)
+    cb.ax.tick_params(labelsize=16)
 
     tick_labels = [f'{ori}{label_suffix}' for ori in orientations]
-    ax.set(xticks=np.arange(len(tick_labels)), yticks=np.arange(len(tick_labels)),
-           xticklabels=tick_labels, yticklabels=tick_labels,
-           title='Confusion Matrix', ylabel='True', xlabel='Predicted')
+    ax.set_xticks(np.arange(len(tick_labels)))
+    ax.set_yticks(np.arange(len(tick_labels)))
+    ax.set_xticklabels(tick_labels, fontsize=16)
+    ax.set_yticklabels(tick_labels, fontsize=16)
+    ax.set_title('Confusion Matrix', fontsize=24, fontweight='bold', pad=12)
+    ax.set_ylabel('True', fontsize=22, fontweight='bold')
+    ax.set_xlabel('Predicted', fontsize=22, fontweight='bold')
 
     thresh = conf_matrix.max() / 2
     for i in range(conf_matrix.shape[0]):
         for j in range(conf_matrix.shape[1]):
             color = 'white' if conf_matrix[i, j] > thresh else 'black'
             ax.text(j, i, int(conf_matrix[i, j]), ha='center', va='center',
-                    color=color, fontsize=10)
+                    color=color, fontsize=14, fontweight='bold')
 
     plt.setp(ax.get_xticklabels(), rotation=45, ha='right')
     return ax
 
 
 def plot_cv_scores(fig, results, subplot_pos=(3, 4, 4)):
-    """Plot cross-validation accuracy scores."""
+    """
+    Plot CV accuracy as two bars: real CV score vs. shuffled-label baseline.
+    Error bars are the std across CV folds.
+
+    Falls back to per-fold bars if 'cv_scores_shuffled' is absent.
+    """
     ax = fig.add_subplot(*subplot_pos)
 
     scores = results['cv_scores']
-    bars = ax.bar(range(len(scores)), scores, alpha=0.7, color='skyblue')
-    ax.axhline(scores.mean(), color='red', linestyle='--',
+
+    if 'cv_scores_shuffled' in results:
+        shuffled = results['cv_scores_shuffled']
+        means = np.array([scores.mean(), shuffled.mean()])
+        stds = np.array([scores.std(), shuffled.std()])
+        bar_labels = ['CV', 'Shuffled']
+        bar_colors = ['#4C72B0', '#BBBBBB']
+
+        bars = ax.bar(bar_labels, means, yerr=stds, color=bar_colors,
+                      width=0.55, capsize=10, edgecolor='black', linewidth=1.8,
+                      error_kw={'elinewidth': 2.5, 'ecolor': 'black'})
+        ax.axhline(results['chance_accuracy'], color='black', linestyle='--',
+                   linewidth=2.0,
+                   label=f'Chance ({results["chance_accuracy"]:.3f})')
+
+        y_top = float(min(1.15, max(1.0, (means + stds).max() + 0.18)))
+        ax.set_ylim(0, y_top)
+        ax.set_ylabel('Decoding accuracy', fontsize=22, fontweight='bold')
+        ax.set_title('Cross-validation', fontsize=24, fontweight='bold', pad=12)
+        ax.tick_params(axis='both', labelsize=18, length=7, width=2.0)
+        ax.tick_params(axis='x', length=0)
+
+        for spine in ('top', 'right'):
+            ax.spines[spine].set_visible(False)
+        for spine in ('left', 'bottom'):
+            ax.spines[spine].set_linewidth(2.0)
+
+        ax.legend(frameon=False, fontsize=16, loc='upper right')
+
+        for bar, m, s in zip(bars, means, stds):
+            ax.text(bar.get_x() + bar.get_width() / 2,
+                    min(m + s + 0.025, y_top - 0.02),
+                    f'{m:.3f} ± {s:.3f}',
+                    ha='center', va='bottom', fontsize=16, fontweight='bold')
+        return ax
+
+    bars = ax.bar(range(len(scores)), scores, alpha=0.75, color='skyblue',
+                  edgecolor='black', linewidth=1.5)
+    ax.axhline(scores.mean(), color='red', linestyle='--', linewidth=2.0,
                label=f'Mean: {scores.mean():.3f}')
     ax.axhline(results['chance_accuracy'], color='gray', linestyle=':',
+               linewidth=2.0,
                label=f'Chance: {results["chance_accuracy"]:.3f}')
 
-    ax.set(xlabel='CV Fold', ylabel='Accuracy', ylim=[0, 1],
-           title='Cross-Validation Scores')
-    ax.legend(fontsize=10)
+    ax.set_xlabel('CV Fold', fontsize=22, fontweight='bold')
+    ax.set_ylabel('Accuracy', fontsize=22, fontweight='bold')
+    ax.set_ylim(0, 1)
+    ax.set_title('Cross-Validation Scores', fontsize=24, fontweight='bold', pad=12)
+    ax.tick_params(axis='both', labelsize=18, width=2.0, length=7)
+    ax.legend(fontsize=16, frameon=False)
     ax.grid(True, alpha=0.3)
 
     for bar in bars:
         h = bar.get_height()
         ax.text(bar.get_x() + bar.get_width() / 2, h + 0.01, f'{h:.3f}',
-                ha='center', va='bottom', fontsize=8)
+                ha='center', va='bottom', fontsize=14, fontweight='bold')
     return ax
 
 
@@ -376,20 +602,26 @@ def plot_per_class_accuracy(fig, results, orientations, colors, label_suffix='°
     ax = fig.add_subplot(*subplot_pos)
 
     accuracies = results['orientation_accuracies']
-    bars = ax.bar(range(len(accuracies)), accuracies, color=colors, alpha=0.7)
-    ax.axhline(results['chance_accuracy'], color='gray', linestyle=':', label='Chance')
+    bars = ax.bar(range(len(accuracies)), accuracies, color=colors, alpha=0.8,
+                  edgecolor='black', linewidth=1.2)
+    ax.axhline(results['chance_accuracy'], color='gray', linestyle=':',
+               linewidth=2.0, label='Chance')
 
-    ax.set(xlabel='Class', ylabel='Accuracy', ylim=[0, 1],
-           title='Per-Class Accuracy',
-           xticks=range(len(orientations)),
-           xticklabels=[f'{ori}{label_suffix}' for ori in orientations])
-    ax.legend()
+    ax.set_xlabel('Class', fontsize=22, fontweight='bold')
+    ax.set_ylabel('Accuracy', fontsize=22, fontweight='bold')
+    ax.set_ylim(0, 1)
+    ax.set_title('Per-Class Accuracy', fontsize=24, fontweight='bold', pad=12)
+    ax.set_xticks(range(len(orientations)))
+    ax.set_xticklabels([f'{ori}{label_suffix}' for ori in orientations],
+                       fontsize=16)
+    ax.tick_params(axis='both', labelsize=18, width=2.0, length=7)
+    ax.legend(fontsize=16, frameon=False)
     ax.grid(True, alpha=0.3, axis='y')
 
     for bar in bars:
         h = bar.get_height()
-        ax.text(bar.get_x() + bar.get_width() / 2, h + 0.01, f'{h:.3f}',
-                ha='center', va='bottom', fontsize=8)
+        ax.text(bar.get_x() + bar.get_width() / 2, h + 0.01, f'{h:.2f}',
+                ha='center', va='bottom', fontsize=14, fontweight='bold')
 
     plt.setp(ax.get_xticklabels(), rotation=45, ha='right')
     return ax
@@ -402,12 +634,18 @@ def plot_polar_accuracy(fig, results, orientations, subplot_pos=(3, 4, 6)):
     theta = 2 * np.deg2rad(np.array(orientations, dtype=float))
     accuracies = results['orientation_accuracies']
 
-    ax.plot(theta, accuracies, 'o-', linewidth=2, markersize=8)
-    ax.fill(theta, accuracies, alpha=0.25)
-    ax.set(ylim=[0, 1], title='Polar Decoding Accuracy')
+    ax.plot(theta, accuracies, 'o-', linewidth=4.0, markersize=14,
+            color='#2E86AB')
+    ax.fill(theta, accuracies, alpha=0.25, color='#2E86AB')
+    ax.set_ylim(0, 1)
+    ax.set_title('Polar Decoding Accuracy', fontsize=24,
+                 fontweight='bold', pad=14)
     ax.set_thetagrids(np.arange(0, 360, 45),
-                      [f'{int(a / 2)}°' for a in np.arange(0, 360, 45)])
-    ax.grid(True)
+                      [f'{a / 2:g}°' for a in np.arange(0, 360, 45)],
+                      fontsize=18)
+    ax.set_yticklabels([])
+    ax.tick_params(axis='x', pad=12)
+    ax.grid(True, linewidth=1.6, alpha=0.5)
     return ax
 
 
@@ -417,21 +655,27 @@ def plot_sf_accuracy_bar(fig, results, sfs, colors, label_suffix=' cpd',
     ax = fig.add_subplot(*subplot_pos)
 
     accuracies = results['orientation_accuracies']
-    bars = ax.bar(range(len(accuracies)), accuracies, color=colors, alpha=0.7)
+    bars = ax.bar(range(len(accuracies)), accuracies, color=colors, alpha=0.8,
+                  edgecolor='black', linewidth=1.2)
     ax.axhline(results['chance_accuracy'], color='gray', linestyle=':',
+               linewidth=2.0,
                label=f'Chance: {results["chance_accuracy"]:.3f}')
 
-    ax.set(xlabel='Spatial Frequency', ylabel='Accuracy', ylim=[0, 1],
-           title='Per-SF Decoding Accuracy',
-           xticks=range(len(sfs)),
-           xticklabels=[f'{sf}{label_suffix}' for sf in sfs])
-    ax.legend(fontsize=9)
+    ax.set_xlabel('Spatial Frequency', fontsize=22, fontweight='bold')
+    ax.set_ylabel('Accuracy', fontsize=22, fontweight='bold')
+    ax.set_ylim(0, 1)
+    ax.set_title('Per-SF Decoding Accuracy', fontsize=24,
+                 fontweight='bold', pad=12)
+    ax.set_xticks(range(len(sfs)))
+    ax.set_xticklabels([f'{sf}{label_suffix}' for sf in sfs], fontsize=16)
+    ax.tick_params(axis='both', labelsize=18, width=2.0, length=7)
+    ax.legend(fontsize=16, frameon=False)
     ax.grid(True, alpha=0.3, axis='y')
 
     for bar in bars:
         h = bar.get_height()
-        ax.text(bar.get_x() + bar.get_width() / 2, h + 0.01, f'{h:.3f}',
-                ha='center', va='bottom', fontsize=8)
+        ax.text(bar.get_x() + bar.get_width() / 2, h + 0.01, f'{h:.2f}',
+                ha='center', va='bottom', fontsize=14, fontweight='bold')
     return ax
 
 
@@ -441,18 +685,26 @@ def plot_trial_distribution(fig, trial_info, orientations, colors, label_suffix=
     ax = fig.add_subplot(*subplot_pos)
 
     counts = [trial_info['n_trials_per_orientation'][str(ori)] for ori in orientations]
-    bars = ax.bar(range(len(counts)), counts, color=colors, alpha=0.7)
+    bars = ax.bar(range(len(counts)), counts, color=colors, alpha=0.8,
+                  edgecolor='black', linewidth=1.2)
 
-    ax.set(xlabel='Class', ylabel='Number of Trials',
-           title='Trial Distribution',
-           xticks=range(len(orientations)),
-           xticklabels=[f'{ori}{label_suffix}' for ori in orientations])
+    ax.set_xlabel('Class', fontsize=22, fontweight='bold')
+    ax.set_ylabel('Number of Trials', fontsize=22, fontweight='bold')
+    ax.set_title('Trial Distribution', fontsize=24, fontweight='bold', pad=12)
+    ax.set_xticks(range(len(orientations)))
+    ax.set_xticklabels([f'{ori}{label_suffix}' for ori in orientations],
+                       fontsize=16)
+    ax.tick_params(axis='both', labelsize=18, width=2.0, length=7)
+    for spine in ('top', 'right'):
+        ax.spines[spine].set_visible(False)
+    for spine in ('left', 'bottom'):
+        ax.spines[spine].set_linewidth(2.0)
     ax.grid(True, alpha=0.3, axis='y')
 
     for bar in bars:
         h = bar.get_height()
         ax.text(bar.get_x() + bar.get_width() / 2, h + 0.5, int(h),
-                ha='center', va='bottom', fontsize=10)
+                ha='center', va='bottom', fontsize=14, fontweight='bold')
 
     plt.setp(ax.get_xticklabels(), rotation=45, ha='right')
     return ax
@@ -478,12 +730,25 @@ def plot_summary_text(fig, results, labels, unit_ids, trial_info, label_suffix='
         for k, v in model_params.items():
             extra_lines += f'\n    • {k}: {v}'
 
+    # Training-set accuracy is leakage; only show it if predictions are provided
+    # (legacy behavior). Prefer CV-based metrics.
+    overall_line = ''
+    if 'predictions' in results:
+        overall_line = (
+            f"Overall Accuracy (train): "
+            f"{accuracy_score(labels, results['predictions']):.3f}\n    "
+        )
+
+    shuffled_line = ''
+    if 'cv_scores_shuffled' in results:
+        s = results['cv_scores_shuffled']
+        shuffled_line = f"Shuffled CV: {s.mean():.3f} ± {s.std():.3f}\n    "
+
     summary = f"""
     Classification Summary
 
-    Overall Accuracy: {accuracy_score(labels, results['predictions']):.3f}
-    CV Accuracy: {results['cv_scores'].mean():.3f} ± {results['cv_scores'].std():.3f}
-    Chance Level: {results['chance_accuracy']:.3f}
+    {overall_line}CV Accuracy: {results['cv_scores'].mean():.3f} ± {results['cv_scores'].std():.3f}
+    {shuffled_line}Chance Level: {results['chance_accuracy']:.3f}
 {extra_lines}
     Experiment Info:
     • Total trials: {len(labels)}
@@ -493,9 +758,11 @@ def plot_summary_text(fig, results, labels, unit_ids, trial_info, label_suffix='
     • ITI duration: {exp_params.get('iti_duration', 'N/A')}s
     """
 
-    ax.text(0.05, 0.95, summary, transform=ax.transAxes, fontsize=10,
+    ax.text(0.02, 0.98, summary, transform=ax.transAxes, fontsize=16,
             verticalalignment='top', fontfamily='monospace',
-            bbox=dict(boxstyle='round', facecolor='lightgray', alpha=0.8))
+            fontweight='bold',
+            bbox=dict(boxstyle='round,pad=0.6', facecolor='lightgray',
+                      alpha=0.8))
     return ax
 
 
@@ -511,10 +778,15 @@ def plot_prediction_confidence(fig, results, labels, subplot_pos=(3, 4, 12)):
             return
         ax.hist(data, bins=20, range=(0, 1), **kwargs)
 
-    _safe_hist(ax, confidence[correct],  alpha=0.7, label='Correct',   color='green', density=True)
-    _safe_hist(ax, confidence[~correct], alpha=0.7, label='Incorrect', color='red',   density=True)
+    _safe_hist(ax, confidence[correct],  alpha=0.7, label='Correct',
+               color='green', density=True, edgecolor='black', linewidth=1.0)
+    _safe_hist(ax, confidence[~correct], alpha=0.7, label='Incorrect',
+               color='red',   density=True, edgecolor='black', linewidth=1.0)
 
-    ax.set(xlabel='Prediction Confidence', ylabel='Density',
-           title='Prediction Confidence Distribution')
-    ax.legend()
+    ax.set_xlabel('Prediction Confidence', fontsize=22, fontweight='bold')
+    ax.set_ylabel('Density', fontsize=22, fontweight='bold')
+    ax.set_title('Prediction Confidence Distribution', fontsize=24,
+                 fontweight='bold', pad=12)
+    ax.tick_params(axis='both', labelsize=18, width=2.0, length=7)
+    ax.legend(fontsize=16, frameon=False)
     return ax

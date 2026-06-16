@@ -3,10 +3,10 @@ Cue-preference analysis on a discrimination-task PKL produced by
 DiscriminationTask/grating/readDIO_grating.py.
 
 Pipeline:
-  1. Build X[cell, trial, bin] with edges (-1, 0, 0.5, 1) s:
-     bin 0 = baseline (-1..0), bins 1-2 = two 500-ms response bins (0..1).
-     Counts are converted to firing rates (Hz) inside the test so unequal-width
-     bins are comparable on the same Hz scale.
+  1. Build X[cell, trial, bin] with edges (-1, 0, 1, 2) s:
+     bin 0 = baseline (-1..0), bins 1-2 = two 1-s response bins (0..1, 1..2).
+     Counts are converted to firing rates (Hz) inside the test (here all bins
+     are 1 s wide, so this is a no-op, but the code stays width-aware).
   2. Wilcoxon signed-rank (two-sided) per cell x cue x response-bin vs paired
      baseline; Bonferroni alpha = 0.01 / (n_cells * n_cues * 2).
   3. Preferred cue = (cue, bin) of largest mean delta-rate among significant.
@@ -73,7 +73,7 @@ def get_cue_labels(data, mode='left_stim'):
 
     if mode == 'left_stim':
         vals = [(t['left_orientation'], t['left_spatial_freq']) for t in trials]
-        fmt = lambda v: f"L: ori={v[0]:g}°, sf={v[1]:g} cpd"
+        fmt = lambda v: f"ori={v[0]:g}°, sf={v[1]:g} cpd"
     elif mode == 'right_stim':
         vals = [(t['right_orientation'], t['right_spatial_freq']) for t in trials]
         fmt = lambda v: f"R: ori={v[0]:g}°, sf={v[1]:g} cpd"
@@ -331,9 +331,31 @@ def plot_heatmap(psth, cues, unique_cues, centers,
         raise ValueError(f"Unknown zscore mode: {zscore}")
 
     vmax = np.nanpercentile(np.abs(z), 99)
+
+    # use true bin edges for extent so the image fills [t_start, t_stop] cleanly
+    bin_w = float(centers[1] - centers[0]) if len(centers) > 1 else 0.0
+    t_lo = float(centers[0] - bin_w / 2)
+    t_hi = float(centers[-1] + bin_w / 2)
+
+    plt.rcParams.update({
+        'font.family': 'Arial',
+        'font.size': 11,
+        'axes.labelsize': 12,
+        'axes.titlesize': 12,
+        'xtick.labelsize': 10,
+        'ytick.labelsize': 10,
+        'axes.linewidth': 0.8,
+        'xtick.major.width': 0.8,
+        'ytick.major.width': 0.8,
+        'xtick.direction': 'out',
+        'ytick.direction': 'out',
+        'pdf.fonttype': 42,
+        'ps.fonttype': 42,
+    })
+
     fig, axes = plt.subplots(1, n_cues, sharey=True,
-                             figsize=(3.0 * n_cues + 1.5, 8),
-                             gridspec_kw={'wspace': 0.05})
+                             figsize=(1.8 * n_cues + 1.6, 6.5),
+                             gridspec_kw={'wspace': 0.06})
     if n_cues == 1:
         axes = [axes]
 
@@ -351,39 +373,99 @@ def plot_heatmap(psth, cues, unique_cues, centers,
         if flip.size:
             sign_divider = int(flip[0]) + 1
 
-    extent = [centers[0], centers[-1], n_cells, 0]
+    # per-cue color palette (cue 0 = green, cue 1 = blue; black fallback)
+    cue_palette = ['#1b7a3b', '#2166ac']
+    def _cue_color(i):
+        return cue_palette[i] if i < len(cue_palette) else 'black'
+
+    extent = [t_lo, t_hi, n_cells, 0]
     for ci, ax in enumerate(axes):
         im = ax.imshow(z[:, ci, :], aspect='auto', cmap=cmap,
-                       vmin=-vmax, vmax=vmax, extent=extent)
+                       vmin=-vmax, vmax=vmax, extent=extent,
+                       interpolation='nearest', rasterized=True)
         if cue_on is not None:
-            ax.axvline(cue_on, color='k', lw=0.7, ls='--')
+            ax.axvline(cue_on, color='k', lw=0.6, ls='--', alpha=0.7)
         if cue_off is not None:
-            ax.axvline(cue_off, color='k', lw=0.7, ls='--')
+            ax.axvline(cue_off, color='k', lw=0.6, ls='--', alpha=0.7)
         for d in pref_dividers:
-            ax.axhline(d, color='k', lw=0.8)
+            ax.axhline(d, color='k', lw=0.5, alpha=0.6)
         if sign_divider is not None:
-            ax.axhline(sign_divider, color='k', lw=2.0)
-        title = cue_names[ci] if cue_names is not None else f'cue={unique_cues[ci]}'
-        title_color = 'black'
-        if cue_is_rewarded is not None and cue_is_rewarded[ci]:
-            title_color = 'green'
-        ax.set_title(title, color=title_color)
-        ax.set_xlabel('time from trial start (s)')
-        if ci == 0:
-            ylab = 'cell (activated above, suppressed below)' if row_sign is not None \
-                   else 'cell (sorted by preferred cue, then response)'
-            ax.set_ylabel(ylab)
+            ax.axhline(sign_divider, color='k', lw=1.4)
+        ax.set_xlim(t_lo, t_hi)
+        ax.set_ylim(n_cells, 0)
+        # integer-second ticks within data range
+        tick_lo = int(np.ceil(t_lo))
+        tick_hi = int(np.floor(t_hi))
+        ax.set_xticks(np.arange(tick_lo, tick_hi + 1))
+        ax.tick_params(length=3)
+        # hide y-axis tick numbers; keep only the axis line
+        ax.set_yticks([])
+        for s in ('top', 'right'):
+            ax.spines[s].set_visible(False)
 
-    cbar_label = 'baseline-z rate' if zscore == 'baseline' else 'z-scored rate'
-    fig.colorbar(im, ax=axes, shrink=0.6, label=cbar_label)
+        title = cue_names[ci] if cue_names is not None else f'cue={unique_cues[ci]}'
+        title_color = _cue_color(ci)
+        title_weight = 'bold' if (cue_is_rewarded is not None
+                                  and cue_is_rewarded[ci]) else 'normal'
+        ax.set_title(title, color=title_color, fontweight=title_weight,
+                     fontsize=9, pad=4)
+        if ci == 0:
+            ax.set_ylabel('putative units grouped by preferred cue',
+                          labelpad=45)
+
+    # block labels on the left of the leftmost panel:
+    #   outer column = "activated" / "suppressed"
+    #   inner column = "prefer cue k" for each contiguous-pref sub-block
+    if row_sign is not None and sign_divider is not None:
+        ax0 = axes[0]
+        y_act = sign_divider / 2.0
+        y_supp = (sign_divider + n_cells) / 2.0
+        ax0.text(-0.11, y_act, 'activated', transform=ax0.get_yaxis_transform(),
+                 rotation=90, ha='right', va='center',
+                 fontsize=11, fontweight='bold', color='#b2182b')
+        ax0.text(-0.11, y_supp, 'suppressed', transform=ax0.get_yaxis_transform(),
+                 rotation=90, ha='right', va='center',
+                 fontsize=11, fontweight='bold', color='#2166ac')
+
+        if row_pref is not None:
+            rp = np.asarray(row_pref)
+            # block boundaries = 0, every pref/sign change, n_cells
+            bounds = [0] + list(pref_dividers) + [n_cells]
+            for i in range(len(bounds) - 1):
+                lo, hi = bounds[i], bounds[i + 1]
+                if hi <= lo:
+                    continue
+                cue_val = int(rp[lo])
+                # positional cue index (0,1,...) matches column order
+                cue_pos = int(np.where(np.asarray(unique_cues) == cue_val)[0][0])
+                y_mid = (lo + hi) / 2.0
+                ax0.text(-0.05, y_mid, f'prefer cue {cue_pos}',
+                         transform=ax0.get_yaxis_transform(),
+                         rotation=90, ha='right', va='center',
+                         fontsize=9, color=_cue_color(cue_pos))
+
+    # single shared x-axis label centered under the panel row
+    fig.supxlabel('time from trial start (s)', fontsize=12, y=0.02)
+
+    cbar_label = 'baseline-z firing rate' if zscore == 'baseline' else 'z-scored firing rate'
+    cbar = fig.colorbar(im, ax=axes, shrink=0.55, pad=0.02,
+                        fraction=0.025, aspect=25)
+    cbar.set_label(cbar_label)
+    cbar.outline.set_linewidth(0.8)
+    cbar.ax.tick_params(length=3, width=0.8)
+
     if save_path:
-        fig.savefig(save_path, dpi=150, bbox_inches='tight')
+        fig.savefig(save_path, dpi=300, bbox_inches='tight')
+        # also save a transparent vector svg alongside the png
+        base, ext = os.path.splitext(save_path)
+        if ext.lower() == '.png':
+            fig.savefig(base + '.svg', bbox_inches='tight', transparent=True)
     return fig
 
 
 # --- main --------------------------------------------------------------------
 
-def main(cue_mode='left_stim', n_top=150, alpha=0.01, zscore='baseline'):
+def main(cue_mode='left_stim', n_top=150, alpha=0.01, zscore='full'):
     data = load_data(task_spikes_file)
     cues, cue_names = get_cue_labels(data, mode=cue_mode)
     print(f"Loaded {data['metadata']['n_trials']} trials, "
@@ -391,8 +473,8 @@ def main(cue_mode='left_stim', n_top=150, alpha=0.01, zscore='baseline'):
     for ci, name in enumerate(cue_names):
         print(f"  cue {ci} ({name}): {(cues == ci).sum()} trials")
 
-    # baseline: [-1, 0) s ; response bins: 0-0.5, 0.5-1 s (trial length = 1 s)
-    bin_edges = (-1.0, 0.0, 0.5, 1.0)
+    # baseline: [-1, 0) s ; response bins: [0, 1) and [1, 2) s
+    bin_edges = (-0.5, 0.0,0.5,1.0)
     X, unit_ids, _ = build_count_tensor(data, bin_edges=bin_edges)
 
     pvals, deltas, sig, unique_cues, bonf = responsiveness_test(
@@ -424,24 +506,33 @@ def main(cue_mode='left_stim', n_top=150, alpha=0.01, zscore='baseline'):
             if n:
                 print(f"    preferred {cue_names[cue_idx]}: {n}")
 
+    t_start, t_stop = -1.0, 2.0
     psth, centers = build_psth(
         data, order, unit_ids,
-        t_start=-1.0, t_stop=1.0, bin_w=0.05, sigma_s=0.075,
+        t_start=t_start, t_stop=t_stop, bin_w=0.05, sigma_s=0.075,
     )
 
     is_rew_full = cue_is_rewarded(data, cue_mode, len(cue_names), cues)
     is_rew_plot = (None if is_rew_full is None
                    else [is_rew_full[c] for c in unique_cues])
 
+    def _fmt_t(t):
+        s = f"{t:g}".replace('-', 'm').replace('.', 'p')
+        return s
+    fname = f'cue_preference_psth_t{_fmt_t(t_start)}_to_{_fmt_t(t_stop)}s.png'
+
+    titled_cue_names = [f'cue {i}: {cue_names[c]}'
+                        for i, c in enumerate(unique_cues)]
+
     fig = plot_heatmap(
         psth, cues, unique_cues, centers,
         cue_on=0.0, cue_off=1.0,
-        cue_names=[cue_names[c] for c in unique_cues],
+        cue_names=titled_cue_names,
         cue_is_rewarded=is_rew_plot,
         row_pref=pref[order],
         row_sign=sign[order],
         zscore=zscore,
-        save_path=os.path.join(get_save_dir(), 'cue_preference_psth.png'),
+        save_path=os.path.join(get_save_dir(), fname),
     )
     plt.show()
     return order, pref, score, sign, psth, fig

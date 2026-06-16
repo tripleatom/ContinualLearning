@@ -135,7 +135,7 @@ def plot_3d_and_projections(speed, heading, hangle, vstim_mask, save_path):
 
 
 if __name__ == '__main__':
-    from params import sortout_folder
+    from DiscriminationTask.grating.task_params import sortout_folder
 
     sortout = Path(sortout_folder)
     pkl_file = sortout / f'task_spikes_{sortout.name}.pkl'

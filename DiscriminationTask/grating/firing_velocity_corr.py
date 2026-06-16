@@ -324,7 +324,7 @@ def plot_population_decode_grid(per_variant, save_path, n_splits=5, alpha=1.0):
 
 
 if __name__ == '__main__':
-    from params import sortout_folder
+    from DiscriminationTask.grating.task_params import sortout_folder
 
     sortout = Path(sortout_folder)
     pkl_file = sortout / f'task_spikes_{sortout.name}.pkl'

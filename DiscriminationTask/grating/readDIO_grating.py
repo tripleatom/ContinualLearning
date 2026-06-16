@@ -329,7 +329,7 @@ def save_behavior_trial_to_pkl(
     """
 
     # Create trial windows
-    trial_windows = [(int(start), int(end)) for start, end in zip(triasorl_start, trial_end)]
+    trial_windows = [(int(start), int(end)) for start, end in zip(trial_start, trial_end)]
 
     # Build all trial parameters list
     all_trial_parameters = []
@@ -472,7 +472,7 @@ def save_behavior_trial_to_pkl(
 
 
 if __name__ == '__main__':
-    from params import rec_folder, task_file, sortout_folder, task_start, task_end, din_channel
+    from DiscriminationTask.grating.task_params import rec_folder, task_file, sortout_folder, task_start, task_end, din_channel
 
     # Load DIO trial timestamps
     dio_folders = DIO.get_dio_folders(rec_folder)

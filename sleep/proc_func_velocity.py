@@ -192,10 +192,26 @@ def compute_velocity_advanced(proc_file, velocity_threshold=530,
     return time_stamp, v_interp, vx_interp, vy_interp
 
 
+def velocity_output_name(proc_file):
+    """Build an informative velocity filename from a *_PROC file path."""
+    return f'{proc_session_name(proc_file)}_velocity_advanced.pkl'
+
+
+def proc_session_name(proc_file):
+    """Extract the session name from a front-camera *_PROC file path."""
+    proc_stem = Path(proc_file).name
+    if proc_stem.endswith('_PROC'):
+        proc_stem = proc_stem[:-len('_PROC')]
+    if proc_stem.startswith('front_camera_'):
+        proc_stem = proc_stem[len('front_camera_'):]
+    return proc_stem
+
+
 # Example usage showing comparison of methods
 if __name__ == "__main__":
 
     proc_file = Path(input("Enter the path to the _PROC pickle file: ").strip().strip("'").strip('"'))
+    session_name = proc_session_name(proc_file)
     data_path = proc_file.parent
     figures_path = data_path / 'figures'
     figures_path.mkdir(exist_ok=True)
@@ -222,7 +238,9 @@ if __name__ == "__main__":
         ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig(figures_path / 'velocity_comparison.png', dpi=150)
+    comparison_fig_file = figures_path / f'{session_name}_velocity_comparison.png'
+    plt.savefig(comparison_fig_file, dpi=150)
+    print(f"Saved comparison figure to: {comparison_fig_file}")
     plt.show()
 
     # Demonstrate advanced method
@@ -234,10 +252,14 @@ if __name__ == "__main__":
         'time_stamp': t_adv,
         'velocity': v_adv,
         'velocity_x': vx_adv,
-        'velocity_y': vy_adv
+        'velocity_y': vy_adv,
+        'source_proc_file': str(proc_file),
+        'source_proc_name': proc_file.name,
     }
-    with open(data_path / 'velocity_advanced.pkl', 'wb') as f:
+    velocity_output_file = data_path / velocity_output_name(proc_file)
+    with open(velocity_output_file, 'wb') as f:
         pickle.dump(velocity_data, f)
+    print(f"Saved velocity data to: {velocity_output_file}")
 
     fig, axes = plt.subplots(2, 1, figsize=(12, 8))
 
@@ -254,5 +276,7 @@ if __name__ == "__main__":
     axes[1].grid(True, alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig(figures_path / 'velocity_advanced.png', dpi=150)
+    advanced_fig_file = figures_path / f'{session_name}_velocity_advanced.png'
+    plt.savefig(advanced_fig_file, dpi=150)
+    print(f"Saved advanced velocity figure to: {advanced_fig_file}")
     plt.show()

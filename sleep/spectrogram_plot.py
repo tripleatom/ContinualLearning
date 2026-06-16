@@ -1,86 +1,188 @@
 from pathlib import Path
+from datetime import datetime
+import argparse
 import numpy as np
 import matplotlib.pyplot as plt
 import pickle
+from scipy.ndimage import binary_dilation
 
-# === CONFIGURATION ===
-# === CONFIGURATION ===
-rec_folder = r"D:\cl\ephys\sleep\CnL42SG_20251112_170949.rec"
-session_name = Path(rec_folder).stem.split('.')[0]
-shanks = [0, 1, 2, 3, 4, 5, 6, 7]  # Loop through multiple shanks
-# rec_folder = r"\\10.129.151.108\xieluanlabs\xl_cl\ephys\sleep\CnL39SG\CnL39SG_20251102_210043.rec"
-rec_folder = Path(rec_folder)  # Convert to Path object
-# session_name = rec_folder.stem.split('.')[0]
-# shanks = [0,1,2,3]
-fs = 30000  # Original sampling rate
+from sleep_params import rec_folder, session_name, shanks, plot_params
+from sleep_params import band_params, artifact_params
+from sleep_params import original_fs as fs
 
-# === PLOTTING PARAMETERS ===
-plot_params = {
-    # Color scale options: 'adaptive', 'percentile', 'manual'
-    'color_scale_method': 'percentile',  # Use percentile for better range
-    
-    # For 'adaptive' method (median ± N * MAD)
-    'adaptive_n_mad': 3,
-    
-    # For 'percentile' method
-    'vmin_percentile': 0,   # Adjusted to show more blue
-    'vmax_percentile': 95,  # Adjusted to show more dynamic range
-    
-    # For 'manual' method
-    'vmin_manual': -3,
-    'vmax_manual': 3,
-    
-    # Color scale extension (as fraction of range)
-    'vmin_extension': 0.2,  # Extend minimum by 20% of range
-    'vmax_extension': 0.2,  # Extend maximum by 20% of range
-    
-    # Frequency display range for spectrogram
-    'freq_min': 0.5,
-    'freq_max': 100,
-    
-    # Y-axis limits for normalized band power plots (in standard deviations)
-    'band_ylim': (-4, 4),
-    
-    # Colormap
-    'cmap': 'jet',
-    
-    # Figure size (much wider for full recording)
-    'figsize': (30, 12),
-    
-    # DPI
-    'dpi': 150,  # Lower DPI for large figures
+
+# Y-axis labels for the optional trace panels below the spectrogram.
+TRACE_META = {
+    'pc1':         'PC1\nSpectrogram',
+    'theta_ratio': 'Theta ratio\n5-10Hz/2-15Hz',
+    'delta':       '0.5-4 Hz\n(Delta)',
+    '4_25':        '4-25 Hz',
+    'sigma':       '9-25Hz\n(Sigma)',
+    'gamma':       '40-100Hz\n(Gamma)',
 }
+
+
+# =====================================================
+# BROADBAND ARTIFACT DETECTION (Option B)
+# =====================================================
+def detect_broadband_artifacts(spec_ch, freqs, times, n_mad=5.0,
+                               dilate_sec=5.0, fmax=None):
+    """Flag spectrogram time bins that are broadband outliers (across ALL freqs).
+
+    spec_ch : (n_freqs, n_times) linear power for one channel.
+    Returns (mask, z) on the spectrogram time base, where mask is True for
+    artifact bins and z is the robust z-score of broadband power.
+
+    Two-sided: flags both saturated-HIGH bins (motion/EMG/cable) and dropped-LOW
+    bins (signal dropout/disconnection). Both bias the per-frequency z-score
+    baseline if left in, so both are excluded.
+    """
+    fmask = np.ones_like(freqs, bool) if fmax is None else (freqs <= fmax)
+    # broadband level: mean power across frequency, in dB
+    bb = np.mean(10 * np.log10(spec_ch[fmask] + 1e-12), axis=0)  # (n_times,)
+    med = np.median(bb)
+    mad = np.median(np.abs(bb - med)) + 1e-12
+    z = (bb - med) / (1.4826 * mad)              # robust z-score
+    mask = np.abs(z) > n_mad                      # two-sided: high AND low
+    if dilate_sec and dilate_sec > 0 and len(times) > 1:
+        dt = float(np.median(np.diff(times)))
+        k = max(1, int(round(dilate_sec / dt)))
+        mask = binary_dilation(mask, np.ones(2 * k + 1, bool))
+    return mask, z
+
+
+def mask_to_spans(times, mask):
+    """Convert a boolean mask to a list of (t_start, t_end) span tuples."""
+    spans = []
+    if not np.any(mask):
+        return spans
+    d = np.diff(mask.astype(int))
+    starts = list(np.where(d == 1)[0] + 1)
+    ends = list(np.where(d == -1)[0] + 1)
+    if mask[0]:
+        starts = [0] + starts
+    if mask[-1]:
+        ends = ends + [len(mask) - 1]
+    for s, e in zip(starts, ends):
+        spans.append((times[s], times[min(e, len(times) - 1)]))
+    return spans
+
+
+def znorm_masked(x, bad):
+    """Z-normalize x using only non-artifact samples, then NaN the bad ones."""
+    x = np.asarray(x, dtype=float).copy()
+    good = ~bad
+    if np.any(good):
+        mu = np.nanmean(x[good])
+        sd = np.nanstd(x[good])
+    else:
+        mu, sd = np.nanmean(x), np.nanstd(x)
+    z = (x - mu) / (sd + 1e-10)
+    z[bad] = np.nan
+    return z
+
+
+def make_time_compressor(spans, t_min, t_max):
+    """Map real time -> 'artifact-free' time with the (t0, t1) `spans` removed
+    and the surviving pieces concatenated.
+
+    Returns (f, seams, total): f(t) is a vectorized real->compressed mapping
+    (monotonic, slope 1 in kept regions, flat across removed spans); `seams`
+    are the join positions in compressed time; `total` is the kept duration.
+    """
+    spans = sorted((max(a, t_min), min(b, t_max))
+                   for a, b in spans if min(b, t_max) > max(a, t_min))
+    xs = [t_min]
+    ys = [0.0]
+    seams = []
+    removed = 0.0
+    for (a, b) in spans:
+        xs.append(a); ys.append(a - t_min - removed)   # last kept point
+        seams.append(ys[-1])                            # join position
+        removed += (b - a)
+        xs.append(b); ys.append(b - t_min - removed)    # collapses onto seam
+    xs.append(t_max); ys.append(t_max - t_min - removed)
+    xs = np.asarray(xs, float)
+    ys = np.asarray(ys, float)
+    total = float(t_max - t_min - removed)
+
+    def f(t):
+        return np.interp(np.asarray(t, float), xs, ys)
+
+    return f, np.asarray(seams, float), total
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Plot LFP spectrogram summary panels.")
+    parser.add_argument("--shanks", nargs="+", type=int, default=None)
+    parser.add_argument("--channels", nargs="+", type=int, default=None)
+    parser.add_argument("--max-channels", type=int, default=None)
+    parser.add_argument("--output-suffix", default="")
+    return parser.parse_args()
+
+
+def first_existing(paths):
+    for path in paths:
+        if path.exists():
+            return path
+    return None
+
+
+def find_velocity_file(base_folder: Path):
+    candidates = [
+        base_folder / "velocity_advanced.pkl",
+        base_folder.parent / "velocity_advanced.pkl",
+        base_folder.parent / "video" / "velocity_advanced.pkl",
+    ]
+    found = first_existing(candidates)
+    if found is not None:
+        return found
+    matches = sorted(
+        base_folder.parent.rglob("*velocity*advanced*.pkl"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    return matches[0] if matches else None
+
+# === CONFIGURATION ===
+args = parse_args()
+rec_folder = Path(rec_folder)  # Convert to Path object
+if args.shanks is not None:
+    shanks = args.shanks
 
 # === LOAD SYNCHRONIZATION AND VELOCITY DATA ===
 print("Loading velocity and synchronization data...")
 
 # Velocity file
-velocity_file = rec_folder.parent / "velocity_advanced.pkl"
-if velocity_file.exists():  
+velocity_file = find_velocity_file(rec_folder)
+if velocity_file is not None:
     with open(velocity_file, 'rb') as f:
         velocity_data = pickle.load(f)
     velocity_time_raw = velocity_data['time_stamp']
     velocity_raw = velocity_data['velocity']
-    print(f"✓ Loaded velocity data: {len(velocity_raw)} samples")
+    print(f"Loaded velocity data: {len(velocity_raw)} samples")
 else:
     velocity_time_raw = None
     velocity_raw = None
-    print("⚠ Velocity file not found")
+    print("Velocity file not found")
 
 # Sync times file
-sync_times_file = rec_folder.parent / "sync_times.pkl"
-if sync_times_file.exists():
+sync_times_file = first_existing([
+    rec_folder / "sync_times.pkl",
+    rec_folder.parent / "sync_times.pkl",
+])
+if sync_times_file is not None:
     with open(sync_times_file, 'rb') as f:
         sync_times = pickle.load(f)
     proc_rising_time = sync_times['proc_rising_time']
     SG_rising_time = sync_times['SG_rising_time'] / fs
-    print(f"✓ Loaded sync times")
+    print(f"Loaded sync times")
     print(f"  Proc rising time range: {proc_rising_time[0]:.2f} - {proc_rising_time[-1]:.2f} s")
     print(f"  SG rising time range: {SG_rising_time[0]:.2f} - {SG_rising_time[-1]:.2f} s")
 else:
     proc_rising_time = None
     SG_rising_time = None
-    print("⚠ Sync times file not found")
+    print("Sync times file not found")
 
 # === SYNCHRONIZE VELOCITY WITH SPECTROGRAM ===
 velocity_synced = None
@@ -100,7 +202,7 @@ if velocity_time_raw is not None and proc_rising_time is not None and SG_rising_
                                      [proc_rising_time[0], proc_rising_time[-1]],
                                      [SG_rising_time[0], SG_rising_time[-1]])
     
-    print(f"✓ Synchronized velocity")
+    print(f"Synchronized velocity")
     print(f"  Velocity samples: {len(velocity_synced)}")
     print(f"  Velocity time range: {velocity_time_synced[0]:.2f} - {velocity_time_synced[-1]:.2f} s")
     print(f"  Spectrogram time range: {SG_rising_time[0]:.2f} - {SG_rising_time[-1]:.2f} s")
@@ -108,7 +210,7 @@ if velocity_time_raw is not None and proc_rising_time is not None and SG_rising_
     plot_velocity = True
 else:
     plot_velocity = False
-    print("\n⚠ Cannot synchronize velocity - missing data or sync times")
+    print("\nCannot synchronize velocity - missing data or sync times")
 
 # === LOAD DATA ===
 low_freq_folder = rec_folder / "low_freq"
@@ -135,7 +237,7 @@ for shank_id in shanks:
     
     # Check if shank data exists
     if shank_id not in all_data['shanks_data']:
-        print(f"⚠ Shank {shank_id} not found in data, skipping...")
+        print(f"Shank {shank_id} not found in data, skipping...")
         continue
     
     shank_data = all_data['shanks_data'][shank_id]
@@ -189,32 +291,93 @@ for shank_id in shanks:
     t_start = lfp_time_cropped[0]
     t_end = lfp_time_cropped[-1]
 
-    # Determine subplot layout
-    if plot_velocity:
-        n_subplots = 7
-        height_ratios = [2, 1, 1, 1, 1, 1, 1]
-    else:
-        n_subplots = 6
-        height_ratios = [2, 1, 1, 1, 1, 1]
+    # Determine subplot layout: spectrogram (tall) + one row per selected trace
+    # panel + velocity (if available).
+    trace_panels = list(plot_params.get('trace_panels',
+                                        ['pc1', 'theta_ratio', 'delta',
+                                         'sigma', 'gamma']))
+    n_trace = len(trace_panels) + (1 if plot_velocity else 0)
+    n_subplots = 1 + n_trace
+    height_ratios = [2] + [1] * n_trace
 
-    # Loop through each channel
-    for ch_idx, ch_id in enumerate(channel_ids):
-        print(f"\n=== Processing Channel {ch_id} ({ch_idx + 1}/{len(channel_ids)}) ===")
+    channel_indices = list(range(len(channel_ids)))
+    if args.channels is not None:
+        requested = set(args.channels)
+        channel_indices = [
+            idx for idx in channel_indices
+            if int(channel_ids[idx]) in requested
+        ]
+    if args.max_channels is not None:
+        channel_indices = channel_indices[:args.max_channels]
+    if not channel_indices:
+        print("  No channels selected for this shank, skipping...")
+        continue
+
+    # Loop through selected channels
+    for n_selected, ch_idx in enumerate(channel_indices, start=1):
+        ch_id = channel_ids[ch_idx]
+        print(f"\n=== Processing Channel {ch_id} ({n_selected}/{len(channel_indices)} selected) ===")
         
         # Get data for this channel (already cropped)
         channel_spectrogram = spectrograms_cropped[ch_idx, :, :]
-        
-        # Z-score the spectrogram
-        channel_spectrogram_mean = np.mean(channel_spectrogram)
-        channel_spectrogram_std = np.std(channel_spectrogram)
-        channel_spectrogram_zscored = (channel_spectrogram - channel_spectrogram_mean) / (channel_spectrogram_std + 1e-10)
-        
-        # Print z-scored data range
-        print(f"  Z-scored spectrogram range: [{np.min(channel_spectrogram_zscored):.3f}, {np.max(channel_spectrogram_zscored):.3f}]")
-        
-        
-        # Determine color scale for z-scored spectrogram
-        zscored_values = channel_spectrogram_zscored.flatten()
+
+        # --- Broadband artifact detection (Option B) ---
+        if artifact_params['enabled']:
+            art_mask, art_z = detect_broadband_artifacts(
+                channel_spectrogram, freqs, times_cropped,
+                n_mad=artifact_params['n_mad'],
+                dilate_sec=artifact_params['dilate_sec'],
+                fmax=artifact_params['fmax'],
+            )
+            # Map the mask onto the (higher-res) LFP time base for band panels
+            art_mask_lfp = np.interp(
+                lfp_time_cropped, times_cropped, art_mask.astype(float)) > 0.5
+            # Optional velocity gate
+            if (artifact_params['velocity_threshold'] is not None
+                    and plot_velocity):
+                vel_on_lfp = np.interp(
+                    lfp_time_cropped, velocity_time_synced, velocity_synced)
+                art_mask_lfp |= vel_on_lfp > artifact_params['velocity_threshold']
+            artifact_spans = mask_to_spans(times_cropped, art_mask)
+            frac = 100.0 * np.mean(art_mask)
+            print(f"  Artifacts: {len(artifact_spans)} spans, "
+                  f"{frac:.1f}% of bins flagged (n_mad={artifact_params['n_mad']})")
+        else:
+            art_mask = np.zeros(len(times_cropped), bool)
+            art_mask_lfp = np.zeros(len(lfp_time_cropped), bool)
+            artifact_spans = []
+            frac = 0.0
+
+        # Display transform: dB power, robustly z-scored PER FREQUENCY over
+        # non-artifact bins. Linear power is dominated by the 1/f background and
+        # by total-power swings, so a single global z-score just shows "total
+        # power over time" (~movement). Normalizing each frequency row whitens
+        # the 1/f so state-dependent band changes (delta rising in NREM, etc.)
+        # become visible, as in Buzsaki's spectrogram.
+        good_cols = ~art_mask
+        if not np.any(good_cols):
+            good_cols = np.ones(channel_spectrogram.shape[1], bool)
+        log_spec = 10 * np.log10(channel_spectrogram + 1e-12)
+        med_f = np.median(log_spec[:, good_cols], axis=1, keepdims=True)
+        mad_f = np.median(np.abs(log_spec[:, good_cols] - med_f),
+                          axis=1, keepdims=True)
+        channel_spectrogram_zscored = (log_spec - med_f) / (1.4826 * mad_f + 1e-10)
+
+        # How to handle artifact periods in the figure (see sleep_params):
+        #   'blank'       -> NaN the flagged bins so they render as white gaps
+        #   'concatenate' -> drop the flagged bins and stitch the rest together
+        remove_mode = artifact_params.get('remove_mode', 'blank') \
+            if artifact_params['enabled'] else 'none'
+        if remove_mode == 'blank':
+            channel_spectrogram_zscored[:, art_mask] = np.nan
+
+        # Print z-scored data range (over the kept, non-artifact bins)
+        print(f"  Z-scored spectrogram range: [{np.nanmin(channel_spectrogram_zscored):.3f}, {np.nanmax(channel_spectrogram_zscored):.3f}]")
+
+
+        # Determine color scale from the kept (non-artifact) bins only.
+        zscored_values = channel_spectrogram_zscored[:, good_cols]
+        zscored_values = zscored_values[np.isfinite(zscored_values)]
 
         if plot_params['color_scale_method'] == 'adaptive':
             median_val = np.median(zscored_values)
@@ -254,7 +417,50 @@ for shank_id in shanks:
         bands_data = {}
         for band_name, band_values in bands_data_full.items():
             bands_data[band_name] = band_values[lfp_mask] if plot_velocity else band_values
-        
+
+        # Custom 4-25 Hz band, integrated from the displayed spectrogram (the
+        # pipeline bands come from LFP bandpass; this one is added on the fly,
+        # smoothed with the same window, then put on the LFP time base).
+        if '4_25' in trace_panels:
+            fsel = (freqs >= 4) & (freqs <= 25)
+            bp = channel_spectrogram[fsel, :].mean(axis=0)        # linear power
+            dt_spec = float(np.median(np.diff(times_cropped)))
+            w = max(1, int(round(band_params['smoothing_window'] / dt_spec)))
+            bp = np.convolve(bp, np.ones(w) / w, mode='same')
+            bands_data['4_25'] = np.interp(lfp_time_cropped, times_cropped, bp)
+
+        # --- Build the time axis: concatenate (excise artifacts) or keep full ---
+        # spec_x/spec_z drive the spectrogram; band_x + band_sel drive the trace
+        # panels; vel_x + vel_sel drive velocity; [x_lo, x_hi] is the shared xlim.
+        if remove_mode == 'concatenate' and artifact_spans:
+            compress, seams_c, total_c = make_time_compressor(
+                artifact_spans, t_start, t_end)
+            keep_spec = ~art_mask
+            keep_lfp = ~art_mask_lfp
+            spec_x = compress(times_cropped[keep_spec])
+            spec_z = channel_spectrogram_zscored[:, keep_spec]
+            band_x = compress(lfp_time_cropped[keep_lfp])
+            band_sel = keep_lfp
+            x_lo, x_hi = 0.0, total_c
+            if plot_velocity:
+                vel_art = np.interp(velocity_time_synced, times_cropped,
+                                    art_mask.astype(float)) > 0.5
+                vel_sel = ~vel_art
+                vel_x = compress(velocity_time_synced[vel_sel])
+            removed_s = (t_end - t_start) - total_c
+            print(f"  Concatenated: removed {removed_s:.0f}s of artifacts, "
+                  f"{len(seams_c)} seams, kept timeline {total_c:.0f}s")
+        else:
+            seams_c = np.array([])
+            spec_x = times_cropped
+            spec_z = channel_spectrogram_zscored
+            band_x = lfp_time_cropped
+            band_sel = np.ones(len(lfp_time_cropped), bool)
+            x_lo, x_hi = t_start, t_end
+            if plot_velocity:
+                vel_sel = np.ones(len(velocity_time_synced), bool)
+                vel_x = velocity_time_synced
+
         # Create figure
         print(f"  Creating full recording plot...")
         
@@ -268,123 +474,100 @@ for shank_id in shanks:
         ax1 = fig.add_subplot(gs[subplot_idx])
         subplot_idx += 1
         
+        # Colormap with NaN (removed artifact bins) drawn as white gaps.
+        spec_cmap = plt.get_cmap(plot_params['cmap']).copy()
+        spec_cmap.set_bad('white')
         im = ax1.pcolormesh(
-            times_cropped,
+            spec_x,
             freqs,
-            channel_spectrogram_zscored,
-            shading='gouraud',
-            cmap=plot_params['cmap'],
+            spec_z,
+            shading='nearest',
+            cmap=spec_cmap,
             vmin=vmin,
             vmax=vmax
         )
 
-        ax1.set_ylabel('Frequency (Hz)', fontsize=10)
+        ax1.set_ylabel('Frequency (Hz)', fontsize=18)
         ax1.set_ylim([plot_params['freq_min'], plot_params['freq_max']])
         ax1.set_yscale('log')
         ax1.set_yticks([1, 4, 16, 64])
         ax1.set_yticklabels(['1', '4', '16', '64'])
-        ax1.set_xlim([t_start, t_end])
-        ax1.set_title(f'Spectrogram (Z-scored) - Ch{ch_id} (Shank {shank_id})', fontsize=12)
+        ax1.tick_params(axis='y', labelsize=14, length=4)
+        ax1.set_xlim([x_lo, x_hi])
+        ax1.set_title(f'Spectrogram (Z-scored) - Ch{ch_id} (Shank {shank_id})', fontsize=15)
         ax1.set_xticklabels([])
+        # Publication: no box outline around the spectrogram.
+        for spine in ax1.spines.values():
+            spine.set_visible(False)
 
-        cbar = plt.colorbar(im, ax=ax1, label='Z-scored Power')
+        cbar = plt.colorbar(im, ax=ax1)
+        cbar.set_label('Z-scored Power', fontsize=14)
+        cbar.ax.tick_params(labelsize=12)
+        cbar.outline.set_visible(False)
 
 
         
-        # 2. PC1 Spectrogram
-        ax2 = fig.add_subplot(gs[subplot_idx], sharex=ax1)
-        subplot_idx += 1
-        # Extract PC1 for this specific channel
-        pc1_channel = pc1_cropped[ch_idx, :]
-        pc1_norm = (pc1_channel - np.mean(pc1_channel)) / (np.std(pc1_channel) + 1e-10)
-        ax2.plot(lfp_time_cropped, pc1_norm, 'k-', linewidth=0.5)
-        ax2.set_ylabel('PC1\nSpectrogram', fontsize=9)
-        ax2.set_xlim([t_start, t_end])
-        ax2.set_ylim(plot_params['band_ylim'])
-        ax2.set_xticklabels([])
-        # Remove all spines
-        for spine in ax2.spines.values():
-            spine.set_visible(False)
-        ax2.tick_params(left=False, bottom=False)
-        
-        # 3. Theta ratio
-        ax3 = fig.add_subplot(gs[subplot_idx], sharex=ax1)
-        subplot_idx += 1
-        theta_ratio_norm = (bands_data['theta_ratio'] - np.mean(bands_data['theta_ratio'])) / (np.std(bands_data['theta_ratio']) + 1e-10)
-        ax3.plot(lfp_time_cropped, theta_ratio_norm, 'k-', linewidth=0.5)
-        ax3.set_ylabel('Theta ratio\n5-10Hz/2-15Hz', fontsize=9)
-        ax3.set_xlim([t_start, t_end])
-        ax3.set_ylim(plot_params['band_ylim'])
-        ax3.set_xticklabels([])
-        # Remove all spines
-        for spine in ax3.spines.values():
-            spine.set_visible(False)
-        ax3.tick_params(left=False, bottom=False)
-        
-        # 4. Delta
-        ax4 = fig.add_subplot(gs[subplot_idx], sharex=ax1)
-        subplot_idx += 1
-        delta_norm = (bands_data['delta'] - np.mean(bands_data['delta'])) / (np.std(bands_data['delta']) + 1e-10)
-        ax4.plot(lfp_time_cropped, delta_norm, 'k-', linewidth=0.5)
-        ax4.set_ylabel('0.5-4 Hz\n(Delta)', fontsize=9)
-        ax4.set_xlim([t_start, t_end])
-        ax4.set_ylim(plot_params['band_ylim'])
-        ax4.set_xticklabels([])
-        # Remove all spines
-        for spine in ax4.spines.values():
-            spine.set_visible(False)
-        ax4.tick_params(left=False, bottom=False)
-        
-        # 5. Sigma
-        ax5 = fig.add_subplot(gs[subplot_idx], sharex=ax1)
-        subplot_idx += 1
-        sigma_norm = (bands_data['sigma'] - np.mean(bands_data['sigma'])) / (np.std(bands_data['sigma']) + 1e-10)
-        ax5.plot(lfp_time_cropped, sigma_norm, 'k-', linewidth=0.5)
-        ax5.set_ylabel('9-25Hz\n(Sigma)', fontsize=9)
-        ax5.set_xlim([t_start, t_end])
-        ax5.set_ylim(plot_params['band_ylim'])
-        ax5.set_xticklabels([])
-        # Remove all spines
-        for spine in ax5.spines.values():
-            spine.set_visible(False)
-        ax5.tick_params(left=False, bottom=False)
-        
-        # 6. Gamma
-        ax6 = fig.add_subplot(gs[subplot_idx], sharex=ax1)
-        subplot_idx += 1
-        gamma_norm = (bands_data['gamma'] - np.mean(bands_data['gamma'])) / (np.std(bands_data['gamma']) + 1e-10)
-        ax6.plot(lfp_time_cropped, gamma_norm, 'k-', linewidth=0.5)
-        ax6.set_ylabel('40-100Hz\n(Gamma)', fontsize=9)
-        ax6.set_xlim([t_start, t_end])
-        ax6.set_ylim(plot_params['band_ylim'])
-        # Remove all spines
-        for spine in ax6.spines.values():
-            spine.set_visible(False)
-        ax6.tick_params(left=False, bottom=False)
-        
-        # 7. Velocity (if available)
-        if plot_velocity:
-            ax7 = fig.add_subplot(gs[subplot_idx], sharex=ax1)
+        # --- Trace panels (selectable via plot_params['trace_panels']) ---
+        # trace_export holds the exact arrays drawn (kept/concatenated samples).
+        trace_axes = []
+        trace_export = {}
+        for key in trace_panels:
+            raw = pc1_cropped[ch_idx, :] if key == 'pc1' else bands_data[key]
+            norm = znorm_masked(raw, art_mask_lfp)
+            ax = fig.add_subplot(gs[subplot_idx], sharex=ax1)
             subplot_idx += 1
-            
-            ax7.plot(velocity_time_synced, velocity_synced, 'b-', linewidth=0.5)
-            ax7.set_ylabel('Velocity\n(cm/s)', fontsize=9)
-            ax7.set_xlim([t_start, t_end])
-            # Remove all spines
-            for spine in ax7.spines.values():
+            ax.plot(band_x, norm[band_sel], 'k-', linewidth=0.5)
+            ax.set_ylabel(TRACE_META.get(key, key), fontsize=13)
+            ax.set_xlim([x_lo, x_hi])
+            ax.set_ylim(plot_params['band_ylim'])
+            ax.set_xticklabels([])
+            ax.set_yticks([])
+            for spine in ax.spines.values():
                 spine.set_visible(False)
-            ax7.tick_params(left=False, bottom=False)
-            ax7.set_xlabel('Time (s)', fontsize=10)
-        else:
-            ax6.set_xlabel('Time (s)', fontsize=10)
-        
+            ax.tick_params(left=False, bottom=False)
+            trace_axes.append(ax)
+            trace_export[key] = norm[band_sel]
+
+        # Velocity (if available)
+        ax_vel = None
+        if plot_velocity:
+            ax_vel = fig.add_subplot(gs[subplot_idx], sharex=ax1)
+            subplot_idx += 1
+            ax_vel.plot(vel_x, velocity_synced[vel_sel], 'b-', linewidth=0.5)
+            ax_vel.set_ylabel('Velocity\n(cm/s)', fontsize=13)
+            ax_vel.set_xlim([x_lo, x_hi])
+            for spine in ax_vel.spines.values():
+                spine.set_visible(False)
+            ax_vel.tick_params(left=False, bottom=False)
+            trace_axes.append(ax_vel)
+
+        # X-axis label on the bottom-most panel.
+        xlabel_txt = 'Time (s, artifact-free)' if remove_mode == 'concatenate' else 'Time (s)'
+        trace_axes[-1].set_xlabel(xlabel_txt, fontsize=10)
+
+        panel_axes = [ax1] + trace_axes
+
+        if remove_mode == 'concatenate':
+            # Mark the seams where clean segments were stitched together.
+            for ax in panel_axes:
+                for s in seams_c:
+                    ax.axvline(s, color='0.65', lw=0.6, ls=(0, (4, 3)),
+                               zorder=4)
+        elif remove_mode == 'blank' and artifact_params['enabled'] and artifact_spans:
+            # --- Shade broadband-artifact spans across every panel ---
+            for ax in panel_axes:
+                for (t0, t1) in artifact_spans:
+                    ax.axvspan(t0, t1, color=artifact_params['shade_color'],
+                               alpha=artifact_params['shade_alpha'],
+                               lw=0, zorder=5)
+
         # Add visible scale bar for 500s
         last_ax = fig.get_axes()[-1]
         
         # Calculate scale bar position and length
         # Draw the scale bar in data coordinates
         scale_length = 500  # seconds
-        x_end = t_end - 100  # 100s from the right edge
+        x_end = x_hi - 100  # 100s from the right edge
         x_start = x_end - scale_length
 
         # Get the y-axis limits
@@ -403,13 +586,85 @@ for shank_id in shanks:
                     clip_on=False)  # Important: don't clip the text
         
         # Save figure
-        output_file = output_folder / f'{session_name}_sh{shank_id}_ch{ch_id:03d}_full_recording.png'
+        output_file = output_folder / f'{session_name}_sh{shank_id}_ch{ch_id:03d}_full_recording{args.output_suffix}.png'
+
+        # Reproducibility stamp embedded in the figure
+        stamp = (
+            f"Generated {datetime.now():%Y-%m-%d %H:%M:%S} by spectrogram_plot.py  |  "
+            f"session={session_name} shank={shank_id} ch={ch_id}  |  "
+            f"source={band_powers_file}  |  "
+            f"artifact[enabled={artifact_params['enabled']} n_mad={artifact_params['n_mad']} "
+            f"fmax={artifact_params['fmax']} dilate={artifact_params['dilate_sec']}s "
+            f"vel_thr={artifact_params['velocity_threshold']}] -> "
+            f"{len(artifact_spans)} spans, {frac:.1f}% bins flagged  |  "
+            f"remove_mode={remove_mode}"
+        )
+        fig.text(0.005, 0.001, stamp, fontsize=6, color='0.4',
+                 ha='left', va='bottom')
+
+        # --- Export the exact plotted data (traces + spectrogram + velocity) ---
+        export = {
+            'session': session_name,
+            'shank': shank_id,
+            'channel': int(ch_id),
+            'remove_mode': remove_mode,
+            'artifact': {
+                'n_mad': artifact_params['n_mad'],
+                'fmax': artifact_params['fmax'],
+                'dilate_sec': artifact_params['dilate_sec'],
+                'velocity_threshold': artifact_params['velocity_threshold'],
+                'n_spans': len(artifact_spans),
+                'frac_flagged_pct': float(frac),
+            },
+            'time_full_s': (float(t_start), float(t_end)),
+            'time_axis_s': (float(x_lo), float(x_hi)),
+            'kept_duration_s': float(x_hi - x_lo),
+            'removed_duration_s': float((t_end - t_start) - (x_hi - x_lo)),
+            'seams_s': seams_c,
+            'band_ylim': plot_params['band_ylim'],
+            'spectrogram': {
+                'time_s': spec_x, 'freqs_hz': freqs, 'z': spec_z,
+                'vmin': float(vmin), 'vmax': float(vmax),
+            },
+            # All trace panels share band_x; values are z-normalized (SD units).
+            'trace_time_s': band_x,
+            'traces': trace_export,
+        }
+        if plot_velocity:
+            export['velocity'] = {
+                'time_s': vel_x, 'value_cm_s': velocity_synced[vel_sel],
+            }
+
+        # Real-time (full timeline, BEFORE artifact removal/concatenation):
+        # raw band power on the actual recording time base, plus raw velocity.
+        # These are NOT z-scored and NOT excised (artifact periods included).
+        realtime_bands = {}
+        for key in trace_panels:
+            raw = pc1_cropped[ch_idx, :] if key == 'pc1' else bands_data.get(key)
+            if raw is not None:
+                realtime_bands[key] = np.asarray(raw)
+        export['realtime'] = {
+            'lfp_time_s': lfp_time_cropped,        # real recording time (s)
+            'band_power': realtime_bands,          # raw power per band, full
+            'artifact_mask_lfp': art_mask_lfp,     # True where flagged artifact
+        }
+        if plot_velocity:
+            export['realtime']['velocity_time_s'] = velocity_time_synced
+            export['realtime']['velocity_cm_s'] = velocity_synced
+
+        trace_pkl = output_folder / (
+            f'{session_name}_sh{shank_id}_ch{ch_id:03d}_trace_data'
+            f'{args.output_suffix}.pkl')
+        with open(trace_pkl, 'wb') as f:
+            pickle.dump(export, f)
+        print(f"  Exported trace data: {trace_pkl.name}")
+
         print(f"  Saving to: {output_file.name}")
         plt.savefig(output_file, dpi=plot_params['dpi'], bbox_inches='tight')
         plt.close()
         total_files_created += 1
         
-        print(f"  ✓ Completed Shank {shank_id}, Channel {ch_id}")
+        print(f"  Completed Shank {shank_id}, Channel {ch_id}")
 
 print(f"\n{'='*60}")
 print("PLOTTING COMPLETE")
@@ -418,6 +673,6 @@ print(f"Output directory: {output_folder}")
 print(f"Total files created: {total_files_created} (one full recording per channel per shank)")
 print(f"Processed shanks: {shanks}")
 if plot_velocity:
-    print(f"\n✓ Velocity data included and synchronized")
+    print(f"\nVelocity data included and synchronized")
 else:
-    print(f"\n⚠ Velocity data not included")
+    print(f"\nVelocity data not included")

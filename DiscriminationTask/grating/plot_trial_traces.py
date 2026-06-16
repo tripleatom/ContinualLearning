@@ -503,7 +503,7 @@ def plot_overlay(traces, save_path, vmax_percentile=99):
 
 
 if __name__ == '__main__':
-    from params import sortout_folder
+    from DiscriminationTask.grating.task_params import sortout_folder
 
     sortout = Path(sortout_folder)
     pkl_file = sortout / f'task_spikes_trial_{sortout.name}.pkl'

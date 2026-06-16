@@ -55,10 +55,48 @@ PASSIVE_COL_MAP = {"orientation": "L_Orient",        "spatial_freq": "L_SF"}
 # ---------------------------------------------------------------- #
 #  Sleep event detection                                            #
 # ---------------------------------------------------------------- #
-event_threshold        = 0.60
+event_threshold        = 0.55
 event_min_distance_sec = 0.50
 top_n_events_per_class = 25
 plot_window_sec        = 1.0
+
+# ---------------------------------------------------------------- #
+#  Sleep UP/DOWN state detection + optional LFP validation           #
+# ---------------------------------------------------------------- #
+# UPState.py can already detect UP/DOWN states from binned sleep
+# spike activity. Fill these NWB paths in later if you also want to
+# extract raw/LFP slow-wave features from the original recording and
+# validate the spike-derived state labels.
+#
+# Each entry should match sleep_blocks by label:
+#     "pre":  r"path\to\pre_sleep_raw.nwb"
+#     "post": r"path\to\post_sleep_raw.nwb"
+sleep_nwb_paths = {
+    "pre":  "",
+    "post": "",
+}
+
+# Optional: leave empty to use all valid channels found in the NWB file.
+# Otherwise set a list of V1 channel/electrode ids, e.g. [0, 1, 2, 3].
+sleep_lfp_channels = {
+    "pre":  [],
+    "post": [],
+}
+
+# Raw/LFP extraction settings for future LFP-assisted validation.
+raw_fs_hz = 30000.0
+lfp_target_fs_hz = 1000.0
+lfp_lowpass_hz = 300.0
+slow_lfp_band_hz = (0.5, 4.0)
+
+# Spike-derived population-MUA UP/DOWN detection settings.
+updown_bin_ms = 10.0
+updown_smooth_sigma_ms = 50.0
+updown_down_z_threshold = -0.5
+updown_up_z_threshold = 0.0
+updown_down_percentile = 20.0
+updown_min_state_ms = 50.0
+updown_merge_gap_ms = 30.0
 
 # ---------------------------------------------------------------- #
 #  Velocity-matched compare                                         #

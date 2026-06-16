@@ -343,7 +343,7 @@ def run_one_covariate(spike_data, pos_t, cov_v, window_duration_sec,
 
 
 if __name__ == '__main__':
-    from params import sortout_folder
+    from DiscriminationTask.grating.task_params import sortout_folder
 
     sortout = Path(sortout_folder)
     pkl_file = sortout / f'task_spikes_{sortout.name}.pkl'

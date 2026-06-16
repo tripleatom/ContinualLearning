@@ -306,7 +306,7 @@ def extract_session_spikes(
 
 # ------------------------------------------------------------------ #
 if __name__ == '__main__':
-    from params import rec_folder, task_file, sortout_folder, task_start, task_end, din_channel
+    from DiscriminationTask.grating.task_params import rec_folder, task_file, sortout_folder, task_start, task_end, din_channel
 
     # Load DIO trial timestamps (same logic as readDIO_grating.py)
     dio_folders = DIO.get_dio_folders(rec_folder)

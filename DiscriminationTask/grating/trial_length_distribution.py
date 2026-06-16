@@ -10,7 +10,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.signal import savgol_filter
 
-from params import sortout_folder
+from DiscriminationTask.grating.task_params import sortout_folder
 
 # 1 dlc position-unit = 1 mm = 0.1 cm  →  10 units per cm
 POSITION_UNITS_PER_CM = 10.0

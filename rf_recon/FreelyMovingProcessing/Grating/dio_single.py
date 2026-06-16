@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 from process_func.DIO import get_dio_folders, concatenate_din_data
 
 # ── Config ─────────────────────────────────────────────────────────────────────
-rec_folder = Path("/Volumes/xieluanlabs/xl_cl/experiment_data/CnL42/260313/CnL42SG_20260313/CNL42_passive4_20260313_163938.rec")  # path to .rec folder
+rec_folder = Path(input("Enter path to .rec folder: ").strip())
 channel_id        = 3      # Din channel (1-indexed)
 fs                = 30_000
 expected_iti_s    = 3.0    # expected inter-trial interval in seconds
@@ -182,11 +182,26 @@ axes[2].set_xlabel('Rising edge index')
 plt.tight_layout()
 plt.show()
 
+save_choice = input(
+    "\nSave which edges? [raw/original=no fix, fixed=glitch+jitter, filled=all fixes] "
+    "(default: filled): "
+).strip().lower()
+
+if save_choice in ("raw", "original", "nofix", "no fix", "none"):
+    rising_out = rising_raw
+    save_label = "raw/original edges (no fix)"
+elif save_choice in ("fixed", "glitch", "jitter"):
+    rising_out = rising_fixed
+    save_label = "glitch/jitter-fixed edges"
+else:
+    rising_out = rising_filled
+    save_label = "filled/final fixed edges"
+
 # ── Save ───────────────────────────────────────────────────────────────────────
 stimulus_duration_s = expected_iti_s  # adjust if stimulus duration differs from ITI
 stim_samples = int(stimulus_duration_s * fs)
 
-falling_out = rising_filled + stim_samples
+falling_out = rising_out + stim_samples
 save_path = rec_folder.parent / f"{rec_folder.stem}_DIO.npz"
-np.savez_compressed(save_path, rising_times=rising_filled, falling_times=falling_out)
-print(f"Saved {len(rising_filled)} edges → {save_path}")
+np.savez_compressed(save_path, rising_times=rising_out, falling_times=falling_out)
+print(f"Saved {len(rising_out)} {save_label} → {save_path}")
