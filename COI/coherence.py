@@ -5,6 +5,8 @@ from scipy import signal
 import spikeinterface.extractors as se
 import spikeinterface.preprocessing as spre
 from tqdm import tqdm
+import errno
+from server_fallback import resolve_output_folder, mirror_on_backup_server
 
 # === CONFIGURATION ===
 base_folder = r"\\10.129.151.108\xieluanlabs\xl_spinal_cord_electrode\CoI\CoI11\251103\3cms_2\data_251103_165302"
@@ -286,11 +288,24 @@ print(f"  Frequency points: {len(coherence_results['frequencies'])}")
 print(f"  Coherence array shape: {coherence_results['coherence'].shape}")
 
 # === SAVE RESULTS ===
-output_path = Path(output_folder) / f"{session_name}_brain_spinal_coherence.pkl"
+output_dir = resolve_output_folder(Path(output_folder))
+output_path = output_dir / f"{session_name}_brain_spinal_coherence.pkl"
 print(f"\nSaving results to: {output_path}")
 
-with open(output_path, 'wb') as f:
-    pickle.dump(coherence_results, f)
+try:
+    with open(output_path, 'wb') as f:
+        pickle.dump(coherence_results, f)
+except OSError as e:
+    if e.errno != errno.ENOSPC:
+        raise
+    backup_dir = mirror_on_backup_server(output_dir)
+    if backup_dir is None:
+        raise
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    output_path = backup_dir / output_path.name
+    print(f"Out of space while saving - retrying on backup server: {output_path}")
+    with open(output_path, 'wb') as f:
+        pickle.dump(coherence_results, f)
 
 print(f"Results saved successfully!")
 

@@ -10,6 +10,7 @@ from pathlib import Path
 import pandas as pd
 import seaborn as sns
 from scipy.stats import ttest_1samp, ttest_rel
+from server_fallback import resolve_output_folder
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -574,8 +575,7 @@ def pairwise_orientation_decoding_analysis(npz_file, response_phases=['display']
     session_id = session_folder.name
     
     # Create output directory
-    decode_folder = session_folder / "pairwise_decoding"
-    decode_folder.mkdir(exist_ok=True)
+    decode_folder = resolve_output_folder(session_folder / "pairwise_decoding")
     
     print(f"PAIRWISE ORIENTATION DECODING ANALYSIS")
     print("=" * 60)

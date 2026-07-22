@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import pickle
 import sys
 from pathlib import Path
@@ -13,6 +14,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from sleep.proc_func_velocity import compute_velocity_advanced, proc_session_name
+from server_fallback import resolve_output_folder, mirror_on_backup_server
 
 
 DEFAULT_PROC_FILE = (
@@ -65,8 +67,20 @@ def load_or_compute_velocity(args):
         "source_proc_file": str(proc_file),
         "source_proc_name": proc_file.name,
     }
-    with open(velocity_file, "wb") as f:
-        pickle.dump(velocity_data, f)
+    try:
+        with open(velocity_file, "wb") as f:
+            pickle.dump(velocity_data, f)
+    except OSError as e:
+        if e.errno != errno.ENOSPC:
+            raise
+        backup_dir = mirror_on_backup_server(velocity_file.parent)
+        if backup_dir is None:
+            raise
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        velocity_file = backup_dir / velocity_file.name
+        print(f"Out of space while saving - retrying on backup server: {velocity_file}")
+        with open(velocity_file, "wb") as f:
+            pickle.dump(velocity_data, f)
     print(f"Saved velocity file: {velocity_file}")
     return np.asarray(t, dtype=float), np.asarray(velocity, dtype=float), velocity_file
 
@@ -139,8 +153,7 @@ def main():
     args = parse_args()
     proc_file = args.proc_file
     session_name = proc_session_name(proc_file)
-    output_dir = args.output_dir or (proc_file.parent / "figures")
-    output_dir.mkdir(exist_ok=True, parents=True)
+    output_dir = resolve_output_folder(args.output_dir or (proc_file.parent / "figures"))
     output_path = output_dir / f"{session_name}_velocity_distribution.png"
 
     time_stamp, velocity, velocity_file = load_or_compute_velocity(args)

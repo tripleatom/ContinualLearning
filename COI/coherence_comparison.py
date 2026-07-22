@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from tqdm import tqdm
 from scipy import signal
+from server_fallback import resolve_output_folder, resolve_existing_file
 
 # === CONFIGURATION ===
 # List of pickle files to compare
@@ -165,8 +166,8 @@ sessions_data = []
 session_names = []
 
 for i, pkl_file in enumerate(pkl_files):
-    pkl_path = Path(pkl_file)
-    
+    pkl_path = resolve_existing_file(Path(pkl_file))
+
     if not pkl_path.exists():
         print(f"WARNING: File not found: {pkl_file}")
         continue
@@ -234,8 +235,7 @@ if len(complete_pairs) == 0:
     exit(1)
 
 # === CREATE OUTPUT FOLDER ===
-output_path = Path(output_folder)
-output_path.mkdir(parents=True, exist_ok=True)
+output_path = resolve_output_folder(Path(output_folder))
 print(f"\nSaving comparison plots to: {output_path}")
 
 # === PLOT EACH PAIR ===

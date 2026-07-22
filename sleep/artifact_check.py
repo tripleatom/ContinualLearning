@@ -4,6 +4,7 @@ import spikeinterface.extractors as se
 import spikeinterface.preprocessing as spre
 from process_func.recording_proc import rm_artifacts, compute_norms_numba
 from pathlib import Path
+from server_fallback import resolve_output_folder
 
 rec_file = r"\\10.129.151.108\xieluanlabs\xl_cl\ephys\sleep\CnL39SG\CnL39SG_20251102_210043.rec\CnL39SG_20251102_210043sh0.nwb"
 rec = se.NwbRecordingExtractor(rec_file)
@@ -20,8 +21,8 @@ chunk_time = 0.02  # in seconds
 threshold = 8  # threshold in std deviations
 
 # Create output directory structure
-output_base = folder / "artifact_test" / rec_name / f"chunk_{chunk_time}s_thresh_{threshold}"
-output_base.mkdir(parents=True, exist_ok=True)
+output_base = resolve_output_folder(
+    folder / "artifact_test" / rec_name / f"chunk_{chunk_time}s_thresh_{threshold}")
 print(f"Output directory: {output_base}")
 
 # Load or compute artifacts

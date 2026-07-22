@@ -26,15 +26,19 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from sleep_params import (rec_folder, session_name, shanks, plot_params,
-                          artifact_params, sleep_detect_params as P)
+                          artifact_params, sleep_detect_params as P,
+                          resolve_existing_file, resolve_output_folder)
 from sleep_artifacts import (broadband_level, robust_z,
                              detect_broadband_artifacts, mask_to_spans)
 
 rec_folder = Path(rec_folder)
 low_freq_folder = rec_folder / "low_freq"
-bp_file = low_freq_folder / f"{session_name}_all_shanks_band_powers.pkl"
-out_dir = low_freq_folder / "sleep_segmentation"
-out_dir.mkdir(exist_ok=True)
+# Falls back to the backup server if a previous stage saved there due to low space.
+bp_file = resolve_existing_file(low_freq_folder / f"{session_name}_all_shanks_band_powers.pkl")
+# Use wherever the band-powers file actually was (primary or backup server) as
+# the base for outputs too, so they land next to their source data.
+low_freq_folder = bp_file.parent
+out_dir = resolve_output_folder(low_freq_folder / "sleep_segmentation")
 
 use_shanks = P["shanks"] if P["shanks"] is not None else shanks
 

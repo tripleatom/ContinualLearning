@@ -1,4 +1,6 @@
 import sys
+import shutil
+import errno
 from pathlib import Path
 
 code_dir = Path(__file__).resolve().parent.parent.parent
@@ -11,6 +13,44 @@ from spikeinterface import load_sorting_analyzer
 from process_func import DIO
 from rec2nwb.preproc_func import parse_session_info
 from readDIO_grating import get_trial_params, get_session_position
+
+
+# --- fallback storage location when the primary server runs low on space ---
+# Only the server name/share changes; the rest of the path (xl_cl/...) stays identical.
+PRIMARY_SERVER_ROOT = r"\\10.129.151.108\xieluanlabs"
+BACKUP_SERVER_ROOT  = r"\\10.129.151.88\xieluanlabs2"
+MIN_FREE_BYTES      = 5 * 1024 ** 3  # switch to backup server once less than this remains free
+
+
+def _mirror_on_backup_server(path):
+    """Map a path under PRIMARY_SERVER_ROOT to the equivalent path under BACKUP_SERVER_ROOT."""
+    path_str = str(path)
+    if path_str.lower().startswith(PRIMARY_SERVER_ROOT.lower()):
+        return Path(BACKUP_SERVER_ROOT + path_str[len(PRIMARY_SERVER_ROOT):])
+    return None
+
+
+def _resolve_output_folder(session_folder, min_free_bytes=MIN_FREE_BYTES):
+    """Return session_folder, or its mirror on the backup server if the primary is low on space."""
+    try:
+        free = shutil.disk_usage(session_folder).free
+    except OSError:
+        free = None
+
+    if free is not None and free >= min_free_bytes:
+        return session_folder
+
+    backup_folder = _mirror_on_backup_server(session_folder)
+    free_str = "unknown" if free is None else f"{free / 1e9:.1f} GB"
+    if backup_folder is None:
+        print(f"Warning: low space on {session_folder} ({free_str} free), "
+              f"but no backup mapping exists for this path - saving in place.")
+        return session_folder
+
+    backup_folder.mkdir(parents=True, exist_ok=True)
+    print(f"Low space on {session_folder} ({free_str} free) - "
+          f"saving to backup server instead: {backup_folder}")
+    return backup_folder
 
 
 def extract_session_spikes(
@@ -82,7 +122,8 @@ def extract_session_spikes(
     print(f"Last stimulus offset at t={last_stim_offset_sec:.2f} s within window")
 
     # --- output file ---
-    pkl_file = session_folder / f'task_spikes_{session_folder.name}.pkl'
+    output_folder = _resolve_output_folder(session_folder)
+    pkl_file = output_folder / f'task_spikes_{session_folder.name}.pkl'
     if pkl_file.exists() and not overwrite:
         print(f"{pkl_file} exists and overwrite=False – skipping.")
         return pkl_file
@@ -275,8 +316,20 @@ def extract_session_spikes(
     }
 
     print(f"Saving → {pkl_file}")
-    with open(pkl_file, 'wb') as f:
-        pickle.dump(output, f, protocol=pickle.HIGHEST_PROTOCOL)
+    try:
+        with open(pkl_file, 'wb') as f:
+            pickle.dump(output, f, protocol=pickle.HIGHEST_PROTOCOL)
+    except OSError as e:
+        if e.errno != errno.ENOSPC:
+            raise
+        backup_folder = _mirror_on_backup_server(session_folder)
+        if backup_folder is None:
+            raise
+        backup_folder.mkdir(parents=True, exist_ok=True)
+        pkl_file = backup_folder / pkl_file.name
+        print(f"Out of space while saving - retrying on backup server: {pkl_file}")
+        with open(pkl_file, 'wb') as f:
+            pickle.dump(output, f, protocol=pickle.HIGHEST_PROTOCOL)
 
     meta = output['metadata']
     win  = output['window']

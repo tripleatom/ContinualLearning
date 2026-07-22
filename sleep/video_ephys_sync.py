@@ -16,9 +16,8 @@ from process_func.DIO import concatenate_din_data, get_dio_folders
 
 
 # Default paths for interactive/script use.
-proc_file = r"\\10.129.151.108\xieluanlabs\xl_cl\experiment_data\CnL42\260313\video\front_camera_CnL42_2026-03-13_4_PROC"
-rec_file = r"\\10.129.151.108\xieluanlabs\xl_cl\experiment_data\CnL42\260313\CnL42SG_20260313\CnL42_postsleep_20260313_185338.rec"
-
+proc_file = r"\\10.129.151.88\xieluanlabs2\xl_cl\experiment_data\CnL42\260324\video\front_camera_CnL42_2026-03-24_2_PROC"
+rec_file = r"\\10.129.151.88\xieluanlabs2\xl_cl\experiment_data\CnL42\260324\CnL42SG_20260324\CnL42_presleep_20260324_174238.rec"
 DEFAULT_DIO_CHANNEL = 2
 DEFAULT_FS = 30000
 

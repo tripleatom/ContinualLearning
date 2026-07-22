@@ -1,3 +1,4 @@
+import errno
 import numpy as np
 from pathlib import Path
 import spikeinterface.extractors as se
@@ -8,12 +9,14 @@ from sleep_params import (
     session_name,
     nwb_session_name,
     shanks,
-    sleep_start_sample,
-    sleep_end_sample,
+    sleep_sessions,
+    active_sleep_sessions,
     preproc_params,
     DOWNSAMPLE_METHOD,
     N_JOBS,
     CHUNK_DURATION,
+    resolve_output_folder,
+    mirror_on_backup_server,
 )
 
 
@@ -72,9 +75,9 @@ def build_lfp_recording(rec):
     return rec_lfp
 
 
-def process_shank(ish, job_kwargs):
+def process_shank(ish, session_key, session_cfg, job_kwargs):
     print("\n" + "=" * 75)
-    print(f"PROCESSING SHANK {ish}")
+    print(f"PROCESSING SHANK {ish}  [session={session_key}]")
     print("=" * 75 + "\n")
 
     # Load NWB
@@ -95,8 +98,10 @@ def process_shank(ish, job_kwargs):
     # Slice before any preprocessing so CAR/downsample/bandpass only see
     # the sleep window. Bounds are in original-FS sample indices.
     total_frames = rec.get_num_frames()
-    slice_start = 0 if sleep_start_sample is None else int(sleep_start_sample)
-    slice_end = total_frames if sleep_end_sample is None else int(sleep_end_sample)
+    start_sample = session_cfg['start_sample']
+    end_sample = session_cfg['end_sample']
+    slice_start = 0 if start_sample is None else int(start_sample)
+    slice_end = total_frames if end_sample is None else int(end_sample)
     if not (0 <= slice_start < slice_end <= total_frames):
         raise ValueError(
             f"Invalid sleep window [{slice_start}, {slice_end}) for recording "
@@ -147,13 +152,10 @@ def process_shank(ish, job_kwargs):
     # =====================================================
     # SAVE OUTPUT
     # =====================================================
-    out_dir = Path(rec_path).parent / "low_freq"
-    out_dir.mkdir(exist_ok=True, parents=True)
-    out_file = out_dir / f"{session_name}_sh{ish}_lfp_traces.npz"
+    out_dir = resolve_output_folder(Path(rec_path).parent / "low_freq")
+    out_file = out_dir / f"{session_name}{session_cfg['suffix']}_sh{ish}_lfp_traces.npz"
 
-    print(f"\nSaving → {out_file}")
-    np.savez(
-        out_file,
+    savez_kwargs = dict(
         traces=traces,
         sampling_rate=fs,
         channel_ids=sorted_channels,
@@ -170,8 +172,23 @@ def process_shank(ish, job_kwargs):
         sleep_end_sample=slice_end,
         downsample_method=DOWNSAMPLE_METHOD,
         session_name=session_name,
+        sleep_session=session_key,
         shank=ish,
     )
+
+    print(f"\nSaving → {out_file}")
+    try:
+        np.savez(out_file, **savez_kwargs)
+    except OSError as e:
+        if e.errno != errno.ENOSPC:
+            raise
+        backup_dir = mirror_on_backup_server(out_dir)
+        if backup_dir is None:
+            raise
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        out_file = backup_dir / out_file.name
+        print(f"Out of space while saving - retrying on backup server: {out_file}")
+        np.savez(out_file, **savez_kwargs)
     print("Done!")
 
 
@@ -183,8 +200,17 @@ def process_shank(ish, job_kwargs):
 # =====================================================
 if __name__ == "__main__":
     job_kwargs = dict(n_jobs=N_JOBS, chunk_duration=CHUNK_DURATION, progress_bar=True)
-    for ish in shanks:
-        process_shank(ish, job_kwargs)
+
+    sessions_to_run = active_sleep_sessions(sleep_sessions)
+    if not sessions_to_run:
+        print("No active sleep sessions (pre/post both start=end=None) - nothing to do.")
+
+    for session_key, session_cfg in sessions_to_run.items():
+        print("\n" + "#" * 75)
+        print(f"SLEEP SESSION: {session_key}")
+        print("#" * 75)
+        for ish in shanks:
+            process_shank(ish, session_key, session_cfg, job_kwargs)
 
     print("\n" + "#" * 75)
     print("ALL SHANKS PROCESSED")

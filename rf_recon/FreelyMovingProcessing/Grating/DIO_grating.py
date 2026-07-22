@@ -1,7 +1,15 @@
-from parse_grating_experiment import parse_grating_experiment
+from grating_utils import parse_grating_experiment
 import numpy as np
+from pathlib import Path
+from datetime import datetime
 from process_func.DIO import get_dio_folders, concatenate_din_data
 import matplotlib.pyplot as plt
+from matplotlib.widgets import RadioButtons
+
+
+def _stamp_figure(fig, info, y=0.01):
+    """Embed a small reproducibility stamp (params/paths/timestamp) at the bottom of a figure."""
+    fig.text(0.01, y, info, ha='left', va='bottom', fontsize=6, color='0.35')
 
 
 def load_recording_level_dio_edges(rec_folders, channel_id=3):
@@ -378,7 +386,17 @@ def plot_rising_edge_segments(rising_times, segments, task_metas, fs=30000,
     axes[1].legend(fontsize=9)
     axes[1].grid(True, alpha=0.3, axis='y')
 
-    plt.tight_layout()
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    stamp = (
+        f"Generated {timestamp} | script={Path(__file__).name}\n"
+        f"gap_threshold={gap_threshold_s:.0f}s, fs={fs} | "
+        f"segments={len(segments)} (sizes={[len(s) for s in segments]}) | "
+        f"expected_per_task={[m['n_trials'] for m in task_metas]}\n"
+        f"save_path={save_path}"
+    )
+    _stamp_figure(fig, stamp)
+
+    fig.tight_layout(rect=[0, 0.06, 1, 1])
     if save_path is not None:
         fig.savefig(save_path, dpi=150)
         print(f"Segment plot saved to {save_path}")
@@ -606,7 +624,7 @@ def process_task(task_file_path, rising_segment, fs=30000):
     screened_diff = np.diff(rising_screened) / fs
     fixed_diff    = np.diff(rising_fixed)    / fs
 
-    tolerance = 0.02
+    tolerance = 0.04
     lo = (1 - tolerance) * trial_duration
     hi = (1 + tolerance) * trial_duration
 
@@ -638,20 +656,53 @@ def process_task(task_file_path, rising_segment, fs=30000):
         axes[1].legend(fontsize=8)
 
     axes[2].set_xlabel('Edge index', fontsize=9)
-    plt.tight_layout()
+
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    stamp = (
+        f"Generated {timestamp} | script={Path(__file__).name} | task={task_id}\n"
+        f"folder={folder_path} | stimulus={stimulus_duration}s, ITI={ITI_duration}s, "
+        f"trial_duration={trial_duration}s, display_tolerance=±{tolerance*100:.0f}% | "
+        f"n_trials_expected={n_repeats}\n"
+        f"raw={len(rising_segment)}, screened={len(rising_screened)} "
+        f"({n_removed_prescreen} pre-screened out), fixed={len(rising_fixed)}"
+    )
+    _stamp_figure(fig, stamp)
+
+    fig.tight_layout(rect=[0, 0.08, 0.83, 1])
     fig.savefig(folder_path / f"{task_id}_DIO_fix.png", dpi=150)
+
+    # ── Select which version (raw / screened / fixed) to save to the .npz ──────
+    rax = fig.add_axes([0.85, 0.45, 0.13, 0.18])
+    rax.set_title('Save version', fontsize=9)
+    version_options = ['raw', 'screened', 'fixed']
+    radio = RadioButtons(rax, version_options, active=2)
+
+    save_choice = {'version': version_options[2]}
+
+    def _on_select(label):
+        save_choice['version'] = label
+
+    radio.on_clicked(_on_select)
     plt.show()
 
+    version_data = {
+        'raw':      (rising_segment,  rising_segment  + int(stimulus_duration * fs)),
+        'screened': (rising_screened, rising_screened + int(stimulus_duration * fs)),
+        'fixed':    (rising_fixed,    falling_fixed),
+    }
+    chosen_rising, chosen_falling = version_data[save_choice['version']]
+
     save_path = folder_path / f"{task_id}_DIO.npz"
-    np.savez_compressed(save_path, rising_times=rising_fixed, falling_times=falling_fixed)
-    print(f"  Saved to {save_path}")
+    np.savez_compressed(save_path, rising_times=chosen_rising, falling_times=chosen_falling)
+    print(f"  Saved '{save_choice['version']}' version to {save_path}")
 
     return {
         'task_id': task_id,
-        'rising_times': rising_fixed,
-        'falling_times': falling_fixed,
+        'rising_times': chosen_rising,
+        'falling_times': chosen_falling,
         'trial_duration_samples': trial_duration_samples,
         'stimulus_duration': stimulus_duration,
+        'saved_version': save_choice['version'],
     }
 
 
@@ -717,7 +768,21 @@ gap_threshold_s = 30.0
 gap_threshold_samples = int(gap_threshold_s * fs)
 
 # Use the common trial duration across tasks (assumed identical; adjust if not).
+# Ask for it interactively since different experiments use different values
+# (e.g. 3s vs 2s trial) and the parsed task-file value is worth confirming.
 global_trial_duration_s = task_metas[0]['trial_duration']
+ASK_TRIAL_DURATION = True
+if ASK_TRIAL_DURATION:
+    try:
+        user_input = input(
+            f"Expected trial duration (stimulus+ITI) in seconds? "
+            f"[Enter for default = {global_trial_duration_s:g}s, parsed from task file]: "
+        ).strip()
+    except EOFError:
+        user_input = ""
+    if user_input:
+        global_trial_duration_s = float(user_input)
+        print(f"Using user-specified trial duration: {global_trial_duration_s:g}s")
 global_trial_duration_samples = int(global_trial_duration_s * fs)
 global_n_trials = total_expected
 
@@ -751,6 +816,39 @@ for k, seg in enumerate(auto_segments):
           f"start={seg[0]/fs:.1f}s  end={seg[-1]/fs:.1f}s")
     cumulative += len(seg)
 print(f"  Total: {len(rising_prescreened)} edges\n")
+
+# ── Ask how many real task pieces there are ─────────────────────────────────────
+# Gap-based auto-segmentation can over-split on a single stray/glitch edge (a
+# lone pulse far from the main train shows up as its own 1-edge "segment").
+# Tell it how many real pieces to expect and it keeps only the N largest
+# auto-detected segments (by edge count), dropping the rest as spurious.
+# Set to False for non-interactive/batch runs (auto_segments is used as-is).
+ASK_NUM_SEGMENTS = True
+
+if ASK_NUM_SEGMENTS and len(auto_segments) > 1:
+    default_n_pieces = len(task_metas)
+    try:
+        user_input = input(
+            f"How many real task piece(s) are there? "
+            f"[Enter for default = {default_n_pieces}]: "
+        ).strip()
+    except EOFError:
+        user_input = ""
+    n_pieces = int(user_input) if user_input else default_n_pieces
+
+    if 0 < n_pieces < len(auto_segments):
+        order = sorted(range(len(auto_segments)), key=lambda i: len(auto_segments[i]), reverse=True)
+        kept_idx = sorted(order[:n_pieces])
+        dropped_idx = [i for i in range(len(auto_segments)) if i not in kept_idx]
+        print(f"Keeping the {n_pieces} largest segment(s): {[i + 1 for i in kept_idx]}; "
+              f"dropping spurious segment(s): {[i + 1 for i in dropped_idx]} "
+              f"({[len(auto_segments[i]) for i in dropped_idx]} edges each)\n")
+        auto_segments = [auto_segments[i] for i in kept_idx]
+    elif n_pieces >= len(auto_segments):
+        print(f"Requested {n_pieces} piece(s) — nothing to drop "
+              f"({len(auto_segments)} segment(s) detected).\n")
+    else:
+        print(f"Invalid piece count ({n_pieces}) — keeping all {len(auto_segments)} segment(s).\n")
 
 # ── Manual task assignment ─────────────────────────────────────────────────────
 # Set each tuple to (start_edge_idx, end_edge_idx) — end is EXCLUSIVE, Python-style.

@@ -4,7 +4,7 @@ Batch grating analysis runner.
 Default workflow:
 1. Export the current day from grating_config.py with GratingExport.py logic.
 2. Run LDA, SVM, embedding, and tuning-curve analyses on the exported pkl.
-3. Run OSI_distribution.py on the tuning_statistics.csv from tuning curves.
+   (Tuning curves also plot the OSI distribution from their own tuning_statistics.csv.)
 
 You can also skip export and run downstream analyses on an existing pkl:
     python batch_grating_analysis.py --pkl path/to/grating_data_merged.pkl
@@ -163,7 +163,6 @@ def run_downstream(
     import GratingLDA
     import GratingSVM
     import GratingTuningCurve
-    import OSI_distribution
 
     pkl_path = Path(pkl_path)
     if not pkl_path.exists():
@@ -228,22 +227,8 @@ def run_downstream(
         ),
         continue_on_error,
     )
-
-    if not tuning_csv.exists():
-        msg = f"Cannot run OSI distribution; tuning CSV does not exist: {tuning_csv}"
-        if continue_on_error:
-            print(msg)
-        else:
-            raise FileNotFoundError(msg)
-    else:
-        _run_stage(
-            "OSI distribution",
-            lambda: OSI_distribution.plot_osi_distribution(
-                csv_path=tuning_csv,
-                save_path=osi_png,
-            ),
-            continue_on_error,
-        )
+    # generate_tuning_curves() plots the OSI distribution itself (plot_osi=True
+    # by default) from the tuning_statistics.csv it just wrote, saved to osi_png.
 
     return outputs
 

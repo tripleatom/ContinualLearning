@@ -5,11 +5,14 @@ Provides data loading, feature extraction, orientation selectivity,
 and common visualization helpers used by GratingLDA and GratingSVM.
 """
 import csv
+import re
 import platform
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 from pathlib import Path
+from datetime import datetime
 import pickle
 import h5py
 import json
@@ -44,9 +47,15 @@ def load_session_paths(animal_id, experiment_date, log_dir=None):
         Paths to all .txt task files for this session.
     """
     if platform.system() == "Darwin":
-        parent_folder = Path(r"/Volumes/xieluanlabs/xl_cl/experiment_data")
+        parent_folders = [
+            Path(r"/Volumes/xieluanlabs/xl_cl/experiment_data"),
+            Path(r"/Volumes/xieluanlabs2/xl_cl/experiment_data"),
+        ]
     else:
-        parent_folder = Path(r"\\10.129.151.108\xieluanlabs\xl_cl\experiment_data")
+        parent_folders = [
+            Path(r"\\10.129.151.108\xieluanlabs\xl_cl\experiment_data"),
+            Path(r"\\10.129.151.88\xieluanlabs2\xl_cl\experiment_data"),
+        ]
 
     if log_dir is None:
         log_dir = Path(__file__).parent / "experiment_log"
@@ -62,19 +71,235 @@ def load_session_paths(animal_id, experiment_date, log_dir=None):
         else:
             raise ValueError(f"No entry for date {experiment_date} in {csv_path}")
 
-    session_base = parent_folder / animal_id / experiment_date
-    ephys_folder = session_base / row['EphysFolder']
-    rec_folders = [
-        ephys_folder / f.strip()
-        for f in row['PassiveFolder'].split(';')
-        if f.strip()
-    ]
-    task_file_paths = [
-        session_base / f.strip()
-        for f in row['TaskFile'].split(';')
-        if f.strip().endswith('.txt')
-    ]
-    return rec_folders, task_file_paths
+    # Try each known experiment_data root in order; use the first one where every
+    # referenced rec folder and task file actually exists on disk.
+    tried_bases = []
+    for parent_folder in parent_folders:
+        session_base = parent_folder / animal_id / experiment_date
+        ephys_folder = session_base / row['EphysFolder']
+        rec_folders = [
+            ephys_folder / f.strip()
+            for f in row['PassiveFolder'].split(';')
+            if f.strip()
+        ]
+        task_file_paths = [
+            session_base / f.strip()
+            for f in row['TaskFile'].split(';')
+            if f.strip().endswith('.txt')
+        ]
+        if all(p.exists() for p in rec_folders) and all(p.exists() for p in task_file_paths):
+            return rec_folders, task_file_paths
+        tried_bases.append(session_base)
+
+    raise FileNotFoundError(
+        f"Session {animal_id}/{experiment_date} not found under any known "
+        f"experiment_data root. Tried:\n" + "\n".join(f"  {b}" for b in tried_bases)
+    )
+
+
+def resolve_data_path(label="neural data (.pkl file)"):
+    """
+    Get a pkl path from the user for the currently configured session
+    (grating_config.ANIMAL_ID / EXPERIMENT_DATE / SORTOUT_FOLDER), auto-locating
+    it via GratingExport.find_grating_pkl so scripts don't need a path pasted in
+    by hand every run.
+
+    Falls back to a plain interactive prompt if grating_config isn't set up for
+    this data, or auto-detection fails (not found, or more than one candidate
+    matches) - pressing Enter at the prompt accepts the auto-detected path, or
+    a path can be typed to override it.
+
+    Imports of grating_config / GratingExport are done lazily here so importing
+    grating_utils itself stays lightweight (GratingExport pulls in spikeinterface).
+    """
+    auto_path = None
+    try:
+        from grating_config import ANIMAL_ID, EXPERIMENT_DATE, SORTOUT_FOLDER
+        from GratingExport import find_grating_pkl
+        auto_path = find_grating_pkl(ANIMAL_ID, EXPERIMENT_DATE, SORTOUT_FOLDER)
+        print(f"Auto-detected {label}: {auto_path}")
+    except Exception as e:
+        print(f"Could not auto-locate {label} from grating_config ({e}).")
+
+    prompt = (
+        f"Enter path to {label} [Enter to use auto-detected above]: "
+        if auto_path is not None else
+        f"Enter path to {label}: "
+    )
+    user_input = input(prompt).strip().strip('"').strip("'")
+
+    if not user_input:
+        if auto_path is None:
+            raise FileNotFoundError(f"No path provided and auto-detection failed for {label}.")
+        return str(auto_path)
+    return user_input
+
+
+# =============================================================================
+# TASK FILE PARSING
+# =============================================================================
+
+def parse_grating_experiment(file_path):
+    """
+    Parse a grating experiment task .txt file and return structured data.
+
+    Args:
+        file_path (str): Path to the experiment data file
+
+    Returns:
+        Dict containing:
+        - metadata: Basic experiment information
+        - parameters: Experiment parameters and ranges
+        - trial_data: DataFrame with all trial data
+        - summary: Experiment summary statistics
+    """
+
+    with open(file_path, 'r') as f:
+        content = f.read()
+
+    # Initialize result dictionary
+    result = {
+        'metadata': {},
+        'parameters': {},
+        'trial_data': None,
+        'summary': {}
+    }
+
+    # Parse metadata section
+    metadata_patterns = {
+        'generated': r'Generated: (.+)',
+        'animal_id': r'Animal ID: (.+)',
+        'experiment_id': r'Experiment ID: (.+)',
+        'start_time': r'Start Time: (.+)',
+        'end_time': r'End Time: (.+)'
+    }
+
+    for key, pattern in metadata_patterns.items():
+        match = re.search(pattern, content)
+        if match:
+            value = match.group(1).strip()
+            # Convert datetime strings to datetime objects
+            if 'time' in key or key == 'generated':
+                try:
+                    result['metadata'][key] = datetime.strptime(value, '%Y-%m-%d %H:%M:%S')
+                except ValueError:
+                    result['metadata'][key] = value
+            else:
+                result['metadata'][key] = value
+
+    # Parse experiment parameters
+    param_patterns = {
+        'total_trials': r'Total Trials: (\d+)',
+        'completed_trials': r'Completed Trials: (\d+)',
+        'stimulus_duration': r'Stimulus Duration: (.+)',
+        'iti_duration': r'ITI Duration: (.+)',
+        'gray_screen_duration': r'Gray Screen Duration: (.+)',
+        'gray_side_configuration': r'Gray Side Configuration: (.+)',
+        'randomized': r'Randomized: (.+)',
+        'repeats_per_condition': r'Repeats per condition: (\d+)'
+    }
+
+    for key, pattern in param_patterns.items():
+        match = re.search(pattern, content)
+        if match:
+            value = match.group(1).strip()
+            # Convert numeric values
+            if key in ['total_trials', 'completed_trials', 'repeats_per_condition']:
+                result['parameters'][key] = int(value)
+            elif key == 'randomized':
+                result['parameters'][key] = value.lower() == 'true'
+            else:
+                result['parameters'][key] = value
+
+    # Parse parameter ranges
+    range_patterns = {
+        'left_spatial_frequencies': r'Left Spatial Frequencies: \[(.+?)\]',
+        'left_contrasts': r'Left Contrasts: \[(.+?)\]',
+        'left_phases': r'Left Phases: \[(.+?)\]',
+        'left_orientations': r'Left Orientations: \[(.+?)\]',
+        'right_spatial_frequencies': r'Right Spatial Frequencies: \[(.+?)\]',
+        'right_contrasts': r'Right Contrasts: \[(.+?)\]',
+        'right_phases': r'Right Phases: \[(.+?)\]',
+        'right_orientations': r'Right Orientations: \[(.+?)\]'
+    }
+
+    result['parameters']['ranges'] = {}
+    for key, pattern in range_patterns.items():
+        match = re.search(pattern, content)
+        if match:
+            values_str = match.group(1).strip()
+            # Parse the list values
+            values = [float(x.strip()) for x in values_str.split(',')]
+            result['parameters']['ranges'][key] = values
+
+    # Parse trial data
+    trial_section_match = re.search(r'TRIAL DATA:\s*-+\s*(.+?)\s*SUMMARY:', content, re.DOTALL)
+    if trial_section_match:
+        trial_content = trial_section_match.group(1).strip()
+        lines = trial_content.split('\n')
+
+        # Find the header line
+        header_line = None
+        data_lines = []
+
+        for line in lines:
+            line = line.strip()
+            if line.startswith('Trial\t'):
+                header_line = line
+            elif line and not line.startswith('Trial\t') and '\t' in line:
+                data_lines.append(line)
+
+        if header_line and data_lines:
+            # Parse header
+            headers = header_line.split('\t')
+
+            # Parse data
+            trial_data = []
+            for line in data_lines:
+                values = line.split('\t')
+                if len(values) == len(headers):
+                    row = {}
+                    for i, header in enumerate(headers):
+                        value = values[i].strip()
+                        # Convert data types appropriately
+                        if header == 'Trial':
+                            row[header] = int(value)
+                        elif header in ['Start', 'End']:
+                            # Keep as string for now, could convert to datetime if needed
+                            row[header] = value
+                        elif header in ['Duration', 'L_Orient', 'L_SF', 'L_Contrast', 'L_Phase',
+                                      'R_Orient', 'R_SF', 'R_Contrast', 'R_Phase', 'AnimalX',
+                                      'AnimalZ', 'Heading']:
+                            row[header] = float(value)
+                        else:
+                            row[header] = value
+                    trial_data.append(row)
+
+            # Create DataFrame
+            result['trial_data'] = pd.DataFrame(trial_data)
+
+    # Parse summary
+    summary_match = re.search(r'SUMMARY:\s*-+\s*(.+?)$', content, re.DOTALL)
+    if summary_match:
+        summary_content = summary_match.group(1).strip()
+        summary_lines = summary_content.split('\n')
+
+        for line in summary_lines:
+            line = line.strip()
+            if ':' in line:
+                key, value = line.split(':', 1)
+                key = key.strip().lower().replace(' ', '_')
+                value = value.strip()
+
+                # Convert values appropriately
+                if 'rate' in key and '%' in value:
+                    result['summary'][key] = float(value.replace('%', ''))
+                elif 'duration' in key:
+                    result['summary'][key] = value
+                else:
+                    result['summary'][key] = value
+
+    return result
 
 
 # =============================================================================

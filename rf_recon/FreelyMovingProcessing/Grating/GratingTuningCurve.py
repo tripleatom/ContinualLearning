@@ -5,6 +5,7 @@ This script loads neural data and generates individual tuning curve plots
 for each unit, saved to a dedicated folder.
 """
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 from pathlib import Path
 import pickle
@@ -15,6 +16,8 @@ import warnings
 import argparse
 import sys
 warnings.filterwarnings('ignore')
+
+from grating_utils import resolve_data_path
 
 
 # =============================================================================
@@ -463,17 +466,19 @@ def plot_all_tuning_curves_summary(tuning_results, save_path=None, max_per_page=
 # MAIN WORKFLOW
 # =============================================================================
 
-def generate_tuning_curves(data_path, time_window=(0.07, 0.16), 
-                          output_folder=None, create_summary=True):
+def generate_tuning_curves(data_path, time_window=(0.07, 0.16),
+                          output_folder=None, create_summary=True, plot_osi=True):
     """
     Complete pipeline: load data, calculate tuning curves, save all plots.
-    
+
     Args:
         data_path: Path to neural data file
         time_window: Tuple of (start, end) time in seconds for analysis
         output_folder: Folder to save tuning curve plots (default: data_path_tuning_curves)
         create_summary: Whether to create summary plots with all units
-    
+        plot_osi: Whether to also plot the OSI distribution from the tuning
+                  statistics CSV this run produces (default True)
+
     Returns:
         Dictionary with tuning results
     """
@@ -523,7 +528,21 @@ def generate_tuning_curves(data_path, time_window=(0.07, 0.16),
             print(f"  Processed {i}/{len(unit_ids)} units...")
     
     print(f"✓ Saved {len(unit_ids)} individual tuning curve plots")
-    
+
+    # Combined pkl: every unit's tuning + unit_info in a single file
+    combined_path = output_folder / "all_units_tuning.pkl"
+    combined = {
+        unit_id: {
+            'unit_id': unit_id,
+            'tuning': unit_tuning_data[unit_id],
+            'unit_info': all_unit_info.get(unit_id, {}),
+        }
+        for unit_id in unit_ids
+    }
+    with open(combined_path, 'wb') as f:
+        pickle.dump(combined, f, protocol=pickle.HIGHEST_PROTOCOL)
+    print(f"✓ Saved combined tuning data for {len(unit_ids)} units to: {combined_path}")
+
     # Generate summary plots
     if create_summary:
         print(f"\nGenerating summary plots...")
@@ -531,8 +550,13 @@ def generate_tuning_curves(data_path, time_window=(0.07, 0.16),
         plot_all_tuning_curves_summary(tuning_results, save_path=summary_path)
     
     # Save tuning statistics to CSV
-    save_tuning_statistics(unit_tuning_data, output_folder / "tuning_statistics.csv")
-    
+    tuning_csv_path = output_folder / "tuning_statistics.csv"
+    save_tuning_statistics(unit_tuning_data, tuning_csv_path)
+
+    # OSI distribution summary, computed from the CSV just written
+    if plot_osi:
+        plot_osi_distribution(tuning_csv_path)
+
     print(f"\n✓ All plots saved to: {output_folder}")
     
     return tuning_results
@@ -657,6 +681,153 @@ def save_tuning_statistics(unit_tuning_data, save_path):
 
 
 # =============================================================================
+# OSI DISTRIBUTION
+# =============================================================================
+
+def plot_osi_distribution(csv_path, save_path=None):
+    """
+    Read a tuning_statistics.csv (as written by save_tuning_statistics) and plot
+    an OSI distribution summary: histogram+KDE, cumulative distribution,
+    violin+strip plot, and a text panel of summary statistics.
+
+    Args:
+        csv_path: Path to tuning_statistics.csv file
+        save_path: Optional path to save the plot (default: same folder as CSV)
+    """
+    csv_path = Path(csv_path)
+
+    print(f"Reading tuning statistics from: {csv_path}")
+    df = pd.read_csv(csv_path)
+
+    print(f"Loaded {len(df)} units")
+    print(f"OSI range: {df['osi'].min():.3f} - {df['osi'].max():.3f}")
+    print(f"OSI mean: {df['osi'].mean():.3f} ± {df['osi'].std():.3f}")
+
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    fig.suptitle('Orientation Selectivity Index (OSI) Distribution',
+                 fontsize=16, fontweight='bold')
+
+    # 1. Histogram with density curve
+    ax1 = axes[0, 0]
+    ax1.hist(df['osi'], bins=30, density=True,
+             alpha=0.7, color='#2E86AB', edgecolor='black')
+
+    kde = stats.gaussian_kde(df['osi'])
+    x_range = np.linspace(df['osi'].min(), df['osi'].max(), 200)
+    ax1.plot(x_range, kde(x_range), 'r-', linewidth=2, label='KDE')
+
+    mean_osi = df['osi'].mean()
+    median_osi = df['osi'].median()
+    ax1.axvline(mean_osi, color='green', linestyle='--', linewidth=2,
+                label=f'Mean: {mean_osi:.3f}')
+    ax1.axvline(median_osi, color='orange', linestyle='--', linewidth=2,
+                label=f'Median: {median_osi:.3f}')
+
+    ax1.set_xlabel('OSI', fontsize=12, fontweight='bold')
+    ax1.set_ylabel('Density', fontsize=12, fontweight='bold')
+    ax1.set_title('OSI Distribution (Histogram + KDE)', fontsize=13, fontweight='bold')
+    ax1.legend(fontsize=10)
+    ax1.grid(True, alpha=0.3)
+
+    # 2. Cumulative distribution
+    ax2 = axes[0, 1]
+    sorted_osi = np.sort(df['osi'])
+    cumulative = np.arange(1, len(sorted_osi) + 1) / len(sorted_osi)
+    ax2.plot(sorted_osi, cumulative, linewidth=2, color='#2E86AB')
+    ax2.axhline(0.5, color='orange', linestyle='--', linewidth=1.5,
+                label=f'Median: {median_osi:.3f}')
+    ax2.axvline(median_osi, color='orange', linestyle='--', linewidth=1.5)
+
+    q25 = df['osi'].quantile(0.25)
+    q75 = df['osi'].quantile(0.75)
+    ax2.axvline(q25, color='gray', linestyle=':', linewidth=1.5,
+                label=f'Q1: {q25:.3f}')
+    ax2.axvline(q75, color='gray', linestyle=':', linewidth=1.5,
+                label=f'Q3: {q75:.3f}')
+
+    ax2.set_xlabel('OSI', fontsize=12, fontweight='bold')
+    ax2.set_ylabel('Cumulative Probability', fontsize=12, fontweight='bold')
+    ax2.set_title('Cumulative Distribution', fontsize=13, fontweight='bold')
+    ax2.legend(fontsize=10)
+    ax2.grid(True, alpha=0.3)
+
+    # 3. Violin + strip plot
+    ax3 = axes[1, 0]
+    parts = ax3.violinplot([df['osi']], positions=[1], widths=0.7,
+                           showmeans=True, showmedians=True)
+    for pc in parts['bodies']:
+        pc.set_facecolor('#2E86AB')
+        pc.set_alpha(0.7)
+
+    np.random.seed(42)
+    y_jitter = np.random.normal(1, 0.04, size=len(df))
+    ax3.scatter(y_jitter, df['osi'], alpha=0.3, s=20, color='darkblue')
+
+    ax3.set_ylabel('OSI', fontsize=12, fontweight='bold')
+    ax3.set_title('OSI Distribution (Violin + Strip)', fontsize=13, fontweight='bold')
+    ax3.set_xticks([1])
+    ax3.set_xticklabels(['All Units'])
+    ax3.grid(True, alpha=0.3, axis='y')
+
+    # 4. Statistics summary
+    ax4 = axes[1, 1]
+    ax4.axis('off')
+
+    stats_text = f"""
+    OSI DISTRIBUTION STATISTICS
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    Sample Size:
+    • Total units: {len(df)}
+
+    Central Tendency:
+    • Mean:       {df['osi'].mean():.4f}
+    • Median:     {df['osi'].median():.4f}
+    • Mode:       {df['osi'].mode().values[0] if len(df['osi'].mode()) > 0 else 'N/A'}
+
+    Spread:
+    • Std Dev:    {df['osi'].std():.4f}
+    • Variance:   {df['osi'].var():.4f}
+    • Range:      {df['osi'].max() - df['osi'].min():.4f}
+    • IQR:        {df['osi'].quantile(0.75) - df['osi'].quantile(0.25):.4f}
+
+    Distribution:
+    • Min:        {df['osi'].min():.4f}
+    • Q1 (25%):   {df['osi'].quantile(0.25):.4f}
+    • Q2 (50%):   {df['osi'].quantile(0.50):.4f}
+    • Q3 (75%):   {df['osi'].quantile(0.75):.4f}
+    • Max:        {df['osi'].max():.4f}
+
+    Shape:
+    • Skewness:   {df['osi'].skew():.4f}
+    • Kurtosis:   {df['osi'].kurtosis():.4f}
+
+    Selectivity Categories:
+    • High (OSI > 0.5):   {(df['osi'] > 0.5).sum()} ({(df['osi'] > 0.5).sum()/len(df)*100:.1f}%)
+    • Medium (0.3-0.5):   {((df['osi'] >= 0.3) & (df['osi'] <= 0.5)).sum()} ({((df['osi'] >= 0.3) & (df['osi'] <= 0.5)).sum()/len(df)*100:.1f}%)
+    • Low (OSI < 0.3):    {(df['osi'] < 0.3).sum()} ({(df['osi'] < 0.3).sum()/len(df)*100:.1f}%)
+    """
+
+    ax4.text(0.05, 0.95, stats_text, transform=ax4.transAxes,
+             fontsize=9, verticalalignment='top', fontfamily='monospace',
+             bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.3))
+
+    plt.tight_layout()
+
+    if save_path is None:
+        save_path = csv_path.parent / 'OSI_distribution.png'
+    else:
+        save_path = Path(save_path)
+
+    fig.savefig(save_path, dpi=300, bbox_inches='tight')
+    print(f"Saved OSI distribution plot to: {save_path}")
+
+    plt.close(fig)
+
+    return df
+
+
+# =============================================================================
 # SCRIPT ENTRY POINT
 # =============================================================================
 
@@ -681,7 +852,7 @@ if __name__ == "__main__":
 
     DATA_PATH = args.data
     if not DATA_PATH:
-        DATA_PATH = input("Enter path to neural data (.pkl file): ").strip().strip('"').strip("'")
+        DATA_PATH = resolve_data_path()
 
     time_window = (args.t0, args.t1)
 

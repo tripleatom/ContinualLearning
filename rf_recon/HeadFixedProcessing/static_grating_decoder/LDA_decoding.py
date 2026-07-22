@@ -10,6 +10,7 @@ from lda_decoding_utils import (
     per_orientation_accuracy_plot, real_vs_shuffled_plot
 )
 from rf_recon.rf_func import sig_label
+from server_fallback import resolve_output_folder
 
 
 def fit_gaussian_3d(data):
@@ -34,8 +35,7 @@ def visualize_lda_decoding_with_spheres(npz_file, cv_folds=5, random_state=42, s
     session_folder = npz_file.parent
     animal_id = session_folder.parent.name
     session_id = session_folder.name
-    embed = session_folder / "embedding"
-    embed.mkdir(exist_ok=True)
+    embed = resolve_output_folder(session_folder / "embedding")
 
     d = np.load(npz_file, allow_pickle=True)
     R = d['all_units_responses']

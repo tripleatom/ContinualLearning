@@ -16,6 +16,7 @@ from pathlib import Path
 import numpy as np
 
 import plot_trial_traces as ptt
+from server_fallback import resolve_output_folder
 
 
 SPHERE_DEFAULT = r"\\10.129.151.108\xieluanlabs\xl_cl\behavior\sphere"
@@ -114,7 +115,7 @@ def main():
             n_skipped += 1
             continue
         animal, stem = parsed
-        out_dir = sphere / animal / 'trial_overlays'
+        out_dir = resolve_output_folder(sphere / animal / 'trial_overlays')
         out_path = out_dir / f"{stem}_overlay.png"
 
         if out_path.exists() and not args.overwrite:
@@ -137,7 +138,6 @@ def main():
             continue
 
         try:
-            out_dir.mkdir(parents=True, exist_ok=True)
             ptt.plot_overlay(traces, out_path)
             print(f"OK {len(traces)} trials -> {out_path}")
             n_written += 1

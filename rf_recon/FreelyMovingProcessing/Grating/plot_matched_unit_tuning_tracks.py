@@ -32,6 +32,7 @@ import pandas as pd
 from matplotlib.backends.backend_pdf import PdfPages
 
 from grating_utils import tuning_curve_from_psth
+from server_fallback import resolve_output_folder
 
 
 DEFAULT_BASE_DIR = Path(r"\\10.129.151.108\xieluanlabs\xl_cl\sortout\CnL42SG")
@@ -472,7 +473,7 @@ def generate_figures(
     excluded = {normalize_session_token(session) for session in exclude_sessions}
     tuning_dirs = find_tuning_dirs(base_dir, session_cols, excluded)
 
-    out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir = resolve_output_folder(out_dir)
     pdf_path = out_dir / "all_matched_units_3row_tuning.pdf"
     response_pdf_path = out_dir / "all_matched_units_response_change.pdf"
 

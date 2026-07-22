@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from sklearn.preprocessing import LabelEncoder
+from server_fallback import resolve_output_folder
 
 def create_sphere_mesh(center, radius, resolution=30):
     """Return an ellipsoid mesh (X, Y, Z) for given center & radii."""
@@ -20,8 +21,7 @@ npz_file   = Path(r'\\10.129.151.108\xieluanlabs\xl_cl\code\sortout\CnL22\250531
 animal_id = npz_file.parent.parent.name
 session_id = npz_file.parent.name
 
-embed_dir  = npz_file.parent / "embedding"
-embed_dir.mkdir(exist_ok=True)
+embed_dir  = resolve_output_folder(npz_file.parent / "embedding")
 
 # — LOAD & FILTER —
 data       = np.load(npz_file, allow_pickle=True)

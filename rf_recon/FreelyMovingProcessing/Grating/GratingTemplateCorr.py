@@ -27,7 +27,7 @@ from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
 
-from grating_utils import load_neural_data, calculate_firing_rates
+from grating_utils import load_neural_data, calculate_firing_rates, resolve_data_path
 
 
 # =============================================================================
@@ -348,7 +348,7 @@ def _print_matrices(res, label_suffix=''):
 # =============================================================================
 
 if __name__ == "__main__":
-    DATA_PATH = input("Enter path to neural data (.pkl file): ").strip().strip('"').strip("'")
+    DATA_PATH = resolve_data_path()
     try:
         run_analysis(
             data_path=DATA_PATH,

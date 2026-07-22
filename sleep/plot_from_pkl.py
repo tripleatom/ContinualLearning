@@ -18,8 +18,11 @@ from datetime import datetime
 import argparse
 import pickle
 
+import errno
 import numpy as np
 import matplotlib.pyplot as plt
+
+from server_fallback import resolve_output_folder, resolve_existing_file, mirror_on_backup_server
 
 # Default pkl (sh7 ch9, artifact-removed + concatenated).
 DEFAULT_PKL = (r"\\10.129.151.108\xieluanlabs\xl_cl\experiment_data\CnL42\260313"
@@ -49,7 +52,7 @@ def parse_args():
 
 
 args = parse_args()
-pkl_path = Path(args.pkl)
+pkl_path = resolve_existing_file(Path(args.pkl))
 print(f"Loading: {pkl_path}")
 with open(pkl_path, 'rb') as f:
     d = pickle.load(f)
@@ -153,6 +156,19 @@ fig.text(0.005, 0.001, stamp, fontsize=6, color='0.4', ha='left', va='bottom')
 
 out = Path(args.out) if args.out else pkl_path.with_name(
     pkl_path.stem.replace('_trace_data', '') + '_from_pkl.png')
-plt.savefig(out, dpi=150, bbox_inches='tight')
+out_dir = resolve_output_folder(out.parent)
+out = out_dir / out.name
+try:
+    plt.savefig(out, dpi=150, bbox_inches='tight')
+except OSError as e:
+    if e.errno != errno.ENOSPC:
+        raise
+    backup_dir = mirror_on_backup_server(out_dir)
+    if backup_dir is None:
+        raise
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    out = backup_dir / out.name
+    print(f"Out of space while saving - retrying on backup server: {out}")
+    plt.savefig(out, dpi=150, bbox_inches='tight')
 plt.close()
 print(f"Saved: {out}")

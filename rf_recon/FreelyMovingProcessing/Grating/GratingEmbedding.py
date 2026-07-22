@@ -53,6 +53,7 @@ from grating_utils import (
     calculate_firing_rates,
     calculate_orientation_selectivity,
     plot_trial_distribution,
+    resolve_data_path,
 )
 
 
@@ -979,7 +980,7 @@ def run_analysis(data_path, time_window=(0.07, 0.16), save_plots=True, output_pa
 # =============================================================================
 
 if __name__ == "__main__":
-    DATA_PATH = input("Enter path to neural data (.pkl file): ").strip().strip('"').strip("'")
+    DATA_PATH = resolve_data_path()
 
     try:
         all_results = run_analysis(

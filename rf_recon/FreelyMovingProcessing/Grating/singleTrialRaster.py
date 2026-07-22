@@ -7,25 +7,11 @@ to that single stimulus presentation. Neurons sorted by preferred orientation.
 import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
-import pickle
+from datetime import datetime
 import warnings
 warnings.filterwarnings('ignore')
 
-
-# =============================================================================
-# DATA LOADING
-# =============================================================================
-
-def load_neural_data(filepath):
-    """Load neural data from pickle format."""
-    filepath = Path(filepath)
-    
-    if filepath.suffix != '.pkl':
-        raise ValueError(f"Only .pkl files supported. Got: {filepath.suffix}")
-    
-    print(f"Loading data from: {filepath.name}")
-    with open(filepath, 'rb') as f:
-        return pickle.load(f)
+from grating_utils import load_neural_data, resolve_data_path
 
 
 # =============================================================================
@@ -127,12 +113,13 @@ def organize_trials_by_orientation(neural_data):
 # SINGLE TRIAL RASTER PLOTTING
 # =============================================================================
 
-def plot_single_trial_raster(neural_data, pref_data, stimulus_orientation, 
-                             trial_number, time_window=(-0.1, 0.3), save_path=None):
+def plot_single_trial_raster(neural_data, pref_data, stimulus_orientation,
+                             trial_number, time_window=(-0.1, 0.3), save_path=None,
+                             stamp_info=None):
     """
     Plot population raster for a SINGLE trial.
     Neurons sorted by preferred orientation (grouped), then by OSI within groups.
-    
+
     Args:
         neural_data: Loaded neural data
         pref_data: Output from calculate_preferred_orientations()
@@ -140,6 +127,7 @@ def plot_single_trial_raster(neural_data, pref_data, stimulus_orientation,
         trial_number: Which trial number (0-indexed within this orientation)
         time_window: Time window for display
         save_path: Path to save figure
+        stamp_info: Optional reproducibility stamp text embedded at the figure bottom
     """
     unit_data = pref_data['unit_data']
     units_sorted = pref_data['units_sorted_by_preference']
@@ -262,14 +250,17 @@ def plot_single_trial_raster(neural_data, pref_data, stimulus_orientation,
            verticalalignment='top', fontsize=11, fontfamily='monospace',
            bbox=dict(boxstyle='round', facecolor='white', alpha=0.9, edgecolor='black'))
     
-    plt.tight_layout()
-    
+    if stamp_info:
+        fig.text(0.01, 0.003, stamp_info, ha='left', va='bottom', fontsize=6, color='0.4')
+
+    plt.tight_layout(rect=(0, 0.02, 1, 1))
+
     if save_path:
         save_path = Path(save_path)
         save_path.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(save_path, dpi=150, bbox_inches='tight')
         plt.close(fig)
-    
+
     return fig
 
 
@@ -296,14 +287,22 @@ def generate_single_trial_rasters(data_path, time_window=(-0.1, 0.3),
     """
     # Load data
     data = load_neural_data(data_path)
-    
+
     # Calculate preferred orientations
     pref_data = calculate_preferred_orientations(data, time_window=preference_window)
     unique_orientations = pref_data['unique_orientations']
-    
+
     # Get trial counts
     trials_by_ori = organize_trials_by_orientation(data)
-    
+
+    # One shared reproducibility stamp for every figure from this run
+    run_timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    stamp_info = (
+        f"Generated {run_timestamp} | script=singleTrialRaster.py | data={Path(data_path).name}\n"
+        f"display_window=[{time_window[0]}, {time_window[1]}]s, "
+        f"preference_window=[{preference_window[0]}, {preference_window[1]}]s"
+    )
+
     # Set up output folder
     if output_folder is None:
         output_folder = Path(data_path).parent / f"{Path(data_path).stem}_single_trial_rasters"
@@ -341,7 +340,8 @@ def generate_single_trial_rasters(data_path, time_window=(-0.1, 0.3),
             plot_single_trial_raster(
                 data, pref_data, ori, trial_num,
                 time_window=time_window,
-                save_path=save_path
+                save_path=save_path,
+                stamp_info=stamp_info
             )
             
             total_figures += 1
@@ -401,9 +401,8 @@ def save_trial_summary(trials_by_ori, save_path, max_trials=None):
 # =============================================================================
 
 if __name__ == "__main__":
-    # Configure your data path here
-    DATA_PATH = "/Volumes/xieluanlabs/xl_cl/sortout/CnL39SG/CnL39SG_20250921_230747/embedding_analysis/CnL39SG_20250921_230747_DriftingGrating_data.pkl"
-    
+    DATA_PATH = resolve_data_path()
+
     # Optional: customize output folder
     OUTPUT_FOLDER = None  # Set to None to use default
     

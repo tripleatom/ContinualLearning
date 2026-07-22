@@ -8,6 +8,7 @@ import h5py
 from rf_func import find_stim_index, moving_average, schmitt_trigger
 from spikeinterface.extractors import read_phy
 from rec2nwb.preproc_func import parse_session_info
+from server_fallback import resolve_output_folder
 
 rec_folder = Path(input("Please enter the full path to the recording folder: ").strip().strip('"'))
 stimdata_file = Path(input("Please enter the full path to the .mat file: ").strip().strip('"'))
@@ -106,10 +107,7 @@ for ish in ishs:
 
     for sorting_results_folder in sorting_results_folders:
         phy_folder = Path(sorting_results_folder) / 'phy'
-        out_fig_folder = Path(sorting_results_folder) / 'STA'
-        out_fig_folder = Path(out_fig_folder)
-        if not out_fig_folder.exists():
-            out_fig_folder.mkdir(parents=True)
+        out_fig_folder = resolve_output_folder(Path(sorting_results_folder) / 'STA')
 
         # sorting_anaylzer = load_sorting_analyzer(
         #     Path(sorting_results_folder) / 'sorting_analyzer')

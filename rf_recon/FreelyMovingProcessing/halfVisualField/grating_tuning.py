@@ -6,6 +6,7 @@ from scipy import stats
 from scipy.optimize import curve_fit
 import pandas as pd
 from matplotlib.backends.backend_pdf import PdfPages
+from server_fallback import resolve_output_folder
 import warnings
 
 
@@ -396,8 +397,7 @@ def analyze_tuning_curves(npz_file, save_individual=True, max_individual_plots=5
         return None, None
     
     # Setup save directory
-    save_dir = Path(npz_file).parent / 'tuning_analysis'
-    save_dir.mkdir(exist_ok=True)
+    save_dir = resolve_output_folder(Path(npz_file).parent / 'tuning_analysis')
     
     # Analyze each unit
     all_metrics = []

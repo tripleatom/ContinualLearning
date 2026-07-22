@@ -17,6 +17,7 @@ import pandas as pd
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(BASE_DIR)
 from process_func.DIO import get_dio_folders, concatenate_din_data  # noqa: E402
+from server_fallback import resolve_output_folder
 
 # ============================
 # 🔧 USER INPUT SECTION
@@ -156,6 +157,7 @@ def plot_segment(r_s, gap_threshold_s, out_path):
 # Main logic
 # -----------------------
 def main():
+    global save_dir
     # ---- Load raw edges ----
     r_raw, f_raw = extract_raw_dio_from_rec(rec_folder, fs, pd_channel)
     if r_raw.size == 0 or f_raw.size == 0:
@@ -173,7 +175,7 @@ def main():
     n_segments = len(segment_indices)
     print(f"[DIO] Found {n_segments} segment(s) with gap > {gap_threshold}s")
 
-    save_dir.mkdir(parents=True, exist_ok=True)
+    save_dir = resolve_output_folder(save_dir)
     plot_segment(rising_s, gap_threshold, save_dir / "dio_gap_detection.png")
 
     # ---- Loop through each segment ----

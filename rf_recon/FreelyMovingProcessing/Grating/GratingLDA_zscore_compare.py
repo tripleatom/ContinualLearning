@@ -21,7 +21,7 @@ from sklearn.pipeline import Pipeline
 import warnings
 warnings.filterwarnings('ignore')
 
-from grating_utils import load_neural_data, calculate_firing_rates
+from grating_utils import load_neural_data, calculate_firing_rates, resolve_data_path
 
 
 # =============================================================================
@@ -209,7 +209,7 @@ def run_comparison(data_path, time_window=(0.07, 0.16), save_plots=True,
 # =============================================================================
 
 if __name__ == "__main__":
-    DATA_PATH = input("Enter path to neural data (.pkl file): ").strip().strip('"').strip("'")
+    DATA_PATH = resolve_data_path()
     try:
         run_comparison(
             data_path=DATA_PATH,

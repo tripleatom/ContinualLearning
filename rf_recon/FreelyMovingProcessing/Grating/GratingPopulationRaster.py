@@ -7,6 +7,8 @@ from matplotlib.patches import Rectangle
 import warnings
 warnings.filterwarnings('ignore')
 
+from grating_utils import resolve_data_path
+
 
 def load_neural_data(filepath):
     """Load neural data from pickle format."""
@@ -499,7 +501,7 @@ def save_preference_summary(preference_data, save_path):
 
 
 if __name__ == "__main__":
-    DATA_PATH = input("Enter path to neural data (.pkl file): ").strip().strip('"').strip("'")
+    DATA_PATH = resolve_data_path()
 
     generate_population_rasters(
         data_path=DATA_PATH,

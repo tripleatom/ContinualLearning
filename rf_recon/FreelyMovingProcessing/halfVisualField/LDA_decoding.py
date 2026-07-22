@@ -8,6 +8,7 @@ from sklearn.metrics import accuracy_score, confusion_matrix, classification_rep
 from pathlib import Path
 import seaborn as sns
 from scipy.stats import ttest_ind
+from server_fallback import resolve_output_folder
 
 
 def load_halfvisualfield_data(npz_file):
@@ -161,8 +162,7 @@ def plot_decoding_results(X_lda, orientations, scores, y_pred_cv, le, unit_info,
     """
     if save_dir is None:
         save_dir = Path(npz_file).parent / 'lda_results'
-    save_dir = Path(save_dir)
-    save_dir.mkdir(exist_ok=True)
+    save_dir = resolve_output_folder(Path(save_dir))
     
     # Get metadata
     session_name = metadata['session']

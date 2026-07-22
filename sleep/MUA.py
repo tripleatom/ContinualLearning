@@ -6,7 +6,9 @@ from spikeinterface.extractors import read_phy
 from pathlib import Path
 import pickle
 import os
+import errno
 from scipy.ndimage import gaussian_filter1d
+from server_fallback import resolve_output_folder, mirror_on_backup_server
 
 # === PARAMETERS ===
 animal_id = 'CnL39SG'
@@ -185,8 +187,7 @@ for ish in shanks:
     )
     
     # === SAVE MUA AND SPIKE DATA ===
-    output_dir = folder / "mua_analysis" / f"shank{ish}"
-    output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir = resolve_output_folder(folder / "mua_analysis" / f"shank{ish}")
     
     # Prepare data to save
     mua_data = {
@@ -218,9 +219,22 @@ for ish in shanks:
     mua_pkl_path = output_dir / mua_pkl_filename
     
     print(f"\nSaving MUA data to: {mua_pkl_filename}")
-    with open(mua_pkl_path, 'wb') as f:
-        pickle.dump(mua_data, f, protocol=pickle.HIGHEST_PROTOCOL)
-    
+    try:
+        with open(mua_pkl_path, 'wb') as f:
+            pickle.dump(mua_data, f, protocol=pickle.HIGHEST_PROTOCOL)
+    except OSError as e:
+        if e.errno != errno.ENOSPC:
+            raise
+        backup_dir = mirror_on_backup_server(output_dir)
+        if backup_dir is None:
+            raise
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        output_dir = backup_dir
+        mua_pkl_path = output_dir / mua_pkl_filename
+        print(f"Out of space while saving - switching to backup server: {output_dir}")
+        with open(mua_pkl_path, 'wb') as f:
+            pickle.dump(mua_data, f, protocol=pickle.HIGHEST_PROTOCOL)
+
     print(f"  File size: {mua_pkl_path.stat().st_size / 1024**2:.2f} MB")
     
     # === CALCULATE GLOBAL MUA RANGE FOR CONSISTENT Y-AXIS ===
@@ -341,7 +355,19 @@ for ish in shanks:
         
         # Save figure
         output_file = output_dir / f'sh{ish}_raster_mua_lfp_window_{win_idx+1:04d}_{win_start:.1f}s-{win_end:.1f}s.png'
-        plt.savefig(output_file, dpi=150, bbox_inches='tight')
+        try:
+            plt.savefig(output_file, dpi=150, bbox_inches='tight')
+        except OSError as e:
+            if e.errno != errno.ENOSPC:
+                raise
+            backup_dir = mirror_on_backup_server(output_dir)
+            if backup_dir is None:
+                raise
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            output_dir = backup_dir
+            output_file = output_dir / output_file.name
+            print(f"Out of space while saving - switching to backup server: {output_dir}")
+            plt.savefig(output_file, dpi=150, bbox_inches='tight')
         plt.close()
     
     print(f"\n{'='*70}")

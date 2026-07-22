@@ -12,6 +12,7 @@ import json
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import StratifiedKFold, cross_val_score, cross_validate
 from sklearn.preprocessing import StandardScaler
+from server_fallback import resolve_output_folder
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -251,7 +252,8 @@ def create_analysis_figure(results, unit_ids, trial_info, save_path=None):
 
     if save_path:
         save_path = Path(save_path)
-        save_path.parent.mkdir(parents=True, exist_ok=True)
+        out_dir = resolve_output_folder(save_path.parent)
+        save_path = out_dir / save_path.name
         fig.savefig(save_path, dpi=200, bbox_inches='tight')
         print(f"Saved combined figure to: {save_path}")
 
@@ -435,8 +437,7 @@ def _plot_firing_rate_comparison(fig, results, unit_ids, labels):
 def _save_individual_subfigures(results, unit_ids, trial_info, base_save_path):
     """Save each subfigure as an individual file in the behavior_analysis folder."""
     base_path = Path(base_save_path)
-    out_folder = base_path.parent
-    out_folder.mkdir(parents=True, exist_ok=True)
+    out_folder = resolve_output_folder(base_path.parent)
 
     transformed = results['transformed_data']
     labels = results['condition_labels']

@@ -9,6 +9,7 @@ from pathlib import Path
 import pandas as pd
 import seaborn as sns
 from scipy.stats import ttest_rel
+from server_fallback import resolve_output_folder
 
 # Define the object-to-orientation mapping
 OBJECT_TO_ORIENTATION = {
@@ -374,8 +375,7 @@ def decode_orientations_by_visual_field(npz_file, cv_folds=5, random_state=42,
     session_id = session_folder.name
     
     # Create output directory
-    decode_folder = session_folder / "orientation_decoding"
-    decode_folder.mkdir(exist_ok=True)
+    decode_folder = resolve_output_folder(session_folder / "orientation_decoding")
     
     print(f"Loading data from {npz_file}")
     print(f"Orientation mapping: {OBJECT_TO_ORIENTATION}")

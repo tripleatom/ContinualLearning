@@ -58,9 +58,14 @@ plt.rcParams.update({
 def _match(tp, class_dict, col_map, tol=1e-6):
     mask = np.ones(len(tp), dtype=bool)
     for canon_key, val in class_dict.items():
-        col = col_map[canon_key]
+        entry = col_map[canon_key]
+        if isinstance(entry, tuple):
+            col, value_map = entry
+            target = value_map[float(val)]
+        else:
+            col, target = entry, float(val)
         vals = np.array([t[col] for t in tp], dtype=float)
-        mask &= np.abs(vals - float(val)) <= tol
+        mask &= np.abs(vals - float(target)) <= tol
     return mask
 
 

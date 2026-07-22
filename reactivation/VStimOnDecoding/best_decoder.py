@@ -18,6 +18,8 @@ import pickle
 import numpy as np
 import matplotlib.pyplot as plt
 
+from server_fallback import resolve_output_folder
+
 
 # ------------------------------------------------------------------ #
 #  Inputs                                                             #
@@ -26,7 +28,7 @@ pkl = r"\\10.129.151.108\xieluanlabs\xl_cl\sortout\CnL42SG\CnL42SG_20260313\reac
 CLF = 'Random Forest'
 
 pkl_path = Path(pkl)
-out_dir  = pkl_path.parent
+out_dir  = resolve_output_folder(pkl_path.parent)
 stem_in  = pkl_path.stem                              # e.g. task_<session>_kinematics_feature_5fold
 session_tag = stem_in.replace('_kinematics_feature_', '_kinematics_feature_').replace('5fold', '')  # purely cosmetic; we just reuse stem_in for filenames
 

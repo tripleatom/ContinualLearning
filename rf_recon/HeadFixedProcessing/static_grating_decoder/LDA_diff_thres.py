@@ -2,6 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from rf_recon.static_grating_decoder.LDA_filter_gOSI import visualize_lda_decoding
 from pathlib import Path
+from server_fallback import resolve_output_folder
 # Simulated results from calling visualize_lda_decoding with different z_noise_thresholds
 z_noise_thresholds = np.linspace(0.1, 0.8, 10)
 simulated_accuracies = []
@@ -21,6 +22,7 @@ plt.ylabel("Mean Decoding Accuracy")
 plt.title("Effect of z-noise Threshold on LDA Decoding Accuracy")
 plt.grid(True)
 plt.tight_layout()
-out_path = npz_file_path.parent / "embedding" / "LDA_diff_znoise_thres.png"
+out_dir = resolve_output_folder(npz_file_path.parent / "embedding")
+out_path = out_dir / "LDA_diff_znoise_thres.png"
 plt.savefig(out_path)
 plt.show()

@@ -15,13 +15,21 @@ def _match_all(trial_params, class_dict, col_map, tol):
     """Boolean mask: which trials match every (canonical_key -> value) in class_dict.
 
     class_dict keys are canonical (e.g. 'orientation', 'spatial_freq');
-    col_map translates them to the pkl's trial_params column names.
+    col_map translates them to the pkl's trial_params column names. A
+    col_map entry may be a plain column-name string (canonical value used
+    as-is) or a (column_name, {canonical_val: raw_val}) tuple when this
+    pkl stores the same class under a different raw value.
     """
     mask = np.ones(len(trial_params), dtype=bool)
     for canon_key, val in class_dict.items():
-        col = col_map[canon_key]
+        entry = col_map[canon_key]
+        if isinstance(entry, tuple):
+            col, value_map = entry
+            target = value_map[float(val)]
+        else:
+            col, target = entry, float(val)
         vals = np.array([tp[col] for tp in trial_params], dtype=float)
-        mask &= np.abs(vals - float(val)) <= tol
+        mask &= np.abs(vals - float(target)) <= tol
     return mask
 
 

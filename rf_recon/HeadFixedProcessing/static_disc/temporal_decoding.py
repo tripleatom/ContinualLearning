@@ -13,6 +13,7 @@ from pathlib import Path
 import pandas as pd
 import seaborn as sns
 from scipy import signal
+from server_fallback import resolve_output_folder
 from scipy.stats import ttest_rel, ttest_1samp
 import warnings
 warnings.filterwarnings('ignore')
@@ -530,8 +531,7 @@ def temporal_orientation_decoding_analysis(npz_file, feature_types=['all'], resp
     session_id = session_folder.name
     
     # Create output directory
-    decode_folder = session_folder / "temporal_decoding"
-    decode_folder.mkdir(exist_ok=True)
+    decode_folder = resolve_output_folder(session_folder / "temporal_decoding")
     
     print(f"TEMPORAL ORIENTATION DECODING ANALYSIS")
     print("=" * 60)

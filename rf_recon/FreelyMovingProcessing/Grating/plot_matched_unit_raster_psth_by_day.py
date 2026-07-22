@@ -38,6 +38,8 @@ from matplotlib.colors import BoundaryNorm, ListedColormap
 from matplotlib.cm import ScalarMappable
 from scipy.ndimage import gaussian_filter1d
 
+from server_fallback import resolve_output_folder
+
 
 DEFAULT_BASE_DIR = Path(r"\\10.129.151.108\xieluanlabs\xl_cl\sortout\CnL42SG")
 DEFAULT_MATCH_DIR = (
@@ -408,7 +410,7 @@ def generate_pdf(
             print(f"  {session}: failed to load ({exc})")
     stim_duration = float(np.median(stim_durations)) if stim_durations else 2.0
 
-    out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir = resolve_output_folder(out_dir)
     unit_dir = out_dir / "units"
     unit_dir.mkdir(parents=True, exist_ok=True)
     pdf_path = out_dir / "matched_unit_raster_psth_by_day.pdf"

@@ -35,6 +35,9 @@ import pandas as pd
 from matplotlib.cm import ScalarMappable
 from matplotlib.colors import Normalize
 
+from server_fallback import resolve_output_folder, mirror_on_backup_server
+import errno
+
 
 # ----------------------------------------------------------------------------
 # Edit these to run without command-line args (just run the file directly).
@@ -211,7 +214,7 @@ def load_session_waveform_cache(
 
 
 def save_session_waveform_cache(session: str, cache_dir: Path, cache: dict) -> None:
-    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_dir = resolve_output_folder(cache_dir)
     cache_path = waveform_cache_path(cache_dir, session)
     try:
         with open(cache_path, "wb") as handle:
@@ -774,10 +777,21 @@ def plot_unit_overlay(
 
     fig.subplots_adjust(left=0.035, right=0.965, top=0.91, bottom=0.085)
 
-    out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir = resolve_output_folder(out_dir)
     suffix = "_shank" if channel_mode == "shank" else f"_neighbor{neighbor_channels}" if channel_mode == "neighbor" else "_best"
     png_path = out_dir / f"track_{track_id:03d}_shank{shank}_overlay_across_time{suffix}.png"
-    fig.savefig(png_path, dpi=170)
+    try:
+        fig.savefig(png_path, dpi=170)
+    except OSError as e:
+        if e.errno != errno.ENOSPC:
+            raise
+        backup_dir = mirror_on_backup_server(out_dir)
+        if backup_dir is None:
+            raise
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        png_path = backup_dir / png_path.name
+        print(f"Out of space while saving - retrying on backup server: {png_path}")
+        fig.savefig(png_path, dpi=170)
     plt.close(fig)
     return png_path
 

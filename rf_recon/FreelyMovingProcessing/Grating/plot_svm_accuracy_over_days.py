@@ -37,6 +37,8 @@ import numpy as np
 
 from grating_utils import load_neural_data, calculate_firing_rates
 from GratingSVM import perform_svm_analysis
+from server_fallback import resolve_output_folder, mirror_on_backup_server
+import errno
 
 
 # ── Defaults (mirror the by-day raster script so the same sessions are used) ──
@@ -170,8 +172,20 @@ def plot_accuracy_over_days(rows, out_path, *, time_window, kernel, C, gamma,
 
     fig.tight_layout(rect=(0, 0.06, 1, 1))
     out_path = Path(out_path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_path, dpi=300, bbox_inches="tight", facecolor="white")
+    out_dir = resolve_output_folder(out_path.parent)
+    out_path = out_dir / out_path.name
+    try:
+        fig.savefig(out_path, dpi=300, bbox_inches="tight", facecolor="white")
+    except OSError as e:
+        if e.errno != errno.ENOSPC:
+            raise
+        backup_dir = mirror_on_backup_server(out_dir)
+        if backup_dir is None:
+            raise
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        out_path = backup_dir / out_path.name
+        print(f"Out of space while saving - retrying on backup server: {out_path}")
+        fig.savefig(out_path, dpi=300, bbox_inches="tight", facecolor="white")
     print(f"\nSaved figure to: {out_path}")
     return fig
 

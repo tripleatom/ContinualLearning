@@ -6,6 +6,7 @@ from sklearn.model_selection import cross_val_score, StratifiedKFold, cross_val_
 from sklearn.preprocessing import LabelEncoder
 from pathlib import Path
 from lda_decoding_utils import reshape_for_lda, compute_lda, decode_accuracy_plot, per_orientation_accuracy_plot, real_vs_shuffled_plot
+from server_fallback import resolve_output_folder
 
 def visualize_lda_decoding(npz_file, cv_folds=5, random_state=42, OSI_threshold=0.0, z_noise_threshold=0.0, show_fig=True):
     npz_file = Path(npz_file)
@@ -68,8 +69,7 @@ def visualize_lda_decoding(npz_file, cv_folds=5, random_state=42, OSI_threshold=
 
     fig.suptitle(f"LDA Decoding | {animal_id} - {session_id} | OSI>{OSI_threshold}, z-noise<{z_noise_threshold:.2f} | Remaining Units: {n_units}\nLDA CV Accuracy: {scores.mean():.3f} ± {scores.std():.3f}", fontsize=16)
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-    embedding_folder = session_folder / "embedding"
-    embedding_folder.mkdir(parents=True, exist_ok=True)
+    embedding_folder = resolve_output_folder(session_folder / "embedding")
     save_path_combined = embedding_folder / f"LDA_summary_OSI_{OSI_threshold}_znoise_{z_noise_threshold:.2f}.png"
     plt.savefig(save_path_combined, dpi=300)
 

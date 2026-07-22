@@ -7,22 +7,36 @@ Single source of truth imported by:
   - spectrogram_plot.py      (band_powers pkl -> per-channel figures)
 
 Edit values here; the scripts pull from this module so they stay in sync.
+
+`sleep_sessions` (pre-task / post-task) lets LFP_calculation.py,
+calculate_spectrogram.py, and calculate_band_powers.py each process both
+sleep windows from one recording when both exist, or skip whichever one
+has start_sample=end_sample=None. spectrogram_plot.py still targets one
+session's *_all_shanks_band_powers.pkl at a time (set session_name /
+rec_folder or the file suffix accordingly) - it is not looped here.
 """
 from pathlib import Path
+
+from server_fallback import (
+    mirror_on_backup_server,
+    resolve_output_folder,
+    resolve_existing_file,
+)
 
 # =====================================================
 # SESSION / PATHS  (shared)
 # =====================================================
 # Recording folder. low_freq outputs are written to / read from
 # rec_folder / "low_freq".
-rec_folder = r"\\10.129.151.108\xieluanlabs\xl_cl\experiment_data\CnL42\260313\CnL42SG_20260313"
+rec_folder = r"\\10.129.151.108\xieluanlabs\xl_cl\experiment_data\CnL42\260324\CnL42SG_20260324"
 
 # Used for OUTPUT filenames: {session_name}_sh{ish}_lfp_traces.npz, etc.
 session_name = Path(rec_folder).stem.split('.')[0]
 
-# NWB files use a different (6-digit date) naming, e.g. "CnL42SG_260313sh0.nwb".
+# NWB files are usually a different (6-digit date) naming, e.g. "CnL42SG_260324sh0.nwb",
+# but this session's NWBs were exported with the full 8-digit date instead.
 # Base name used for the input .nwb files (everything before "sh{ish}.nwb").
-nwb_session_name = "CnL42SG_260313"
+nwb_session_name = "CnL42SG_20260324"
 
 # Shanks to process (shared by both scripts).
 shanks = [5, 7]
@@ -36,13 +50,42 @@ original_fs = 30000
 
 
 # =====================================================
-# SLEEP WINDOW  (LFP_calculation.py)
+# SLEEP SESSIONS: pre-task / post-task  (LFP_calculation.py,
+# calculate_spectrogram.py, calculate_band_powers.py)
 # =====================================================
-# Sleep period within the recording, in ORIGINAL-FS sample indices.
-# The NWB may contain other experiments; only this window is analyzed.
-# Set either bound to None to use the recording start/end.
-sleep_start_sample = 334584075   # e.g. 0
-sleep_end_sample   = None         # e.g. 18_000_000
+# Most days have a pre-task AND a post-task sleep period within the SAME
+# continuous NWB recording. Each entry below gives the window to analyze, in
+# ORIGINAL-FS sample indices, plus an output-filename suffix so pre/post
+# results don't collide (e.g. "{session_name}_post_sh5_lfp_traces.npz").
+#   - Leave one bound as None to mean "use the recording start/end" for that
+#     side (same as before).
+#   - Leave BOTH start_sample and end_sample as None to SKIP that session
+#     entirely (e.g. a day with no pre-task sleep recorded).
+sleep_sessions = {
+    'pre': {
+        'start_sample': 181605860,
+        'end_sample': 254815776,
+        'suffix': '_pre',
+    },
+    'post': {
+        'start_sample': 308945341,   # e.g. 0
+        'end_sample': 462415870,          # e.g. 18_000_000
+        'suffix': '_post',
+    },
+}
+
+
+def active_sleep_sessions(sessions=None):
+    """Return the sleep_sessions entries that aren't (start=None, end=None).
+
+    A session with both bounds set to None is treated as "not recorded /
+    don't analyze" for that day and is skipped by every calculation script.
+    """
+    sessions = sleep_sessions if sessions is None else sessions
+    return {
+        name: cfg for name, cfg in sessions.items()
+        if not (cfg['start_sample'] is None and cfg['end_sample'] is None)
+    }
 
 
 # =====================================================

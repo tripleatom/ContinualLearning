@@ -9,17 +9,17 @@ everywhere.
 # ---------------------------------------------------------------- #
 #  Data files                                                       #
 # ---------------------------------------------------------------- #
-SESSION_FOLDER = r"\\10.129.151.108\xieluanlabs\xl_cl\sortout\CnL42SG\CnL42SG_20260313"
+SESSION_FOLDER = r"\\10.129.151.88\xieluanlabs2\xl_cl\sortout\CnL42SG\CnL42SG_20260324"
 
-task_pkl    = rf"{SESSION_FOLDER}\task_spikes_CnL42SG_20260313.pkl"
-passive_pkl = rf"{SESSION_FOLDER}\passive_spikes_260313.pkl"
+task_pkl    = rf"{SESSION_FOLDER}\task_spikes_CnL42SG_20260324.pkl"
+passive_pkl = rf"{SESSION_FOLDER}\passive_spikes_260324.pkl"
 
 # Sleep blocks consumed by apply_merged_decoder_to_sleep.py.
 # Each entry: (label, pkl_path, start_sec, end_sec) in the pkl's own
 # spike_times_sec frame. end_sec=None ⇒ use window_duration_sec from the pkl.
 sleep_blocks = [
-    ("pre",  rf"{SESSION_FOLDER}\sleep_spikes_260313_sleep_pre.pkl",  0.0, None),
-    ("post", rf"{SESSION_FOLDER}\sleep_spikes_260313_sleep_post.pkl", 0.0, None),
+    ("pre",  rf"{SESSION_FOLDER}\sleep_spikes_260324_sleep_pre.pkl",  181605860, 254815776),
+    ("post", rf"{SESSION_FOLDER}\sleep_spikes_260324_sleep_post.pkl", 308945341, 462415870),
 ]
 
 # ---------------------------------------------------------------- #
@@ -44,13 +44,37 @@ prep_default_bin_ms = 50.0
 #     0  iff the bin centre falls outside every stimulus epoch (ITI)#
 #    dropped  for any other (orientation, SF) combination           #
 # ---------------------------------------------------------------- #
-class_pos = {"orientation": 0.0, "spatial_freq": 0.04}   # → +1
-class_neg = {"orientation": 0.0, "spatial_freq": 0.16}   # → -1
+class_pos = {"orientation": 45.0, "spatial_freq": 0.08}   # → +1
+class_neg = {"orientation": 135.0, "spatial_freq": 0.08}   # → -1
 
-# Translation from canonical keys above to the trial_params column names
-# actually stored in the task vs passive pkls.
-TASK_COL_MAP    = {"orientation": "leftOrientation", "spatial_freq": "leftSpatialFreq"}
-PASSIVE_COL_MAP = {"orientation": "L_Orient",        "spatial_freq": "L_SF"}
+# Translation from canonical keys/values above to the trial_params column
+# names actually stored in the task vs passive pkls.
+#
+# Each entry is either
+#   "column_name"                              — canonical value used as-is
+#   ("column_name", {canonical_val: raw_val})   — canonical value is looked
+#                                                  up to get the value this
+#                                                  pkl actually stores
+#
+# This session's task grating identities don't share the passive session's
+# raw column values even though they're the "same" class: task stores the
+# negative-class orientation as 315° (not 135°), and both task and passive
+# store spatial_freq as 0.16 (not the 0.08 used as the canonical key here).
+# The value maps below let class_pos/class_neg stay defined once, while
+# TASK_COL_MAP/PASSIVE_COL_MAP translate each canonical value to what
+# CnL42SG_20260324's pkls actually store:
+#   class_pos (45.0, 0.08)  → task (leftOrientation=45.0,  leftSpatialFreq=0.16)
+#                           → passive (L_Orient=45.0,      L_SF=0.16)
+#   class_neg (135.0, 0.08) → task (leftOrientation=315.0, leftSpatialFreq=0.16)
+#                           → passive (L_Orient=135.0,     L_SF=0.16)
+TASK_COL_MAP = {
+    "orientation":  ("leftOrientation",  {45.0: 45.0, 135.0: 315.0}),
+    "spatial_freq": ("leftSpatialFreq", {0.08: 0.16}),
+}
+PASSIVE_COL_MAP = {
+    "orientation":  "L_Orient",
+    "spatial_freq": ("L_SF", {0.08: 0.16}),
+}
 
 # ---------------------------------------------------------------- #
 #  Sleep event detection                                            #

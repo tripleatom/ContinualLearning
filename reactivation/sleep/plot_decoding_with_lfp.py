@@ -36,10 +36,13 @@ from datetime import datetime
 import argparse
 import pickle
 
+import errno
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 from matplotlib.transforms import blended_transform_factory
+
+from server_fallback import resolve_output_folder, mirror_on_backup_server
 
 # ---------------------------------------------------------------- #
 #  Default paths (CnL42SG_20260313, post block)                     #
@@ -276,7 +279,20 @@ def main():
     default_name = (f"sleep_decoding_with_delta_{x_lo:g}-{x_hi:g}s.png"
                     if windowed else "sleep_decoding_with_delta.png")
     out = Path(args.out) if args.out else results_path.with_name(default_name)
-    fig.savefig(out, dpi=200, bbox_inches="tight", facecolor="white")
+    out_dir = resolve_output_folder(out.parent)
+    out = out_dir / out.name
+    try:
+        fig.savefig(out, dpi=200, bbox_inches="tight", facecolor="white")
+    except OSError as e:
+        if e.errno != errno.ENOSPC:
+            raise
+        backup_dir = mirror_on_backup_server(out_dir)
+        if backup_dir is None:
+            raise
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        out = backup_dir / out.name
+        print(f"Out of space while saving - retrying on backup server: {out}")
+        fig.savefig(out, dpi=200, bbox_inches="tight", facecolor="white")
     plt.close(fig)
     print(f"Saved: {out}")
 

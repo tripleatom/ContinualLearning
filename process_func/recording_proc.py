@@ -1,7 +1,10 @@
 import os
+import errno
 import numpy as np
 import spikeinterface.preprocessing as spre
 from numba import jit
+
+from server_fallback import mirror_on_backup_server
 
 
 @jit(nopython=True, parallel=True)
@@ -111,7 +114,18 @@ def rm_artifacts(rec_raw, folder, ish, threshold=6, chunk_time=0.02,
                 print(f"Ch {ch}: n_artifacts={len(artifact_chunks)}")
         
         artifact_indices = np.where(~use_chunk)[0] * chunk_size
-        np.save(artifact_file, artifact_indices)
+        try:
+            np.save(artifact_file, artifact_indices)
+        except OSError as e:
+            if e.errno != errno.ENOSPC:
+                raise
+            backup_folder = mirror_on_backup_server(folder)
+            if backup_folder is None:
+                raise
+            backup_folder.mkdir(parents=True, exist_ok=True)
+            artifact_file = backup_folder / artifact_file.name
+            print(f"Out of space while saving - retrying on backup server: {artifact_file}")
+            np.save(artifact_file, artifact_indices)
         print(f"Total chunks removed: {(~use_chunk).sum()}/{num_chunks}")
     
     chunk_time_ms = chunk_size / fs * 1000

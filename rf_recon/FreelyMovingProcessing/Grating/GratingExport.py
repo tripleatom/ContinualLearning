@@ -3,7 +3,7 @@ import pickle
 from pathlib import Path
 from datetime import datetime
 from spikeinterface import load_sorting_analyzer
-from rf_recon.FreelyMovingProcessing.Grating.parse_grating_experiment import parse_grating_experiment
+from rf_recon.FreelyMovingProcessing.Grating.grating_utils import parse_grating_experiment
 
 
 def _compute_acg(spike_train_samples, fs, max_lag_ms=25.0, bin_ms=1.0):
@@ -80,18 +80,104 @@ def _extract_waveform_info(unit_id, sorting_analyzer):
                 all_locs = locs.tolist() if locs is not None else None
                 channel_ids = list(getattr(sorting_analyzer, 'channel_ids', [])) or None
                 channel_groups = None
-                recording = getattr(sorting_analyzer, 'recording', None)
-                if recording is not None:
-                    try:
-                        groups = recording.get_property('group')
-                        channel_groups = groups.tolist() if hasattr(groups, 'tolist') else list(groups)
-                    except Exception:
-                        channel_groups = None
+                try:
+                    # Read from the analyzer's cached rec_attributes rather than
+                    # sorting_analyzer.recording, which requires the raw recording
+                    # to still be reachable at its original (possibly stale) path.
+                    groups = sorting_analyzer.get_recording_property('group')
+                    channel_groups = groups.tolist()
+                except Exception:
+                    channel_groups = None
                 return wf, t_ms, best_ch, loc, template.tolist(), all_locs, channel_ids, channel_groups
     except Exception as e:
         print(f"    [waveform] sorting_analyzer failed for unit {unit_id}: {e}")
 
     return None, None, None, None, None, None, None, None
+
+
+def _find_shank_raw_analyzers(sortout_path):
+    """
+    Fallback source when curated_analyzer is missing: one uncurated SpikeInterface
+    sorting_analyzer per shank, found under sortout_path/shank{N}/sorting_results_*/sorting_analyzer.
+
+    These units have never been through Phy curation (no 'unit_label' / 'group'
+    sorting properties exist on them), so callers must treat their quality as
+    unknown rather than assuming curated-good units.
+
+    If a shank has more than one sorting_results_* folder (re-sorted), the
+    lexicographically last one is used — folder names embed a sortable
+    timestamp, e.g. "sorting_results_20260409_1110_scheme2" — and a note is
+    printed so it's clear which run was picked.
+
+    Returns
+    -------
+    list of (shank_id, sorting_analyzer_path), sorted by shank_id.
+    """
+    found = []
+    for shank_dir in sorted(sortout_path.glob('shank*')):
+        if not shank_dir.is_dir():
+            continue
+        try:
+            shank_id = int(shank_dir.name[len('shank'):])
+        except ValueError:
+            continue
+        candidates = sorted(
+            p for p in shank_dir.glob('sorting_results_*')
+            if (p / 'sorting_analyzer').exists()
+        )
+        if not candidates:
+            continue
+        if len(candidates) > 1:
+            print(f"  Shank {shank_id}: {len(candidates)} sorting_results_* folders found, "
+                  f"using most recent: {candidates[-1].name}")
+        found.append((shank_id, candidates[-1] / 'sorting_analyzer'))
+    return found
+
+
+def _has_sort_data(sortout_session_path):
+    """True if sortout_session_path has a curated_analyzer or any shank raw sorting_analyzer."""
+    if not sortout_session_path.exists():
+        return False
+    if (sortout_session_path / 'curated_analyzer').exists():
+        return True
+    return bool(_find_shank_raw_analyzers(sortout_session_path))
+
+
+def _resolve_sortout_session_folder(sortout_path, rec_folder):
+    """
+    Find the sortout session folder that actually holds sorted data.
+
+    Some sessions' sortout folder is named "{animal}_{date}" (short form,
+    matching EphysFolder), but others are named after the exact rec-file
+    timestamp instead, e.g. "{animal}_{date}_{HHMMSS}" (matching rec_folder's
+    own name minus its ".rec" suffix) — that's the actual sort-out convention:
+    the folder is named for when the recording/sort was made, not just the
+    date. Try sortout_path as given first (keeps existing sessions working
+    unchanged); if it has no sort data, fall back to the rec-folder-derived
+    name. This also naturally skips stale decoys that still carry a literal
+    ".rec" suffix in their sortout folder name, since we strip it here.
+    """
+    if _has_sort_data(sortout_path):
+        return sortout_path
+
+    rec_stem = rec_folder.name[:-4] if rec_folder.name.endswith('.rec') else rec_folder.name
+    candidate = sortout_path.parent / rec_stem
+    if candidate != sortout_path and _has_sort_data(candidate):
+        print(f"  {sortout_path} has no sort data - "
+              f"using rec-timestamp-named sortout folder instead: {candidate}")
+        return candidate
+
+    return sortout_path  # neither has data; let the existing error path report it
+
+
+def _passive_embedding_dir(sortout_folder):
+    """
+    The 'passive_embedding_analysis' output folder for a sortout session — same
+    convention the __main__ block below uses when it saves the grating_data pkl(s).
+    """
+    sortout_folder = Path(sortout_folder)
+    output_base = sortout_folder.parent if sortout_folder.name == 'curated_analyzer' else sortout_folder
+    return output_base / 'passive_embedding_analysis'
 
 
 def extract_grating_neural_data_for_embedding(
@@ -104,12 +190,23 @@ def extract_grating_neural_data_for_embedding(
     rec_folder = Path(rec_folder)
     task_file_path = Path(task_file_path)
     sortout_path = Path(sortout_folder)
+    if sortout_path.name != 'curated_analyzer':
+        sortout_path = _resolve_sortout_session_folder(sortout_path, rec_folder)
     curated_analyzer_path = (
         sortout_path if sortout_path.name == 'curated_analyzer'
         else sortout_path / 'curated_analyzer'
     )
-    if not curated_analyzer_path.exists():
-        raise FileNotFoundError(f"curated_analyzer path does not exist: {curated_analyzer_path}")
+    use_curated = curated_analyzer_path.exists()
+    raw_shank_analyzers = []
+    if not use_curated:
+        print(f"curated_analyzer not found at {curated_analyzer_path} - "
+              f"falling back to each shank's raw (uncurated) sorting_analyzer.")
+        raw_shank_analyzers = _find_shank_raw_analyzers(sortout_path)
+        if not raw_shank_analyzers:
+            raise FileNotFoundError(
+                f"Neither curated_analyzer nor any shank*/sorting_results_*/sorting_analyzer "
+                f"found under {sortout_path}"
+            )
 
     rec_name = rec_folder.name
     if rec_name.endswith('.rec'):
@@ -226,106 +323,143 @@ def extract_grating_neural_data_for_embedding(
     unit_counter = 0
     shanks_processed = []
 
-    sorting_analyzer = load_sorting_analyzer(curated_analyzer_path)
-    sorting = sorting_analyzer.sorting
-    sorting_folder = curated_analyzer_path
-    print(f"Loaded curated_analyzer: {curated_analyzer_path}")
+    # Build a uniform list of "sources" to pull units from: either the single
+    # curated_analyzer (shank comes from its 'group' property, quality from
+    # 'unit_label'), or — when curated_analyzer is missing — one raw/uncurated
+    # sorting_analyzer per shank (shank is known from the folder, quality is
+    # always 'unsorted' since these units were never reviewed by a human).
+    sources = []
+    fs = None
+    if use_curated:
+        sorting_analyzer = load_sorting_analyzer(curated_analyzer_path)
+        sorting = sorting_analyzer.sorting
+        print(f"Loaded curated_analyzer: {curated_analyzer_path}")
+        fs = sorting.sampling_frequency
 
-    fs = sorting.sampling_frequency
-    neural_data['metadata']['sampling_frequency'] = fs
-    unit_ids = sorting.unit_ids
-
-    group_prop = sorting.get_property('group')
-    group_map = (
-        {uid: int(g) for uid, g in zip(unit_ids, group_prop)}
-        if group_prop is not None else {}
-    )
-    label_prop = sorting.get_property('unit_label')
-    if label_prop is None:
-        raise ValueError(
-            f"curated_analyzer is missing required sorting property 'unit_label': "
-            f"{curated_analyzer_path}"
+        group_prop = sorting.get_property('group')
+        group_map = (
+            {uid: int(g) for uid, g in zip(sorting.unit_ids, group_prop)}
+            if group_prop is not None else {}
         )
-    label_map = {uid: str(l) for uid, l in zip(unit_ids, label_prop)}
+        label_prop = sorting.get_property('unit_label')
+        if label_prop is None:
+            raise ValueError(
+                f"curated_analyzer is missing required sorting property 'unit_label': "
+                f"{curated_analyzer_path}"
+            )
+        label_map = {uid: str(l) for uid, l in zip(sorting.unit_ids, label_prop)}
+
+        sources.append({
+            'sorting_analyzer': sorting_analyzer,
+            'sorting': sorting,
+            'sorting_folder': curated_analyzer_path,
+            'unit_ids': sorting.unit_ids,
+            'shank_of': lambda uid: group_map.get(uid, None),
+            'quality_of': lambda uid: label_map[uid],
+        })
+    else:
+        for shank_id, analyzer_path in raw_shank_analyzers:
+            sa = load_sorting_analyzer(analyzer_path)
+            s = sa.sorting
+            print(f"Loaded raw (uncurated) sorting_analyzer for shank {shank_id}: "
+                  f"{analyzer_path} ({len(s.unit_ids)} units, quality='unsorted')")
+            if fs is None:
+                fs = s.sampling_frequency
+            sources.append({
+                'sorting_analyzer': sa,
+                'sorting': s,
+                'sorting_folder': analyzer_path,
+                'unit_ids': s.unit_ids,
+                'shank_of': (lambda uid, _shank=shank_id: _shank),
+                'quality_of': (lambda uid: 'unsorted'),
+            })
+
+    neural_data['metadata']['sampling_frequency'] = fs
+    neural_data['metadata']['curation_status'] = 'curated' if use_curated else 'unsorted'
 
     window_pre_samples = int(window_pre * fs)
     window_post_samples = int(window_post * fs)
 
-    for unit_id in unit_ids:
-        shank = group_map.get(unit_id, None)
-        shank_key = f'shank{shank}' if shank is not None else 'unknown'
-        quality = label_map[unit_id]
+    for source in sources:
+        sorting_analyzer = source['sorting_analyzer']
+        sorting = source['sorting']
+        sorting_folder = source['sorting_folder']
 
-        if shank_key not in shanks_processed:
-            shanks_processed.append(shank_key)
+        for unit_id in source['unit_ids']:
+            shank = source['shank_of'](unit_id)
+            shank_key = f'shank{shank}' if shank is not None else 'unknown'
+            quality = source['quality_of'](unit_id)
 
-        try:
-            spike_train = sorting.get_unit_spike_train(unit_id)
-        except Exception as e:
-            print(f"Error getting spike train for unit {unit_id}: {e}")
-            continue
+            if shank_key not in shanks_processed:
+                shanks_processed.append(shank_key)
 
-        if len(spike_train) == 0:
-            continue
+            try:
+                spike_train = sorting.get_unit_spike_train(unit_id)
+            except Exception as e:
+                print(f"Error getting spike train for unit {unit_id}: {e}")
+                continue
 
-        # Align spike train from concatenated sorting space to passive-local space
-        passive_end_eff = passive_end if passive_end is not None else int(spike_train[-1]) + 1
-        passive_mask = (spike_train >= passive_start) & (spike_train < passive_end_eff)
-        spike_train = spike_train[passive_mask] - passive_start
+            if len(spike_train) == 0:
+                continue
 
-        unique_unit_id = f"{shank_key}_unit{unit_id}"
+            # Align spike train from concatenated sorting space to passive-local space
+            passive_end_eff = passive_end if passive_end is not None else int(spike_train[-1]) + 1
+            passive_mask = (spike_train >= passive_start) & (spike_train < passive_end_eff)
+            spike_train = spike_train[passive_mask] - passive_start
 
-        # Waveform + channel location
-        wf, wf_t_ms, best_ch, ch_loc, wf_all_ch, ch_locs, wf_ch_ids, wf_ch_groups = _extract_waveform_info(
-            unit_id, sorting_analyzer
-        )
+            unique_unit_id = f"{shank_key}_unit{unit_id}"
 
-        # ACG from full (task-masked) spike train
-        acg_counts, acg_lags_ms = _compute_acg(spike_train, fs)
+            # Waveform + channel location
+            wf, wf_t_ms, best_ch, ch_loc, wf_all_ch, ch_locs, wf_ch_ids, wf_ch_groups = _extract_waveform_info(
+                unit_id, sorting_analyzer
+            )
 
-        neural_data['unit_info'][unique_unit_id] = {
-            'original_unit_id': int(unit_id),
-            'shank': shank,
-            'quality': quality,
-            'sorting_folder': str(sorting_folder),
-            'n_spikes_total': len(spike_train),
-            'unit_index': unit_counter,
-            # waveform / electrode
-            'best_channel': best_ch,
-            'channel_location_um': ch_loc,
-            'waveform_template': wf,
-            'waveform_template_all_channels': wf_all_ch,
-            'waveform_t_ms': wf_t_ms,
-            'channel_locations_um': ch_locs,
-            'waveform_channel_ids': wf_ch_ids,
-            'waveform_channel_groups': wf_ch_groups,
-            # autocorrelogram
-            'acg_counts': acg_counts.tolist(),
-            'acg_lags_ms': acg_lags_ms.tolist(),
-        }
+            # ACG from full (task-masked) spike train
+            acg_counts, acg_lags_ms = _compute_acg(spike_train, fs)
 
-        trial_spike_data = []
-        for i_trial, (start, end) in enumerate(trial_windows):
-            start_samples = int(start)
-            trial_spikes = spike_train[
-                (spike_train >= start_samples - window_pre_samples) &
-                (spike_train < start_samples + window_post_samples)
-            ]
-            trial_spikes_relative = (trial_spikes - start_samples) / fs if len(trial_spikes) > 0 else np.array([])
-            trial_spike_data.append({
-                'trial_index': i_trial,
-                'orientation': orientations[i_trial] if i_trial < len(orientations) else None,
-                'spatial_freq': spatial_freqs[i_trial] if i_trial < len(spatial_freqs) else None,
-                'contrast': contrasts[i_trial] if i_trial < len(contrasts) else None,
-                'phase': phases[i_trial] if i_trial < len(phases) else None,
-                'spike_times': trial_spikes_relative.tolist(),
-                'spike_count': len(trial_spikes_relative),
-                'trial_start': start,
-                'trial_end': end
-            })
+            neural_data['unit_info'][unique_unit_id] = {
+                'original_unit_id': int(unit_id),
+                'shank': shank,
+                'quality': quality,
+                'sorting_folder': str(sorting_folder),
+                'n_spikes_total': len(spike_train),
+                'unit_index': unit_counter,
+                # waveform / electrode
+                'best_channel': best_ch,
+                'channel_location_um': ch_loc,
+                'waveform_template': wf,
+                'waveform_template_all_channels': wf_all_ch,
+                'waveform_t_ms': wf_t_ms,
+                'channel_locations_um': ch_locs,
+                'waveform_channel_ids': wf_ch_ids,
+                'waveform_channel_groups': wf_ch_groups,
+                # autocorrelogram
+                'acg_counts': acg_counts.tolist(),
+                'acg_lags_ms': acg_lags_ms.tolist(),
+            }
 
-        neural_data['spike_data'][unique_unit_id] = trial_spike_data
-        unit_counter += 1
+            trial_spike_data = []
+            for i_trial, (start, end) in enumerate(trial_windows):
+                start_samples = int(start)
+                trial_spikes = spike_train[
+                    (spike_train >= start_samples - window_pre_samples) &
+                    (spike_train < start_samples + window_post_samples)
+                ]
+                trial_spikes_relative = (trial_spikes - start_samples) / fs if len(trial_spikes) > 0 else np.array([])
+                trial_spike_data.append({
+                    'trial_index': i_trial,
+                    'orientation': orientations[i_trial] if i_trial < len(orientations) else None,
+                    'spatial_freq': spatial_freqs[i_trial] if i_trial < len(spatial_freqs) else None,
+                    'contrast': contrasts[i_trial] if i_trial < len(contrasts) else None,
+                    'phase': phases[i_trial] if i_trial < len(phases) else None,
+                    'spike_times': trial_spikes_relative.tolist(),
+                    'spike_count': len(trial_spikes_relative),
+                    'trial_start': start,
+                    'trial_end': end
+                })
+
+            neural_data['spike_data'][unique_unit_id] = trial_spike_data
+            unit_counter += 1
 
     neural_data['extraction_params'] = {
         'window_pre': window_pre,
@@ -466,6 +600,63 @@ def _normalize_passive_window(window):
     )
 
 
+def find_grating_pkl(animal_id, experiment_date, sortout_folder, log_dir=None):
+    """
+    Locate the single grating_data pkl for a session's passive_embedding_analysis
+    folder, deriving rec_name from the experiment log CSV (via load_session_paths)
+    the same way the __main__ block below names its output file.
+
+    Two save formats exist, depending on how the session was exported:
+      - merged:    <rec_name>_grating_data_merged.pkl
+      - per-task:  <rec_name>_<task_time>_grating_data.pkl
+
+    Exactly one file (across both formats combined) is expected. Raises if none
+    or more than one match is found, rather than silently picking one.
+
+    Parameters
+    ----------
+    animal_id : str
+        e.g. "CnL43" — used to look up the experiment log CSV.
+    experiment_date : str
+        e.g. "260721" — date key in the experiment log CSV.
+    sortout_folder : Path or str
+        Session's sortout folder (or its curated_analyzer subfolder).
+    log_dir : Path or str, optional
+        Passed through to load_session_paths.
+
+    Returns
+    -------
+    Path
+        The single matching pkl file.
+    """
+    from rf_recon.FreelyMovingProcessing.Grating.grating_utils import load_session_paths
+
+    rec_folders, task_file_paths = load_session_paths(animal_id, experiment_date, log_dir)
+    rec_folders_for_tasks = _rec_folders_for_task_files(rec_folders, task_file_paths)
+    rec_name = rec_folders_for_tasks[0].name.replace('.rec', '')
+
+    output_dir = _passive_embedding_dir(sortout_folder)
+
+    merged_path = output_dir / f"{rec_name}_grating_data_merged.pkl"
+    per_task_matches = sorted(output_dir.glob(f"{rec_name}_*_grating_data.pkl"))
+    matches = ([merged_path] if merged_path.exists() else []) + per_task_matches
+
+    if not matches:
+        raise FileNotFoundError(
+            f"No grating_data pkl found for {animal_id}/{experiment_date} in {output_dir} "
+            f"(looked for '{rec_name}_grating_data_merged.pkl' and "
+            f"'{rec_name}_<task_time>_grating_data.pkl')"
+        )
+    if len(matches) > 1:
+        raise ValueError(
+            f"Expected exactly one grating_data pkl for {animal_id}/{experiment_date} in "
+            f"{output_dir}, found {len(matches)} - aborting:\n" +
+            "\n".join(f"  {p.name}" for p in matches)
+        )
+
+    return matches[0]
+
+
 if __name__ == "__main__":
     import traceback
     from rf_recon.FreelyMovingProcessing.Grating.grating_utils import load_session_paths
@@ -534,8 +725,7 @@ if __name__ == "__main__":
 
         rec_name = rec_folder.name.replace('.rec', '')
         animal_id = rec_name.split('_')[0]
-        output_base = sortout_folder.parent if sortout_folder.name == 'curated_analyzer' else sortout_folder
-        output_dir = output_base / 'passive_embedding_analysis'
+        output_dir = _passive_embedding_dir(sortout_folder)
         output_dir.mkdir(parents=True, exist_ok=True)
 
         # ── Save options ────────────────────────────────────────────────────────
