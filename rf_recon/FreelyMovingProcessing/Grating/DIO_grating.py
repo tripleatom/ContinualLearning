@@ -567,6 +567,165 @@ def fix_residual_jitter(rising_edges, trial_duration_samples, tolerance=0.02, gr
     return np.array(edges), log
 
 
+def parse_txt_trial_times(task_file_path):
+    """
+    Extract per-trial stimulus Start/End wall-clock times from a grating .txt
+    task file, in seconds relative to the first trial's Start.
+
+    Reads the Start/End columns (HH:MM:SS.mmm) of the TRIAL DATA table already
+    parsed into a DataFrame by parse_grating_experiment.
+
+    Returns
+    -------
+    start_sec, end_sec : np.ndarray
+        Per-trial Start / End times in seconds, zeroed to trial 1's Start.
+    """
+    task = parse_grating_experiment(task_file_path)
+    df = task.get('trial_data')
+    if df is None or 'Start' not in df or 'End' not in df:
+        raise ValueError(f"No parseable trial Start/End table in {task_file_path}")
+
+    fmt = "%H:%M:%S.%f"
+    starts = [datetime.strptime(s, fmt) for s in df['Start']]
+    ends   = [datetime.strptime(s, fmt) for s in df['End']]
+    t0 = starts[0]
+    start_sec = np.array([(t - t0).total_seconds() for t in starts])
+    end_sec   = np.array([(t - t0).total_seconds() for t in ends])
+    return start_sec, end_sec
+
+
+def align_edges_to_txt(rising_edges, txt_start_sec, fs=30000):
+    """
+    Locate which contiguous block of txt trials a (possibly incomplete) rising-
+    edge train corresponds to, and fit the linear map txt-seconds -> ephys-sample.
+
+    Slides the rising-edge inter-trial-interval (ITI) sequence over every start
+    offset in the txt ITI sequence and keeps the lowest mean-squared-error match.
+    Comparing ITIs (rather than absolute times) makes this invariant to the
+    constant clock offset between the DIO reference and the txt wall clock.
+
+    Parameters
+    ----------
+    rising_edges : np.ndarray
+        Rising-edge sample indices (0-based) of the recorded (incomplete) DIO.
+    txt_start_sec : np.ndarray
+        Per-trial Start times in seconds (from parse_txt_trial_times).
+    fs : int
+        Sampling rate in Hz.
+
+    Returns
+    -------
+    dict with keys:
+        offset      : int        - 0-based txt trial index where rising_edges[0] lands
+        a, b        : float      - linear fit  rising_sec = a * txt_start_sec + b
+        mse         : float      - mean squared ITI error at the best offset
+        residual_ms : np.ndarray - per-matched-trial fit residual, in ms
+    """
+    rising_sec = np.asarray(rising_edges, dtype=float) / fs
+    n_edges = len(rising_sec)
+    n_txt = len(txt_start_sec)
+    if n_edges < 2:
+        raise ValueError("Need >= 2 rising edges to align against the txt log")
+    if n_edges > n_txt:
+        raise ValueError(f"More rising edges ({n_edges}) than txt trials ({n_txt})")
+
+    iti_edges = np.diff(rising_sec)
+    iti_txt   = np.diff(txt_start_sec)
+
+    best_offset, best_err = 0, np.inf
+    for offset in range(0, n_txt - n_edges + 1):
+        window = iti_txt[offset:offset + n_edges - 1]
+        err = np.mean((window - iti_edges) ** 2)
+        if err < best_err:
+            best_offset, best_err = offset, err
+
+    matched = txt_start_sec[best_offset:best_offset + n_edges]
+    A = np.vstack([matched, np.ones_like(matched)]).T
+    (a, b), *_ = np.linalg.lstsq(A, rising_sec, rcond=None)
+    residual_ms = (rising_sec - (a * matched + b)) * 1000
+    return {'offset': best_offset, 'a': float(a), 'b': float(b),
+            'mse': float(best_err), 'residual_ms': residual_ms}
+
+
+def fix_missing_trials_from_txt(rising_edges, task_file_path, stimulus_duration, fs=30000):
+    """
+    Complete a partial rising-edge train using the wall-clock trial Start times
+    logged in a grating .txt file.
+
+    Use when the recorded DIO only captured a contiguous subset of the task's
+    trials - e.g. the photodiode/trigger line dropped out mid-session, or the
+    recording started or stopped partway through the task - but the txt log
+    recorded every trial. A linear txt-seconds -> ephys-sample map is fit on the
+    trials that WERE recorded (see align_edges_to_txt), then sample indices for
+    the txt trials missing before/after the recorded block are extrapolated from
+    it. Every recorded edge is preserved unchanged; only missing trials are
+    filled in.
+
+    Assumes the recorded edges form ONE contiguous block of txt trials (missing
+    trials are all at the start and/or end). Trials missing in the middle of the
+    recorded block are better handled by fix_rising_edges' interpolation; a large
+    residual std here is the tell-tale that this contiguity assumption is broken.
+
+    Falling edges are set to rising + stimulus_duration for every trial, matching
+    the 'fixed' convention used elsewhere in this module.
+
+    Parameters
+    ----------
+    rising_edges : np.ndarray
+        Recorded (partial) rising-edge sample indices, ideally glitch-screened.
+    task_file_path : str or Path
+        Grating .txt task file.
+    stimulus_duration : float
+        Stimulus ON duration in seconds.
+    fs : int
+        Sampling rate in Hz.
+
+    Returns
+    -------
+    dict with keys:
+        rising_times, falling_times : np.ndarray  (length == n txt trials)
+        is_reconstructed            : np.ndarray of bool  (True for filled-in trials)
+        offset, n_real, n_reconstructed, fit
+    """
+    rising_edges = np.asarray(rising_edges, dtype=np.int64)
+    txt_start_sec, _ = parse_txt_trial_times(task_file_path)
+    n_txt = len(txt_start_sec)
+    n_real = len(rising_edges)
+
+    fit = align_edges_to_txt(rising_edges, txt_start_sec, fs=fs)
+    offset, a, b = fit['offset'], fit['a'], fit['b']
+
+    new_rising = np.empty(n_txt, dtype=np.int64)
+    is_recon = np.ones(n_txt, dtype=bool)
+
+    # Recorded trials: preserved exactly.
+    new_rising[offset:offset + n_real] = rising_edges
+    is_recon[offset:offset + n_real] = False
+
+    # Missing trials before and/or after the recorded block: extrapolate.
+    missing_idx = np.r_[np.arange(0, offset), np.arange(offset + n_real, n_txt)]
+    for i in missing_idx:
+        new_rising[i] = int(round((a * txt_start_sec[i] + b) * fs))
+
+    falling = new_rising + int(round(stimulus_duration * fs))
+
+    if n_real >= 1 and not np.all(np.diff(new_rising) > 0):
+        print("  WARNING: reconstructed rising edges are not strictly increasing "
+              "- check txt/DIO alignment.")
+
+    res = fit['residual_ms']
+    print(f"  txt-referring fix: {n_real} recorded trial(s) matched to txt trials "
+          f"{offset + 1}-{offset + n_real} "
+          f"(a={a:.7f}, b={b:.3f}s, residual std={res.std():.1f} ms, "
+          f"max|res|={np.abs(res).max():.1f} ms); "
+          f"reconstructed {len(missing_idx)} missing trial(s) "
+          f"({offset} before, {n_txt - offset - n_real} after).")
+
+    return {'rising_times': new_rising, 'falling_times': falling,
+            'is_reconstructed': is_recon, 'offset': offset,
+            'n_real': n_real, 'n_reconstructed': len(missing_idx), 'fit': fit}
+
+
 def process_task(task_file_path, rising_segment, fs=30000):
     """
     Fix DIO edges, plot diagnostics, and save results for a single task.
@@ -613,11 +772,25 @@ def process_task(task_file_path, rising_segment, fs=30000):
 
     falling_fixed = rising_fixed + int(stimulus_duration * fs)
 
-    # Diagnostics plot — 3 panels: RAW / PRE-SCREENED / FIXED
-    fig, axes = plt.subplots(3, 1, figsize=(12, 9), sharex=False)
+    # Step 3: txt-referring reconstruction of any trials missing from the DIO.
+    # Uses the .txt trial Start times to fill in a contiguous block of trials
+    # missing at the start/end of the recording (e.g. trigger dropout), while
+    # preserving every recorded edge. Aligned from the glitch-screened edges.
+    txt_result = None
+    try:
+        txt_result = fix_missing_trials_from_txt(
+            rising_screened, task_file_path, stimulus_duration, fs=fs)
+    except (ValueError, FileNotFoundError, KeyError) as e:
+        print(f"  txt-referring fix unavailable: {e}")
+
+    # Diagnostics plot — RAW / PRE-SCREENED / FIXED (+ TXT-REFERRING if available)
+    n_panels = 4 if txt_result is not None else 3
+    fig, axes = plt.subplots(n_panels, 1, figsize=(12, 3 * n_panels), sharex=False)
     fig.suptitle(f"{task_id}\n"
                  f"raw={len(rising_segment)}  screened={len(rising_screened)}  "
-                 f"fixed={len(rising_fixed)}  expected={n_repeats}",
+                 f"fixed={len(rising_fixed)}"
+                 + (f"  txt_fixed={len(txt_result['rising_times'])}" if txt_result else "")
+                 + f"  expected={n_repeats}",
                  fontsize=11)
 
     raw_diff      = np.diff(rising_segment)  / fs
@@ -655,7 +828,30 @@ def process_task(task_file_path, rising_segment, fs=30000):
     if len(glitch_idx) or len(missing_idx):
         axes[1].legend(fontsize=8)
 
-    axes[2].set_xlabel('Edge index', fontsize=9)
+    # TXT-REFERRING panel: full-length train with recorded vs reconstructed edges
+    if txt_result is not None:
+        ax = axes[3]
+        tr = txt_result['rising_times']
+        recon = txt_result['is_reconstructed']
+        txt_diff = np.diff(tr) / fs
+        eidx = np.arange(len(txt_diff))
+        # Colour each ITI by whether the trial it leads INTO was reconstructed.
+        real_mask = ~recon[1:]
+        ax.plot(eidx, txt_diff, lw=0.6, color='0.75', zorder=1)
+        ax.scatter(eidx[real_mask], txt_diff[real_mask], s=10, color='green',
+                   zorder=2, label=f'recorded ({txt_result["n_real"]})')
+        ax.scatter(eidx[~real_mask], txt_diff[~real_mask], s=10, color='red',
+                   zorder=2, label=f'reconstructed ({txt_result["n_reconstructed"]})')
+        ax.axhline(trial_duration, color='r', linestyle='--', lw=1.2)
+        res_std = txt_result['fit']['residual_ms'].std()
+        ax.set_title(f'TXT-REFERRING FIX ({len(tr)} edges, '
+                     f'{txt_result["n_reconstructed"]} reconstructed, '
+                     f'fit residual std={res_std:.1f} ms)', fontsize=10)
+        ax.set_ylabel('Interval (s)', fontsize=9)
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3)
+
+    axes[-1].set_xlabel('Edge index', fontsize=9)
 
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     stamp = (
@@ -671,13 +867,29 @@ def process_task(task_file_path, rising_segment, fs=30000):
     fig.tight_layout(rect=[0, 0.08, 0.83, 1])
     fig.savefig(folder_path / f"{task_id}_DIO_fix.png", dpi=150)
 
-    # ── Select which version (raw / screened / fixed) to save to the .npz ──────
+    # ── Select which version to save to the .npz ───────────────────────────────
+    version_data = {
+        'raw':      (rising_segment,  rising_segment  + int(stimulus_duration * fs)),
+        'screened': (rising_screened, rising_screened + int(stimulus_duration * fs)),
+        'fixed':    (rising_fixed,    falling_fixed),
+    }
+    version_options = ['raw', 'screened', 'fixed']
+    if txt_result is not None:
+        version_options.append('txt_fixed')
+        version_data['txt_fixed'] = (txt_result['rising_times'], txt_result['falling_times'])
+
+    # Default to the txt reconstruction when the interval-based fix did not reach
+    # the expected trial count but the txt fix did; otherwise default to 'fixed'.
+    default_version = 'fixed'
+    if txt_result is not None and len(rising_fixed) != n_repeats \
+            and len(txt_result['rising_times']) == n_repeats:
+        default_version = 'txt_fixed'
+
     rax = fig.add_axes([0.85, 0.45, 0.13, 0.18])
     rax.set_title('Save version', fontsize=9)
-    version_options = ['raw', 'screened', 'fixed']
-    radio = RadioButtons(rax, version_options, active=2)
+    radio = RadioButtons(rax, version_options, active=version_options.index(default_version))
 
-    save_choice = {'version': version_options[2]}
+    save_choice = {'version': default_version}
 
     def _on_select(label):
         save_choice['version'] = label
@@ -685,11 +897,6 @@ def process_task(task_file_path, rising_segment, fs=30000):
     radio.on_clicked(_on_select)
     plt.show()
 
-    version_data = {
-        'raw':      (rising_segment,  rising_segment  + int(stimulus_duration * fs)),
-        'screened': (rising_screened, rising_screened + int(stimulus_duration * fs)),
-        'fixed':    (rising_fixed,    falling_fixed),
-    }
     chosen_rising, chosen_falling = version_data[save_choice['version']]
 
     save_path = folder_path / f"{task_id}_DIO.npz"
