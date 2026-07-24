@@ -1,6 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from passive_visual.static_grating_decoder.LDA_filter_gOSI import visualize_lda_decoding
+from passive_visual.HeadFixedProcessing.static_grating_decoder.LDA_filter_gOSI import visualize_lda_decoding
 from pathlib import Path
 from server_fallback import resolve_output_folder
 # Simulated results from calling visualize_lda_decoding with different z_noise_thresholds

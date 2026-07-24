@@ -10,8 +10,8 @@ import numpy as np
 import pickle
 from datetime import datetime
 from spikeinterface import load_sorting_analyzer
-from process_func import DIO
-from rec2nwb.preproc_func import parse_session_info
+from trodes_io import DIO
+from recording_preproc.preproc_func import parse_session_info
 from readDIO_grating import get_trial_params, get_session_position
 
 

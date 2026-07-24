@@ -1,7 +1,7 @@
 import scipy.io
 import h5py
 from pathlib import Path
-from rec2nwb.preproc_func import parse_session_info
+from recording_preproc.preproc_func import parse_session_info
 import os
 from spikeinterface.extractors import read_phy
 from spikeinterface.core import load_sorting_analyzer

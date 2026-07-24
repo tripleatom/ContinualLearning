@@ -12,3 +12,4 @@ passive_view_video/logs
 *.png
 experiment_patterns_code
 .claude
+.vscode

@@ -3,7 +3,7 @@ import spikeinterface.extractors as se
 from pathlib import Path
 import numpy as np
 import spikeinterface as si
-from process_func.readTrodesExtractedDataFile3 import readTrodesExtractedDataFile
+from trodes_io.readTrodesExtractedDataFile3 import readTrodesExtractedDataFile
 import matplotlib.pyplot as plt
 
 

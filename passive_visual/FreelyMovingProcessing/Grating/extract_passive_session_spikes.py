@@ -10,7 +10,7 @@ import numpy as np
 import pickle
 from datetime import datetime
 from spikeinterface import load_sorting_analyzer
-from rec2nwb.preproc_func import parse_session_info
+from recording_preproc.preproc_func import parse_session_info
 from grating_utils import parse_grating_experiment
 
 

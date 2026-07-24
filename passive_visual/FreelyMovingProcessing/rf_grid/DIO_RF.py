@@ -5,7 +5,7 @@ from scipy.ndimage import gaussian_filter1d
 import os
 import pickle
 
-from process_func.DIO import get_dio_folders, concatenate_din_data
+from trodes_io.DIO import get_dio_folders, concatenate_din_data
 from task_file_reader import load_task_file
 from spikeinterface import load_sorting_analyzer
 from spikeinterface.extractors import read_phy

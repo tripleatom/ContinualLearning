@@ -1,7 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
-from rec2nwb.preproc_func import parse_session_info
+from recording_preproc.preproc_func import parse_session_info
 from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
 import umap

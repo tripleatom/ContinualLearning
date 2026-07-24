@@ -10,8 +10,8 @@ import numpy as np
 from datetime import datetime
 from pathlib import Path
 from spikeinterface import load_sorting_analyzer
-from process_func import DIO
-from rec2nwb.preproc_func import parse_session_info
+from trodes_io import DIO
+from recording_preproc.preproc_func import parse_session_info
 import pickle
 import json
 

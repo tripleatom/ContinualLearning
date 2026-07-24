@@ -5,7 +5,7 @@ import h5py
 from pathlib import Path
 from spikeinterface import load_sorting_analyzer
 from spikeinterface.extractors import read_phy
-from rec2nwb.preproc_func import parse_session_info
+from recording_preproc.preproc_func import parse_session_info
 import pandas as pd
 import pickle
 
@@ -143,7 +143,7 @@ def process_object_discrimination_with_temporal_features(rec_folder, task_file, 
     task_file = Path(task_file)
     
     # Import DIO processing
-    import process_func.DIO as DIO
+    import trodes_io.DIO as DIO
     
     # Get animal and session IDs
     animal_id = rec_folder.name.split('.')[0].split('_')[0]

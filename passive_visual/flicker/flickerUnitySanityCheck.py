@@ -1,4 +1,4 @@
-import process_func.DIO as DIO
+import trodes_io.DIO as DIO
 import numpy as np
 import matplotlib.pyplot as plt
 import mplcursors

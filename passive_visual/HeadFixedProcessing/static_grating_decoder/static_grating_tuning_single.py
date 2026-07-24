@@ -4,7 +4,7 @@ from pathlib import Path
 import h5py
 from passive_visual.rf_func import dereference
 from spikeinterface.extractors import read_phy
-from rec2nwb.preproc_func import parse_session_info
+from recording_preproc.preproc_func import parse_session_info
 import scipy
 import os
 

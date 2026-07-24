@@ -7,7 +7,7 @@ sys.path.append(str(code_dir))
 import numpy as np
 import matplotlib.pyplot as plt
 from spikeinterface import load_sorting_analyzer
-from process_func import DIO
+from trodes_io import DIO
 from readDIO_grating import get_trial_params
 
 

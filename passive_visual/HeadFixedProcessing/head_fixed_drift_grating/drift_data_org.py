@@ -5,7 +5,7 @@ import h5py
 from datetime import datetime
 from pathlib import Path
 from spikeinterface.extractors import read_phy
-from rec2nwb.preproc_func import parse_session_info
+from recording_preproc.preproc_func import parse_session_info
 from passive_visual.rf_func import dereference
 import pickle
 

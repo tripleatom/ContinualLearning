@@ -5,7 +5,7 @@ import h5py
 from pathlib import Path
 from spikeinterface import load_sorting_analyzer
 from spikeinterface.extractors import read_phy
-from rec2nwb.preproc_func import parse_session_info
+from recording_preproc.preproc_func import parse_session_info
 from passive_visual.rf_func import dereference
 
 def process_static_grating_responses(rec_folder, stimdata_file, peaks_file, overwrite=True):

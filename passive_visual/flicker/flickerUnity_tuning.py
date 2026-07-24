@@ -1,13 +1,13 @@
 import scipy.io
 import h5py
 from pathlib import Path
-from rec2nwb.preproc_func import parse_session_info
+from recording_preproc.preproc_func import parse_session_info
 import os
 from spikeinterface.extractors import read_phy
 from spikeinterface.core import load_sorting_analyzer
 import matplotlib.pyplot as plt
 import numpy as np
-import process_func.DIO as DIO
+import trodes_io.DIO as DIO
 from scipy.ndimage import gaussian_filter1d
 
 rec_folder = r"\\10.129.151.108\xieluanlabs\xl_cl\flicker\250723\CnL39SG\CnL39SG_20250723_160752.rec"

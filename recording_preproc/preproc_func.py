@@ -137,7 +137,7 @@ def get_bad_ch_id(rec, folder, ish, load_if_exists=True):
 
     Args:
         rec: Recording object.
-        folder: Parent folder for the NWB file.
+        folder: Parent folder for saving results.
         ish: Shank identifier.
         load_if_exists (bool): If True, load from file if available.
 

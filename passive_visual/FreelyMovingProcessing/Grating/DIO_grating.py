@@ -2,7 +2,7 @@ from grating_utils import parse_grating_experiment
 import numpy as np
 from pathlib import Path
 from datetime import datetime
-from process_func.DIO import get_dio_folders, concatenate_din_data
+from trodes_io.DIO import get_dio_folders, concatenate_din_data
 import matplotlib.pyplot as plt
 from matplotlib.widgets import RadioButtons
 

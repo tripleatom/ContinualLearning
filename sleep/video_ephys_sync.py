@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from process_func.DIO import concatenate_din_data, get_dio_folders
+from trodes_io.DIO import concatenate_din_data, get_dio_folders
 
 
 # Default paths for interactive/script use.

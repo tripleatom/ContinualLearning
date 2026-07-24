@@ -7,7 +7,7 @@ import os
 import h5py
 from passive_visual.rf_func import find_stim_index, h5py_to_dict, hex_offsets
 from spikeinterface.extractors import read_phy
-from rec2nwb.preproc_func import parse_session_info
+from recording_preproc.preproc_func import parse_session_info
 from matplotlib.colors import Normalize, LinearSegmentedColormap
 import matplotlib.colors as mcolors
 

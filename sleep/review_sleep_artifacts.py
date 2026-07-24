@@ -4,7 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import spikeinterface.extractors as se
 import spikeinterface.preprocessing as spre
-from process_func.recording_proc import rm_artifacts, compute_norms_numba
+from recording_preproc.recording_proc import rm_artifacts, compute_chunk_norms
 from pathlib import Path
 from server_fallback import resolve_output_folder
 
@@ -76,7 +76,7 @@ n_channels_plot = min(4, n_channels)
 
 print("Computing chunk norms for visualization...")
 traces = rec_detect.get_traces(return_scaled=True)
-norms = compute_norms_numba(traces, chunk_size)
+norms = compute_chunk_norms(traces, chunk_size)
 
 # Use actual number of chunks from norms output
 num_chunks = norms.shape[0]
