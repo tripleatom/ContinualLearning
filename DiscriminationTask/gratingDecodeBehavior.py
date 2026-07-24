@@ -28,7 +28,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # Add grating utilities to path
-_GRATING_DIR = Path(__file__).parent.parent / 'rf_recon' / 'FreelyMovingProcessing' / 'Grating'
+_GRATING_DIR = Path(__file__).parent.parent / 'passive_visual' / 'FreelyMovingProcessing' / 'Grating'
 sys.path.insert(0, str(_GRATING_DIR))
 import grating_utils
 

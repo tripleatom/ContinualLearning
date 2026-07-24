@@ -1,98 +1,57 @@
-# **Spectrogram Processing Pipeline for Sleep LFP Data**
+# Sleep LFP Processing Pipeline
 
-This script computes time–frequency spectrograms for all channels across multiple shanks in a `.rec` electrophysiology recording. It uses parameters optimized for sleep analysis, producing stable slow-wave and spindle-band representations.
+This directory extracts sleep LFP signals, computes time-frequency features,
+scores NREM epochs, and optionally scores cortical UP/DOWN states.
 
----
+## Pipeline
 
-## **Overview**
+Run the active pipeline in this order:
 
-The pipeline performs the following steps:
+1. `extract_sleep_lfp.py`
+   Extract and preprocess 500 Hz LFP traces from NWB recordings.
+2. `compute_sleep_spectrograms.py`
+   Compute per-channel spectrograms from the extracted LFP.
+3. `compute_sleep_features.py`
+   Compute PC1 and delta, theta, sigma, gamma, and theta-ratio features.
+4. `score_nrem_epochs.py`
+   Score NREM epochs and select consolidated NREM windows.
+5. `score_cortical_up_down_states.py`
+   Score cortical UP/DOWN states inside a selected NREM window.
 
-1. **Identify recording session and shanks** from the `.rec` folder.
-2. **Load LFP traces** for each shank from the `low_freq/` directory.
-3. **Compute spectrograms** channel-by-channel using `scipy.signal.spectrogram` with sleep-optimized parameters.
-4. **Save output** (spectrograms + metadata) into compressed `.npz` files for further analysis (e.g., SWS detection, sleep scoring, coherence analysis).
+Shared settings live in `sleep_pipeline_config.py`. Broadband artifact
+detection is implemented in `sleep_artifact_detection.py`.
 
----
+`legacy_score_sleep_stages.py` contains the older, disconnected
+NREM/REM/Wake implementation. `legacy_sleep_lfp.py` contains the older
+standalone LFP extraction and plotting workflow.
 
-## **Key Features**
+## Spectrogram features
 
-### ✔ Sleep-optimized spectrogram settings
+- Window: 1,024 samples, approximately 2.0 seconds at 500 Hz
+- Overlap: 75%
+- FFT size: 2,048, approximately 0.24 Hz frequency resolution
+- Time resolution: approximately 0.5 seconds
+- Per-channel processing across each configured shank
+- Compressed NumPy output for downstream feature computation
 
-* **Window (nperseg = 1024)** → ~2.0 s windows at 500 Hz
-* **75% overlap** → smooth time transitions
-* **FFT size (2048)** → ~0.24 Hz frequency resolution
-* Produces ~0.5 s time resolution suitable for NREM, REM, SWS detection.
+Each shank's spectrogram file contains:
 
-### ✔ Efficient processing
-
-* Computes spectrograms per channel for each shank.
-* Saves frequency and time vectors only once to reduce redundancy.
-* Stores floating-point values as `float32` to reduce file size.
-
-### ✔ Structured output
-
-For each shank, the script writes:
-
-```
-<session>_shX_spectrograms.npz
-```
-
-Containing:
-
-* `spectrograms` — array of shape (n_channels, n_freqs, n_times)
-* `freqs`, `times` — frequency/time axes
-* `channel_ids`
-* `sampling_rate`, `start_time`
-* `spec_params`
-* Basic metadata (n_channels, n_freqs, n_times)
-
----
-
-## **Workflow**
-
-1. **Loop over shanks**
-   For each shank ID, check whether the LFP file exists.
-
-2. **Load LFP data**
-
-   ```
-   traces: (n_samples, n_channels)
-   sampling_rate: typically 500 Hz
-   channel_ids: per-channel identifier
-   ```
-
-3. **Compute spectrogram per channel**
-
-   * Extract individual channel trace
-   * Run `signal.spectrogram()`
-   * Store the output matrix (power vs frequency vs time)
-
-4. **Aggregate and save**
-
-   * Stack all channel spectrograms into a 3D array
-   * Save to disk in compressed `.npz` format
-
----
-
-## **Output Example**
-
-A typical saved spectrogram file includes:
-
-```
-spectrograms: float32 array (64, 1025, 20000)
-freqs: float32 array (1025,)
-times: float32 array (~20000,)
-channel_ids: int array
-sampling_rate: int
-start_time: float
+```text
+spectrograms: (n_channels, n_frequencies, n_times)
+freqs: frequency axis
+times: time axis
+channel_ids: per-channel identifiers
+sampling_rate
+start_time
+spec_params
 ```
 
----
+## Supporting and review scripts
 
-## **Use Cases**
+- `plot_sleep_spectrograms.py`: create spectrogram and feature summaries
+- `plot_processed_sleep_lfp.py`: regenerate plots from exported trace-data files
+- `review_sleep_artifacts.py`: inspect artifact removal results
+- `compute_sleep_mua.py`: compute and plot sleep multi-unit activity
 
-* Sleep stage classification (REM/NREM/SWS)
-* Delta/theta/beta/gamma power tracking
-* Coherence analysis across brain vs spinal channels
-* Visualizing oscillatory bursts (sleep spindles, slow waves)
+Generated data filenames have intentionally not been renamed, preserving
+compatibility with existing recordings and downstream analyses.

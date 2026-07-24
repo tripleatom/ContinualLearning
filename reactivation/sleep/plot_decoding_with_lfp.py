@@ -79,7 +79,7 @@ def parse_args():
     p.add_argument("--results", default=DEFAULT_RESULTS,
                    help="sleep_decoding_results.pkl from apply_merged_decoder_to_sleep.py")
     p.add_argument("--lfp", default=DEFAULT_LFP,
-                   help="*_trace_data_concat.pkl from spectrogram_plot.py")
+                   help="*_trace_data_concat.pkl from plot_sleep_spectrograms.py")
     p.add_argument("--out", default=None, help="output PNG path (default: next to results pkl)")
     p.add_argument("--tmin", type=float, default=None,
                    help="start of the real-time window to show (s); default = full block")

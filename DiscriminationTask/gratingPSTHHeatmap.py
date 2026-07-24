@@ -25,7 +25,7 @@ warnings.filterwarnings('ignore')
 
 _THIS_DIR = Path(__file__).parent
 sys.path.insert(0, str(_THIS_DIR))
-_GRATING_DIR = _THIS_DIR.parent / 'rf_recon' / 'FreelyMovingProcessing' / 'Grating'
+_GRATING_DIR = _THIS_DIR.parent / 'passive_visual' / 'FreelyMovingProcessing' / 'Grating'
 sys.path.insert(0, str(_GRATING_DIR))
 
 import grating_utils  # type: ignore
