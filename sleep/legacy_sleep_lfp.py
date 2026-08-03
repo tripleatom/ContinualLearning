@@ -36,7 +36,7 @@ for ish in shanks:
     
     # Load recording for this shank
     rec_file = f"{rec_folder}\\{session_name}sh{ish}.nwb"
-    rec = se.NwbRecordingExtractor(rec_file)
+    rec = se.read_nwb_recording(rec_file)
     folder = Path(rec_file).parent
     
     # Store original recording info

@@ -1,4 +1,5 @@
 import errno
+import re
 import numpy as np
 from pathlib import Path
 import spikeinterface.extractors as se
@@ -18,6 +19,52 @@ from sleep_pipeline_config import (
     resolve_output_folder,
     mirror_on_backup_server,
 )
+
+
+def resolve_nwb_path(folder, session_prefix, shank):
+    """Find a shank NWB while allowing either YYMMDD or YYYYMMDD dates."""
+    folder = Path(folder)
+    suffix = f"sh{shank}.nwb"
+    prefixes = [session_prefix]
+
+    # NWB exports are inconsistent about using YYMMDD versus YYYYMMDD.
+    date_match = re.fullmatch(r"(.+_)(\d{6}|\d{8})", session_prefix)
+    if date_match:
+        stem, date = date_match.groups()
+        alternate_date = f"20{date}" if len(date) == 6 else date[2:]
+        prefixes.append(f"{stem}{alternate_date}")
+
+    attempted = []
+    for prefix in prefixes:
+        candidate = folder / f"{prefix}{suffix}"
+        attempted.append(candidate)
+        if candidate.is_file():
+            if prefix != session_prefix:
+                print(f"Configured NWB name not found; using date-format match: {candidate}")
+            return candidate
+
+    # Last resort: accept a unique file for the same animal/session prefix and
+    # shank. Never silently choose when multiple recordings match.
+    animal_prefix = session_prefix.rsplit("_", 1)[0]
+    matches = sorted(
+        path for path in folder.glob(f"{animal_prefix}_*{suffix}")
+        if path.is_file()
+    )
+    if len(matches) == 1:
+        print(f"Configured NWB name not found; using unique shank match: {matches[0]}")
+        return matches[0]
+    if len(matches) > 1:
+        choices = "\n  ".join(str(path) for path in matches)
+        raise RuntimeError(
+            f"Multiple NWB files match {animal_prefix}_*{suffix}; "
+            f"cannot choose safely:\n  {choices}"
+        )
+
+    tried = "\n  ".join(str(path) for path in attempted)
+    raise FileNotFoundError(
+        f"Could not find an NWB file for shank {shank}. Tried:\n  {tried}\n"
+        f"Also searched for: {folder / f'{animal_prefix}_*{suffix}'}"
+    )
 
 
 def build_lfp_recording(rec):
@@ -81,8 +128,9 @@ def process_shank(ish, session_key, session_cfg, job_kwargs):
     print("=" * 75 + "\n")
 
     # Load NWB
-    rec_path = f"{rec_folder}\\{nwb_session_name}sh{ish}.nwb"
-    rec = se.NwbRecordingExtractor(rec_path)
+    rec_path = resolve_nwb_path(rec_folder, nwb_session_name, ish)
+    print(f"Loading NWB: {rec_path}")
+    rec = se.read_nwb_recording(rec_path)
 
     # Basic info
     orig_fs = rec.get_sampling_frequency()

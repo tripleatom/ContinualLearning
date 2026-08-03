@@ -74,7 +74,7 @@ class NeuralSignalProcessor:
         
         try:
             # Load and filter recording
-            rec = se.NwbRecordingExtractor(str(nwb_file))
+            rec = se.read_nwb_recording(str(nwb_file))
             
             # Suppress bandpass filter warnings for cleaner output
             with warnings.catch_warnings():

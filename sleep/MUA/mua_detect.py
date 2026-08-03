@@ -97,10 +97,14 @@ def _import_artifact_utils(repo_path: Union[str, Path, None] = None):
 # Artifact detection with the same cache format MsSorting.py uses
 # --------------------------------------------------------------------------
 
-#: Defaults copied from ``MsSorting._load_or_compute_artifacts``. These differ
-#: from ``artifact_utils.detect_artifacts_recording``'s own defaults, and the
-#: cache key is built from them, so they must stay in sync with MsSorting.py for
-#: caches to be shared.
+#: The cache key is built from these, so sharing a cache with a sorting run
+#: means matching the parameters that run actually used — not MsSorting.py's
+#: code defaults, which are only what ``sorter_params.get(...)`` falls back to.
+#: These mirror the ``sorter_params`` in the SpikeSorting repo's
+#: ``pipeline_gui_settings.json``; ``global_stats_sample_batches`` in particular
+#: is 3 there and ``None`` in the code default, and ``None`` means the global
+#: statistics pass visits every batch instead of 3, which is both a different
+#: key and several times slower.
 ARTIFACT_PARAM_DEFAULTS = {
     'artifact_detection_method': 'rolling_std',
     'artifact_slope_threshold': 500,
@@ -108,7 +112,7 @@ ARTIFACT_PARAM_DEFAULTS = {
     'artifact_rolling_z_threshold': 30,
     'artifact_time_batch_sec': 600,
     'artifact_use_global_stats': True,
-    'artifact_global_stats_sample_batches': None,
+    'artifact_global_stats_sample_batches': 3,
 }
 
 
@@ -127,6 +131,35 @@ def _artifact_meta(rec: si.BaseRecording, artifact_params: dict) -> dict:
         'n_channels': int(rec.get_num_channels()),
         'sampling_rate': float(rec.get_sampling_frequency()),
     }
+
+
+def _key_from_meta(meta: dict) -> str:
+    return hashlib.sha1(json.dumps(meta, sort_keys=True).encode()).hexdigest()[:12]
+
+
+def artifact_cache_key(rec: si.BaseRecording,
+                       artifact_params: Optional[dict] = None) -> str:
+    """The 12-char hash MsSorting.py names its artifact cache files with."""
+    return _key_from_meta(_artifact_meta(rec, artifact_params))
+
+
+def has_artifact_cache(rec: si.BaseRecording,
+                       cache_folder: Union[str, Path, None],
+                       artifact_params: Optional[dict] = None) -> bool:
+    """True if ``cache_folder`` already holds artifacts for exactly this recording.
+
+    Lets a caller test a previous sorting run's folder before committing to it,
+    so a miss costs a pair of ``stat`` calls rather than a full detection pass.
+    Note the key covers the recording's frame count, so it only matches when
+    ``rec`` spans the same samples the sorter saw — a frame-sliced epoch of a
+    concatenated day will not match that day's cache.
+    """
+    if cache_folder is None:
+        return False
+    key = artifact_cache_key(rec, artifact_params)
+    cache_dir = Path(cache_folder) / '_artifact_cache'
+    return ((cache_dir / f'cache_meta_{key}.json').is_file()
+            and (cache_dir / f'artifact_timestamps_{key}.npz').is_file())
 
 
 def load_or_compute_artifacts(
@@ -155,7 +188,7 @@ def load_or_compute_artifacts(
     """
     au = _import_artifact_utils(repo_path)
     meta = _artifact_meta(rec, artifact_params)
-    key = hashlib.sha1(json.dumps(meta, sort_keys=True).encode()).hexdigest()[:12]
+    key = _key_from_meta(meta)
 
     meta_path = ts_path = None
     artifact_timestamps = None
@@ -281,6 +314,21 @@ class MuaEvents:
 # Preprocessing — mirrors MsSorting._sort_shank
 # --------------------------------------------------------------------------
 
+def rescue_units(recording: si.BaseRecording, verbose: bool = True) -> si.BaseRecording:
+    """Scale volts to uV when the traces peak below 1e-6 (MsSorting.py:159-164).
+
+    Idempotent: a recording already in uV is returned unchanged, so it is safe
+    to apply before artifact repair and again inside :func:`preprocess_for_mua`.
+    """
+    probe_n = min(int(recording.get_sampling_frequency()), recording.get_num_frames())
+    traces_sample = recording.get_traces(start_frame=0, end_frame=probe_n)
+    if np.abs(traces_sample).max() < 1e-6:
+        if verbose:
+            print('0. Data appears to be in volts (peak < 1e-6). Rescaling by 1e6...')
+        return sp.scale(recording, gain=1e6)
+    return recording
+
+
 def preprocess_for_mua(
     recording: si.BaseRecording, *,
     remove_artifacts: bool = True,
@@ -357,15 +405,8 @@ def preprocess_for_mua(
     if scale_mode not in ('whiten', 'zscore', 'none'):
         raise ValueError(f"scale_mode must be 'whiten', 'zscore' or 'none', got {scale_mode!r}")
 
-    rec = recording
-
     # 0. Unit rescue (MsSorting.py:159-164)
-    probe_n = min(int(rec.get_sampling_frequency()), rec.get_num_frames())
-    traces_sample = rec.get_traces(start_frame=0, end_frame=probe_n)
-    if np.abs(traces_sample).max() < 1e-6:
-        if verbose:
-            print('0. Data appears to be in volts (peak < 1e-6). Rescaling by 1e6...')
-        rec = sp.scale(rec, gain=1e6)
+    rec = rescue_units(recording, verbose=verbose)
 
     # 1. Artifact detection + lazy repair
     if remove_artifacts:
@@ -382,7 +423,8 @@ def preprocess_for_mua(
             verbose=verbose,
         )
     elif verbose:
-        print('1. Skipping artifact removal (remove_artifacts=False)')
+        print('1. Skipping artifact removal (remove_artifacts=False) — any repair '
+              'must already be applied to the recording passed in')
 
     # 2. CMR
     if rec.get_dtype().kind == 'u':

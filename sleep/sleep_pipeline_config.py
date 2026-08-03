@@ -8,12 +8,23 @@ Single source of truth imported by:
 
 Edit values here; the scripts pull from this module so they stay in sync.
 
-`sleep_sessions` (pre-task / post-task) lets extract_sleep_lfp.py,
-compute_sleep_spectrograms.py, and compute_sleep_features.py each process both
-sleep windows from one recording when both exist, or skip whichever one
-has start_sample=end_sample=None. plot_sleep_spectrograms.py still targets one
-session's *_all_shanks_band_powers.pkl at a time (set session_name /
-rec_folder or the file suffix accordingly) - it is not looped here.
+`sleep_sessions` (pre-task / post-task) lets every stage - extract_sleep_lfp.py,
+compute_sleep_spectrograms.py, compute_sleep_features.py, video_ephys_sync.py
+and plot_sleep_spectrograms.py - process both sleep windows in one run, or skip
+whichever one has start_sample=end_sample=None. Outputs are suffixed "_pre" /
+"_post" throughout so the two never collide.
+
+Per-day paths (rec_folder, nwb_session_name, and each session's
+start/end sample, .rec epoch folder, video _PROC file) come from
+sleep_day_configs.json via sleep_day_registry.py, keyed by ACTIVE_ANIMAL +
+ACTIVE_DATE below. To switch session: edit those two. If that animal-day
+hasn't been registered yet, run `python set_sleep_day.py` first (it prompts
+once and saves the answer) - this module itself never prompts, since
+extract_sleep_lfp.py re-imports it in spawned worker processes on Windows.
+
+`python sleep_pipeline_gui.py` drives the whole sequence and writes
+ACTIVE_ANIMAL / ACTIVE_DATE / SESSION_FILTER / shanks here before each run, so
+running the stage scripts by hand afterwards uses exactly the same settings.
 """
 from pathlib import Path
 
@@ -22,13 +33,34 @@ from server_fallback import (
     resolve_output_folder,
     resolve_existing_file,
 )
+from sleep_day_registry import entry_animal, load_day_config
 
 # =====================================================
 # SESSION / PATHS  (shared)
 # =====================================================
+# Which registered animal-day to run. Edit these per session; see module
+# docstring. The registry is keyed by BOTH, so the same date can exist for
+# several animals without them overwriting each other.
+ACTIVE_ANIMAL = "CnL46"
+ACTIVE_DATE = "260727"
+
+# Optional per-run restriction on which sleep session(s) the stages process:
+#   None (or "both") -> every active session for ACTIVE_DATE
+#   "pre" / "post"   -> only that one, even if the other is registered
+# Applied inside active_sleep_sessions(), so it reaches every stage at once
+# (extract / spectrograms / features / plots / sync). Kept separate from the
+# registry: the registry says what EXISTS for a day, this says what to run now.
+SESSION_FILTER = None
+
+_day_cfg = load_day_config(ACTIVE_DATE, ACTIVE_ANIMAL)
+
+# Animal actually registered for this day (identical to ACTIVE_ANIMAL, except
+# for pre-animal registry entries, where it is read off the rec_folder path).
+animal = entry_animal(_day_cfg)
+
 # Recording folder. low_freq outputs are written to / read from
 # rec_folder / "low_freq".
-rec_folder = r"\\10.129.151.108\xieluanlabs\xl_cl\experiment_data\CnL42\260324\CnL42SG_20260324"
+rec_folder = _day_cfg['rec_folder']
 
 # Used for OUTPUT filenames: {session_name}_sh{ish}_lfp_traces.npz, etc.
 session_name = Path(rec_folder).stem.split('.')[0]
@@ -36,10 +68,10 @@ session_name = Path(rec_folder).stem.split('.')[0]
 # NWB files are usually a different (6-digit date) naming, e.g. "CnL42SG_260324sh0.nwb",
 # but this session's NWBs were exported with the full 8-digit date instead.
 # Base name used for the input .nwb files (everything before "sh{ish}.nwb").
-nwb_session_name = "CnL42SG_20260324"
+nwb_session_name = _day_cfg['nwb_session_name']
 
 # Shanks to process (shared by both scripts).
-shanks = [5, 7]
+shanks = [0, 1, 2, 3, 7]
 
 # Folder holding the per-shank LFP / spectrogram .npz files.
 low_freq_folder = Path(rec_folder) / "low_freq"
@@ -61,17 +93,87 @@ original_fs = 30000
 #     side (same as before).
 #   - Leave BOTH start_sample and end_sample as None to SKIP that session
 #     entirely (e.g. a day with no pre-task sleep recorded).
+#
+# 'proc_file' is the matching front-camera *_PROC tracking file for that
+# sleep session (used by plot_sleep_spectrograms.py to load/derive the
+# correct velocity_advanced.pkl). 'rec_file_folder' is that session's own
+# .rec epoch folder (e.g. CnL42_presleep_..._.rec vs CnL42_postsleep_..._.rec)
+# - the DIO source for computing that session's own sync_times pkl via
+# video_ephys_sync.py. Every day now records a SEPARATE video for pre-task
+# vs post-task sleep, so both fields must be set per session - do NOT point
+# both sessions at the same PROC file or .rec folder. Either may be None if
+# that session has no video (velocity overlay / sync are then skipped for
+# it). All of the above is sourced from sleep_day_configs.json - see
+# set_sleep_day.py to add/edit a day.
 sleep_sessions = {
     'pre': {
-        'start_sample': 181605860,
-        'end_sample': 254815776,
+        'start_sample': _day_cfg['pre']['start_sample'],
+        'end_sample': _day_cfg['pre']['end_sample'],
         'suffix': '_pre',
+        'proc_file': _day_cfg['pre']['proc_file'],
+        'rec_file_folder': _day_cfg['pre']['rec_file_folder'],
     },
     'post': {
-        'start_sample': 308945341,   # e.g. 0
-        'end_sample': 462415870,          # e.g. 18_000_000
+        'start_sample': _day_cfg['post']['start_sample'],
+        'end_sample': _day_cfg['post']['end_sample'],
         'suffix': '_post',
+        'proc_file': _day_cfg['post']['proc_file'],
+        'rec_file_folder': _day_cfg['post']['rec_file_folder'],
     },
+}
+
+# Folder holding this day's camera recordings + tracking outputs
+# (velocity_advanced.pkl files are written here by proc_func_velocity.py).
+video_folder = Path(rec_folder).parent / "video"
+
+
+# =====================================================
+# VELOCITY  (proc_func_velocity.py -> plot_sleep_spectrograms.py)
+# =====================================================
+# Which tracked point the speed trace is differentiated from:
+#   'proc_center' -> center_x / center_y stored in the *_PROC file. That is a
+#                    likelihood-weighted mean of the SIX HEAD keypoints, and on
+#                    frames where tracking fails the acquisition program repeats
+#                    the previous frame's position, so dropouts read as exactly
+#                    zero speed (~19% of frames on CnL42 260320 pre).
+#   'dlc_body'    -> centroid of VELOCITY_KEYPOINTS, read from the *_DLC.hdf5
+#                    companion file. Low-confidence frames become gaps that are
+#                    interpolated instead of frozen.
+# Each source writes its own file (..._velocity_advanced.pkl vs
+# ..._velocity_body.pkl), so switching never overwrites the other one, and
+# plot_sleep_spectrograms.py loads whichever is selected here.
+VELOCITY_SOURCE = "dlc_body"
+
+# Keypoints averaged for 'dlc_body'. The trunk points stay visible while the
+# animal is curled up asleep, unlike nose/eyes/bars.
+VELOCITY_KEYPOINTS = ("left_midside", "right_midside",
+                      "left_hip", "right_hip", "tail_base")
+
+# A keypoint only enters the centroid on frames where DLC is at least this
+# confident about it.
+VELOCITY_LIKELIHOOD_THRESHOLD = 0.6
+
+
+# =====================================================
+# POPULATION FIRING RATE  (sleep_population_rate.py -> plot_sleep_spectrograms.py)
+# =====================================================
+# Adds a population-rate trace panel under the spectrogram, built from the
+# shank's own spike sorting so the rate shown belongs to the same electrodes
+# as the spectrogram above it. Sorting runs on the whole day, so spike samples
+# share the coordinate system of each session's start_sample/end_sample.
+# Skipped silently for a shank/day with no sorting.
+SORTOUT_ROOTS = (
+    r"\\10.129.151.88\xieluanlabs2\xl_cl\sortout",
+    r"\\10.129.151.108\xieluanlabs\xl_cl\sortout",
+)
+
+population_rate_params = {
+    'enabled': True,
+    # Bin width (s). The panel spans the whole session (thousands of seconds),
+    # so 1 s bins keep it readable; drop to ~0.1 for a shorter window.
+    'bin_size_sec': 1.0,
+    # Gaussian smoothing, in bins. 0 disables.
+    'smooth_sigma_bins': 2.0,
 }
 
 
@@ -80,12 +182,21 @@ def active_sleep_sessions(sessions=None):
 
     A session with both bounds set to None is treated as "not recorded /
     don't analyze" for that day and is skipped by every calculation script.
+    SESSION_FILTER narrows the result further to a single session when set.
     """
     sessions = sleep_sessions if sessions is None else sessions
-    return {
+    active = {
         name: cfg for name, cfg in sessions.items()
         if not (cfg['start_sample'] is None and cfg['end_sample'] is None)
     }
+    if SESSION_FILTER in (None, 'both'):
+        return active
+    if SESSION_FILTER not in sessions:
+        raise ValueError(
+            f"SESSION_FILTER={SESSION_FILTER!r} is not a sleep session; "
+            f"use None/'both' or one of {sorted(sessions)}."
+        )
+    return {name: cfg for name, cfg in active.items() if name == SESSION_FILTER}
 
 
 # =====================================================

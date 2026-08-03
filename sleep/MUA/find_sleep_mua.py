@@ -10,6 +10,16 @@ Each per-shank NWB is the concatenation, in listed order, of that day's ``.rec``
 files, so the cumulative timestamp counts give exact sample bounds for every
 epoch. The script asserts the total against the NWB frame count before using it.
 
+Artifact timestamps are reused from the shank's sorting run when one is present
+under ``SORTOUT_ROOT``, which skips the detection pass and puts MUA events and
+sorted spikes on identical exclusions. Shanks with no matching cache fall back
+to detecting within the epoch. See ``REUSE_SORTING_ARTIFACTS``.
+
+"presleep" and "postsleep" name recording blocks, not scored sleep: the animal
+wakes and walks around inside both. Events are detected across the whole epoch
+and stored as seconds from its start, so scored sleep or NREM windows are a
+downstream mask on ``channel_spike_times``, not something applied here.
+
 Output is two pickles in ``<session>/MUA/`` — one per sleep epoch, each holding
 every shank, with per-channel event times inside. See the OUTPUT section below
 for the exact layout.
@@ -37,14 +47,19 @@ import numpy as np
 from scipy.ndimage import gaussian_filter1d
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from mua_detect import detect_mua  # noqa: E402
+from mua_detect import (  # noqa: E402
+    detect_mua,
+    has_artifact_cache,
+    load_or_compute_artifacts,
+    rescue_units,
+)
 
 
 # =====================================================
 # SESSION / PATHS
 # =====================================================
 SESSION_FOLDER = Path(
-    '/Volumes/xieluanlabs2/xl_cl/experiment_data/CnL46/260727/CnL46_20260727'
+    r'\\10.129.151.88\xieluanlabs2\xl_cl\experiment_data\CnL46\260727\CnL46_20260727'
 )
 # Base name of the per-shank NWBs: "<NWB_BASE>sh<N>.nwb"
 NWB_BASE = 'CnL46_20260727'
@@ -57,6 +72,26 @@ EPOCHS = {'presleep': 'pre', 'postsleep': 'post'}
 
 #: Results land in <SESSION_FOLDER>/MUA/, alongside the session's raw data.
 OUTPUT_SUBFOLDER = 'MUA'
+
+#: Root of the sorting output tree. Per-shank folders sit at
+#: <SORTOUT_ROOT>/<animal>/<NWB_BASE>/shank<N>, matching MsSorting.py's own
+#: layout, and each holds the ``_artifact_cache/`` that run wrote.
+SORTOUT_ROOT = Path(r'\\10.129.151.88\xieluanlabs2\xl_cl\sortout')
+
+# Reuse the sorting run's artifact timestamps instead of detecting per epoch.
+# That cache is keyed on the whole-day frame count, so the repair is applied to
+# the full concatenated recording and the epoch is sliced out afterwards — MUA
+# events and sorted spikes then rest on identical artifact exclusions, and the
+# detection pass (the slow part, several minutes per shank) is skipped entirely.
+#
+# Day-wide statistics are also what makes pre and post comparable. Neither sleep
+# epoch is uniformly asleep — the animal wakes and walks around within them — so
+# an epoch-local threshold is set partly by however much movement that epoch
+# happened to contain, and the post/pre ratio this script reports would then
+# rest on two differently-calibrated detectors. One threshold for the day
+# removes that. Set False to detect within each epoch instead, which is also
+# what happens automatically for any shank with no matching cache.
+REUSE_SORTING_ARTIFACTS = True
 
 
 # =====================================================
@@ -87,7 +122,7 @@ SCALE_MODE = 'zscore'
 
 FREQ_MIN, FREQ_MAX = 300, 6000
 REMOVE_ARTIFACTS = True
-CHUNK_DURATION_SEC = 60.0
+CHUNK_DURATION_SEC = 1200.0
 
 # Binning for the saved rate trace, and Gaussian smoothing width in bins.
 # Same values compute_sleep_mua.py used, so rate traces stay comparable.
@@ -171,6 +206,7 @@ def epoch_windows(session_folder: Path, total_frames: int):
 #            'channel_amplitudes':   {channel_id: sigma units, negative},
 #            'channel_n_events', 'channel_rate_hz',
 #            'n_events', 'population_rate_hz',
+#            'artifact_source': 'sorting' | 'epoch' | 'none',
 #            'mua_rate', 'mua_rate_smooth'},
 #        ...
 #     },
@@ -256,6 +292,53 @@ def dump_pkl(path: Path, obj):
 
 
 # =====================================================
+# ARTIFACTS
+# =====================================================
+
+def sorting_shank_folder(shank: int) -> Path:
+    """Where MsSorting.py put this shank's outputs, including _artifact_cache/."""
+    animal = NWB_BASE.split('_')[0]
+    return SORTOUT_ROOT / animal / NWB_BASE / f'shank{shank}'
+
+
+def resolve_artifacts(rec, shank: int, out_dir: Path, suffix: str, args):
+    """Decide how this shank's artifacts are handled.
+
+    Returns ``(recording, detect_mua_kwargs, source)``. ``recording`` is the
+    full-day recording to slice the epoch out of — already artifact-repaired
+    when the sorting cache was reused, untouched otherwise.
+
+    The cache key covers the recording's frame count, so it only matches on the
+    whole concatenated day. That is why the repair is applied here, before the
+    epoch is sliced, rather than being left to ``detect_mua``: handing it a
+    frame-sliced epoch could never hit the sort's cache.
+    """
+    if not REMOVE_ARTIFACTS:
+        return rec, {'remove_artifacts': False, 'artifact_cache_folder': None}, 'none'
+
+    if REUSE_SORTING_ARTIFACTS:
+        sort_dir = sorting_shank_folder(shank)
+        if has_artifact_cache(rec, sort_dir):
+            repaired, timestamps, _ = load_or_compute_artifacts(
+                rescue_units(rec, verbose=args.verbose),
+                cache_folder=sort_dir,
+                verbose=args.verbose,
+            )
+            n_flagged = int(sum(len(t) for t in timestamps))
+            print(f'  artifacts reused from sorting ({n_flagged} flagged samples): {sort_dir}')
+            return repaired, {'remove_artifacts': False, 'artifact_cache_folder': None}, 'sorting'
+        print(f'  no matching artifact cache under {sort_dir}')
+        print('  -> detecting artifacts within the epoch instead')
+
+    # Epoch-local detection: a full detection pass, and a threshold calibrated
+    # only on this epoch, so it is not directly comparable across pre and post.
+    return rec, {
+        'remove_artifacts': True,
+        'artifact_cache_folder': out_dir / '_artifact_cache' / f'{suffix}_sh{shank}',
+    }, 'epoch'
+
+
+# =====================================================
 # PER-SHANK DETECTION
 # =====================================================
 
@@ -269,7 +352,7 @@ def detect_shank(shank: int, epoch_key: str, window, out_dir: Path, args):
         print(f'  NWB not found: {nwb_path} — skipping')
         return None
 
-    rec = se.NwbRecordingExtractor(str(nwb_path))
+    rec = se.read_nwb_recording(str(nwb_path))
     fs = rec.get_sampling_frequency()
     total_frames = rec.get_num_frames()
 
@@ -279,7 +362,12 @@ def detect_shank(shank: int, epoch_key: str, window, out_dir: Path, args):
     if not (0 <= start < end <= total_frames):
         raise ValueError(f'Bad window [{start}, {end}) for {total_frames} frames')
 
-    rec_epoch = rec.frame_slice(start_frame=start, end_frame=end)
+    rec_src, artifact_kwargs, artifact_source = resolve_artifacts(
+        rec, shank, out_dir, suffix, args)
+
+    # Sliced after the repair, so the epoch inherits the whole-day artifact
+    # treatment when that is where the timestamps came from.
+    rec_epoch = rec_src.frame_slice(start_frame=start, end_frame=end)
     n_ch = rec_epoch.get_num_channels()
     dur = (end - start) / fs
     print(f'  window samples [{start}, {end}) = {start/fs:.1f}-{end/fs:.1f} s  '
@@ -295,12 +383,9 @@ def detect_shank(shank: int, epoch_key: str, window, out_dir: Path, args):
         scale_mode=SCALE_MODE,
         freq_min=FREQ_MIN,
         freq_max=FREQ_MAX,
-        remove_artifacts=REMOVE_ARTIFACTS,
-        # Artifact stats are estimated within the epoch, not across the whole
-        # day, so sleep is not baselined against task/passive periods.
-        artifact_cache_folder=out_dir / '_artifact_cache' / f'{suffix}_sh{shank}',
         chunk_duration_sec=CHUNK_DURATION_SEC,
         verbose=args.verbose,
+        **artifact_kwargs,
     )
     elapsed = time.time() - t0
 
@@ -340,6 +425,10 @@ def detect_shank(shank: int, epoch_key: str, window, out_dir: Path, args):
         'mua_rate_smooth': gaussian_filter1d(rate, SMOOTH_SIGMA_BINS).astype(np.float32),
         'duration_sec': float(dur),
         'elapsed_sec': float(elapsed),
+        # 'sorting' | 'epoch' | 'none'. Worth reading before params['remove_artifacts'],
+        # which records False for reused artifacts because detect_mua's own stage
+        # was skipped — the repair had already been applied to the full day.
+        'artifact_source': artifact_source,
         'params': ev.params,
     }
 
@@ -433,7 +522,7 @@ def main():
     probe_nwb = SESSION_FOLDER / f'{NWB_BASE}sh{shanks[0]}.nwb'
     if not probe_nwb.exists():
         raise FileNotFoundError(f'{probe_nwb} not found — check SESSION_FOLDER/NWB_BASE')
-    total_frames = se.NwbRecordingExtractor(str(probe_nwb)).get_num_frames()
+    total_frames = se.read_nwb_recording(str(probe_nwb)).get_num_frames()
 
     windows = epoch_windows(SESSION_FOLDER, total_frames)
     out_dir = SESSION_FOLDER / OUTPUT_SUBFOLDER

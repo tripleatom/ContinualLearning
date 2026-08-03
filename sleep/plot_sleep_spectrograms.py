@@ -11,7 +11,11 @@ from sleep_pipeline_config import rec_folder, session_name, shanks, plot_params
 from sleep_pipeline_config import band_params, artifact_params
 from sleep_pipeline_config import original_fs as fs
 from sleep_pipeline_config import resolve_existing_file, resolve_output_folder, mirror_on_backup_server
-from sleep_pipeline_config import sleep_sessions, active_sleep_sessions
+from sleep_pipeline_config import sleep_sessions, active_sleep_sessions, video_folder
+from sleep_pipeline_config import VELOCITY_SOURCE
+from sleep_pipeline_config import SORTOUT_ROOTS, population_rate_params
+from proc_func_velocity import velocity_output_name
+from sleep_population_rate import population_rate
 
 
 # Y-axis labels for the optional trace panels below the spectrogram.
@@ -131,35 +135,22 @@ def first_existing(paths):
     return None
 
 
-def find_velocity_file(base_folder: Path):
-    candidates = [
-        base_folder / "velocity_advanced.pkl",
-        base_folder.parent / "velocity_advanced.pkl",
-        base_folder.parent / "video" / "velocity_advanced.pkl",
-    ]
-    # Also check the backup-server mirror of each candidate, in case this
-    # session's data was written there (e.g. primary was low on space).
-    candidates += [c for c in (mirror_on_backup_server(p) for p in candidates) if c is not None]
-    found = first_existing(candidates)
-    if found is not None:
-        return found
+def with_backup_mirrors(paths):
+    """Interleave each path with its new-server mirror, preserving priority.
 
-    # rglob under both the primary parent AND its backup mirror (the file may
-    # only exist on one of the two servers, under a session-specific name that
-    # doesn't match the exact-filename candidates above).
-    search_roots = [base_folder.parent]
-    mirrored_root = mirror_on_backup_server(base_folder.parent)
-    if mirrored_root is not None:
-        search_roots.append(mirrored_root)
+    Keeps preference by NAME rather than by server, so a copy of the wanted
+    name on one server wins over a different name on the other. Within a name
+    the new server is checked first - that is where everything is written now,
+    so an old-server copy of the same name is the stale one.
+    """
+    out = []
+    for path in paths:
+        mirrored = mirror_on_backup_server(path)
+        if mirrored is not None:
+            out.append(mirrored)
+        out.append(path)
+    return out
 
-    matches = []
-    for root in search_roots:
-        if root.exists():
-            matches.extend(root.rglob("*velocity*advanced*.pkl"))
-    if not matches:
-        return None
-    matches.sort(key=lambda path: path.stat().st_mtime, reverse=True)
-    return matches[0]
 
 # === CONFIGURATION ===
 args = parse_args()
@@ -167,76 +158,12 @@ rec_folder = Path(rec_folder)  # Convert to Path object
 if args.shanks is not None:
     shanks = args.shanks
 
-# === LOAD SYNCHRONIZATION AND VELOCITY DATA ===
-print("Loading velocity and synchronization data...")
-
-# Velocity file
-velocity_file = find_velocity_file(rec_folder)
-if velocity_file is not None:
-    with open(velocity_file, 'rb') as f:
-        velocity_data = pickle.load(f)
-    velocity_time_raw = velocity_data['time_stamp']
-    velocity_raw = velocity_data['velocity']
-    print(f"Loaded velocity data: {len(velocity_raw)} samples")
-else:
-    velocity_time_raw = None
-    velocity_raw = None
-    print("Velocity file not found")
-
-# Sync times file
-sync_times_candidates = [
-    rec_folder / "sync_times.pkl",
-    rec_folder.parent / "sync_times.pkl",
-]
-sync_times_candidates += [
-    c for c in (mirror_on_backup_server(p) for p in sync_times_candidates) if c is not None
-]
-sync_times_file = first_existing(sync_times_candidates)
-if sync_times_file is not None:
-    with open(sync_times_file, 'rb') as f:
-        sync_times = pickle.load(f)
-    proc_rising_time = sync_times['proc_rising_time']
-    SG_rising_time = sync_times['SG_rising_time'] / fs
-    print(f"Loaded sync times")
-    print(f"  Proc rising time range: {proc_rising_time[0]:.2f} - {proc_rising_time[-1]:.2f} s")
-    print(f"  SG rising time range: {SG_rising_time[0]:.2f} - {SG_rising_time[-1]:.2f} s")
-else:
-    proc_rising_time = None
-    SG_rising_time = None
-    print("Sync times file not found")
-
-# === SYNCHRONIZE VELOCITY WITH SPECTROGRAM ===
-velocity_synced = None
-velocity_time_synced = None
-
-if velocity_time_raw is not None and proc_rising_time is not None and SG_rising_time is not None:
-    print("\nSynchronizing velocity with spectrogram...")
-
-    # Pick up velocity in the range of proc_rising_time[0:-1]
-    vel_mask = (velocity_time_raw >= proc_rising_time[0]) & (velocity_time_raw <= proc_rising_time[-1])
-    velocity_synced = velocity_raw[vel_mask]
-    velocity_time_synced = velocity_time_raw[vel_mask]
-
-    # Remap velocity time to match spectrogram time (SG_rising_time[0] to SG_rising_time[-1])
-    # Linear mapping from proc_rising_time to SG_rising_time
-    velocity_time_synced = np.interp(velocity_time_synced,
-                                     [proc_rising_time[0], proc_rising_time[-1]],
-                                     [SG_rising_time[0], SG_rising_time[-1]])
-
-    print(f"Synchronized velocity")
-    print(f"  Velocity samples: {len(velocity_synced)}")
-    print(f"  Velocity time range: {velocity_time_synced[0]:.2f} - {velocity_time_synced[-1]:.2f} s")
-    print(f"  Spectrogram time range: {SG_rising_time[0]:.2f} - {SG_rising_time[-1]:.2f} s")
-
-    plot_velocity = True
-else:
-    plot_velocity = False
-    print("\nCannot synchronize velocity - missing data or sync times")
-
 # === LOOP THROUGH ALL ACTIVE SLEEP SESSIONS (pre/post) ===
 # Each session has its own band_powers pkl (suffixed, e.g. "..._post_all_shanks_band_powers.pkl")
 # and every output filename below is suffixed the same way, so pre/post plots
-# and trace-data exports never collide/overwrite each other.
+# and trace-data exports never collide/overwrite each other. Velocity and DIO
+# sync are loaded per session too, below - pre-task and post-task sleep are
+# recorded on separate videos with separate PROC/sync files.
 sessions_to_run = active_sleep_sessions(sleep_sessions)
 if not sessions_to_run:
     print("No active sleep sessions (pre/post both start=end=None) - nothing to do.")
@@ -247,6 +174,96 @@ for session_key, session_cfg in sessions_to_run.items():
   print(f"\n{'#'*60}")
   print(f"SLEEP SESSION: {session_key}")
   print(f"{'#'*60}")
+
+  # === LOAD SYNCHRONIZATION AND VELOCITY DATA (this session) ===
+  print("Loading velocity and synchronization data...")
+
+  # Velocity file: derived from the session's own proc_file (registered in
+  # sleep_day_configs.json), so pre/post can never cross-load each other's
+  # tracking data. No name-guessing fallback - if it's missing, say so.
+  proc_file = session_cfg.get('proc_file')
+  if proc_file is None:
+      velocity_file = None
+      print(f"  No proc_file registered for '{session_key}' - skipping velocity.")
+  else:
+      # VELOCITY_SOURCE picks which tracked point the speed came from; each
+      # source has its own filename, so no cross-loading between them.
+      #
+      # Look BESIDE the session's own proc_file first, and only then in
+      # video_folder. proc_func_velocity.py writes the pkl next to the PROC
+      # file it was given, whereas video_folder is derived from rec_folder
+      # (rec_folder.parent/"video") - the two diverge on any day whose NWBs
+      # sit somewhere other than the video, e.g. CnL46 260727 with rec_folder
+      # on G:\ and the video on the server. Preferring the proc_file's own
+      # folder makes the lookup match wherever the velocity was actually written.
+      velocity_name = velocity_output_name(proc_file, VELOCITY_SOURCE)
+      velocity_file = first_existing(with_backup_mirrors(
+          [Path(proc_file).parent / velocity_name,
+           video_folder / velocity_name]))
+      if velocity_file is None:
+          velocity_file = resolve_existing_file(video_folder / velocity_name)
+      if not velocity_file.exists():
+          print(f"  WARNING: velocity file not found: {velocity_file}")
+          print(f"           (run proc_func_velocity.py --source {VELOCITY_SOURCE} "
+                f"on {Path(proc_file).name})")
+          velocity_file = None
+
+  if velocity_file is not None:
+      with open(velocity_file, 'rb') as f:
+          velocity_data = pickle.load(f)
+      velocity_time_raw = velocity_data['time_stamp']
+      velocity_raw = velocity_data['velocity']
+      print(f"  Loaded velocity data: {velocity_file.name} ({len(velocity_raw)} samples)")
+  else:
+      velocity_time_raw = None
+      velocity_raw = None
+      print("  Velocity file not found")
+
+  # Sync times: strictly this session's own video<->DIO sync pickle. Pre and
+  # post are separate videos against separate .rec epochs, so there is no
+  # shared/unsuffixed file to fall back on - using one would silently align
+  # this session against the other one's pulses.
+  sync_times_file = first_existing(with_backup_mirrors(
+      [rec_folder / f"sync_times{session_cfg['suffix']}.pkl"]))
+  if sync_times_file is not None:
+      with open(sync_times_file, 'rb') as f:
+          sync_times = pickle.load(f)
+      proc_rising_time = sync_times['proc_rising_time']
+      SG_rising_time = sync_times['SG_rising_time'] / fs
+      print(f"  Loaded sync times: {sync_times_file.name}")
+      print(f"    Proc rising time range: {proc_rising_time[0]:.2f} - {proc_rising_time[-1]:.2f} s")
+      print(f"    SG rising time range: {SG_rising_time[0]:.2f} - {SG_rising_time[-1]:.2f} s")
+  else:
+      proc_rising_time = None
+      SG_rising_time = None
+      print(f"  Sync times not found: sync_times{session_cfg['suffix']}.pkl")
+      print(f"    (run video_ephys_sync.py to generate it)")
+
+  # === SYNCHRONIZE VELOCITY WITH SPECTROGRAM (this session) ===
+  velocity_synced = None
+  velocity_time_synced = None
+
+  if velocity_time_raw is not None and proc_rising_time is not None and SG_rising_time is not None:
+      print("  Synchronizing velocity with spectrogram...")
+
+      # Pick up velocity in the range of proc_rising_time[0:-1]
+      vel_mask = (velocity_time_raw >= proc_rising_time[0]) & (velocity_time_raw <= proc_rising_time[-1])
+      velocity_synced = velocity_raw[vel_mask]
+      velocity_time_synced = velocity_time_raw[vel_mask]
+
+      # Remap velocity time to match spectrogram time (SG_rising_time[0] to SG_rising_time[-1])
+      # Linear mapping from proc_rising_time to SG_rising_time
+      velocity_time_synced = np.interp(velocity_time_synced,
+                                       [proc_rising_time[0], proc_rising_time[-1]],
+                                       [SG_rising_time[0], SG_rising_time[-1]])
+
+      print(f"    Velocity samples: {len(velocity_synced)}")
+      print(f"    Velocity time range: {velocity_time_synced[0]:.2f} - {velocity_time_synced[-1]:.2f} s")
+
+      plot_velocity = True
+  else:
+      plot_velocity = False
+      print("  Cannot synchronize velocity - missing data or sync times")
 
   # === LOAD DATA ===
   low_freq_folder = rec_folder / "low_freq"
@@ -323,6 +340,31 @@ for session_key, session_cfg in sessions_to_run.items():
 
           # === COLOR SCALE WILL BE DETERMINED PER CHANNEL AFTER Z-SCORING ===
 
+      # === POPULATION FIRING RATE (this shank) ===
+      # Loaded once per shank, not per channel: every channel of a shank shares
+      # the same sorting, and reading the spike trains is the slow part.
+      pop_time = pop_rate = None
+      pop_info = {}
+      if population_rate_params.get('enabled', False):
+          pop_time, pop_rate, pop_info = population_rate(
+              session_name,
+              shank_id,
+              session_cfg['start_sample'],
+              session_cfg['end_sample'],
+              fs,
+              SORTOUT_ROOTS,
+              bin_size_sec=population_rate_params['bin_size_sec'],
+              smooth_sigma_bins=population_rate_params['smooth_sigma_bins'],
+          )
+          if pop_rate is None:
+              print(f"  Population rate unavailable: {pop_info.get('status')}")
+          else:
+              print(f"  Population rate: {pop_info['n_units']} units, "
+                    f"{pop_info['n_spikes_in_window']:,} spikes in window, "
+                    f"mean {pop_info['mean_rate']:.1f} spikes/s "
+                    f"[{pop_info['source']}]")
+      plot_pop_rate = pop_rate is not None
+
       # === PLOTTING ===
       total_duration = lfp_time_cropped[-1] - lfp_time_cropped[0]
       print(f"\nProcessing {len(channel_ids)} channels, full recording ({total_duration:.1f}s each)...")
@@ -336,7 +378,8 @@ for session_key, session_cfg in sessions_to_run.items():
       trace_panels = list(plot_params.get('trace_panels',
                                           ['pc1', 'theta_ratio', 'delta',
                                            'sigma', 'gamma']))
-      n_trace = len(trace_panels) + (1 if plot_velocity else 0)
+      n_trace = (len(trace_panels) + (1 if plot_velocity else 0)
+                 + (1 if plot_pop_rate else 0))
       n_subplots = 1 + n_trace
       height_ratios = [2] + [1] * n_trace
 
@@ -487,6 +530,13 @@ for session_key, session_cfg in sessions_to_run.items():
                                       art_mask.astype(float)) > 0.5
                   vel_sel = ~vel_art
                   vel_x = compress(velocity_time_synced[vel_sel])
+              if plot_pop_rate:
+                  # Same excision as every other panel, so the rate stays
+                  # aligned with the spectrogram across the stitched timeline.
+                  pop_art = np.interp(pop_time, times_cropped,
+                                      art_mask.astype(float)) > 0.5
+                  pop_sel = (~pop_art) & (pop_time >= t_start) & (pop_time <= t_end)
+                  pop_x = compress(pop_time[pop_sel])
               removed_s = (t_end - t_start) - total_c
               print(f"  Concatenated: removed {removed_s:.0f}s of artifacts, "
                     f"{len(seams_c)} seams, kept timeline {total_c:.0f}s")
@@ -500,6 +550,9 @@ for session_key, session_cfg in sessions_to_run.items():
               if plot_velocity:
                   vel_sel = np.ones(len(velocity_time_synced), bool)
                   vel_x = velocity_time_synced
+              if plot_pop_rate:
+                  pop_sel = (pop_time >= t_start) & (pop_time <= t_end)
+                  pop_x = pop_time[pop_sel]
 
           # Create figure
           print(f"  Creating full recording plot...")
@@ -568,13 +621,35 @@ for session_key, session_cfg in sessions_to_run.items():
               trace_axes.append(ax)
               trace_export[key] = norm[band_sel]
 
+          # Population firing rate (this shank's sorting, if available).
+          # Left in spikes/s rather than z-scored: the absolute rate is the
+          # interpretable quantity, and DOWN states read as drops toward zero.
+          ax_pop = None
+          if plot_pop_rate:
+              ax_pop = fig.add_subplot(gs[subplot_idx], sharex=ax1)
+              subplot_idx += 1
+              ax_pop.plot(pop_x, pop_rate[pop_sel], '-', color='tab:red', linewidth=0.5)
+              ax_pop.fill_between(pop_x, 0, pop_rate[pop_sel],
+                                  color='tab:red', alpha=0.25, linewidth=0)
+              ax_pop.set_ylabel(
+                  f"Population rate\n(spikes/s, {pop_info['n_units']} units)", fontsize=13)
+              ax_pop.set_xlim([x_lo, x_hi])
+              ax_pop.set_ylim(bottom=0)
+              ax_pop.set_xticklabels([])
+              for spine in ax_pop.spines.values():
+                  spine.set_visible(False)
+              ax_pop.tick_params(left=True, bottom=False, labelsize=10)
+              trace_axes.append(ax_pop)
+
           # Velocity (if available)
           ax_vel = None
           if plot_velocity:
               ax_vel = fig.add_subplot(gs[subplot_idx], sharex=ax1)
               subplot_idx += 1
               ax_vel.plot(vel_x, velocity_synced[vel_sel], 'b-', linewidth=0.5)
-              ax_vel.set_ylabel('Velocity\n(cm/s)', fontsize=13)
+              ax_vel.set_ylabel(
+                  'Velocity\n(cm/s, body centroid)' if VELOCITY_SOURCE == 'dlc_body'
+                  else 'Velocity\n(cm/s, head centre)', fontsize=13)
               ax_vel.set_xlim([x_lo, x_hi])
               for spine in ax_vel.spines.values():
                   spine.set_visible(False)
@@ -637,7 +712,12 @@ for session_key, session_cfg in sessions_to_run.items():
               f"fmax={artifact_params['fmax']} dilate={artifact_params['dilate_sec']}s "
               f"vel_thr={artifact_params['velocity_threshold']}] -> "
               f"{len(artifact_spans)} spans, {frac:.1f}% bins flagged  |  "
-              f"remove_mode={remove_mode}"
+              f"remove_mode={remove_mode}  |  "
+              f"velocity_source={VELOCITY_SOURCE if plot_velocity else 'none'}  |  "
+              + (f"pop_rate[{pop_info['n_units']} units, bin="
+                 f"{pop_info['bin_size_sec']}s, sigma={pop_info['smooth_sigma_bins']} bins, "
+                 f"{pop_info['source']}, src={pop_info['sorting_folder']}]"
+                 if plot_pop_rate else "pop_rate=none")
           )
           fig.text(0.005, 0.001, stamp, fontsize=6, color='0.4',
                    ha='left', va='bottom')
@@ -674,6 +754,12 @@ for session_key, session_cfg in sessions_to_run.items():
           if plot_velocity:
               export['velocity'] = {
                   'time_s': vel_x, 'value_cm_s': velocity_synced[vel_sel],
+                  'source': VELOCITY_SOURCE, 'file': str(velocity_file),
+              }
+          if plot_pop_rate:
+              export['population_rate'] = {
+                  'time_s': pop_x, 'rate_spikes_per_s': pop_rate[pop_sel],
+                  'info': pop_info,
               }
 
           # Real-time (full timeline, BEFORE artifact removal/concatenation):
@@ -692,6 +778,9 @@ for session_key, session_cfg in sessions_to_run.items():
           if plot_velocity:
               export['realtime']['velocity_time_s'] = velocity_time_synced
               export['realtime']['velocity_cm_s'] = velocity_synced
+          if plot_pop_rate:
+              export['realtime']['population_rate_time_s'] = pop_time
+              export['realtime']['population_rate_spikes_per_s'] = pop_rate
 
           trace_pkl = output_folder / (
               f'{session_label}_sh{shank_id}_ch{ch_id:03d}_trace_data'

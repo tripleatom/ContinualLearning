@@ -14,7 +14,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from sleep.proc_func_velocity import compute_velocity_advanced, proc_session_name
-from server_fallback import resolve_output_folder, mirror_on_backup_server
+from server_fallback import (resolve_output_folder, resolve_existing_file,
+                             mirror_on_backup_server)
 
 
 DEFAULT_PROC_FILE = (
@@ -40,7 +41,10 @@ def parse_args():
 def load_or_compute_velocity(args):
     proc_file = args.proc_file
     session_name = proc_session_name(proc_file)
-    velocity_file = proc_file.parent / f"{session_name}_velocity_advanced.pkl"
+    # Look for an existing velocity file on either server, but write a new one
+    # to the new server (the old one is full).
+    pkl_name = f"{session_name}_velocity_advanced.pkl"
+    velocity_file = resolve_existing_file(proc_file.parent / pkl_name)
 
     if velocity_file.exists():
         print(f"Loading existing velocity file: {velocity_file}")
@@ -67,6 +71,7 @@ def load_or_compute_velocity(args):
         "source_proc_file": str(proc_file),
         "source_proc_name": proc_file.name,
     }
+    velocity_file = resolve_output_folder(proc_file.parent) / pkl_name
     try:
         with open(velocity_file, "wb") as f:
             pickle.dump(velocity_data, f)

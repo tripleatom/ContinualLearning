@@ -1,39 +1,49 @@
-"""Shared no-space fallback for scripts writing to the lab file server.
+"""Shared server routing for scripts reading/writing the lab file server.
 
-When the primary server (\\\\10.129.151.108\\xieluanlabs) is low on space,
-outputs are redirected to the backup server (\\\\10.129.151.88\\xieluanlabs2),
-keeping the same subpath after the share name. Reads fall back the same way
-if a file is missing from the primary but present on the backup.
+The OLD server (\\\\10.129.151.108\\xieluanlabs) is FULL, so ALL new output goes
+to the NEW server (\\\\10.129.151.88\\xieluanlabs2), keeping the same subpath
+after the share name. Nothing is written to the old server any more - it stays
+readable for the raw recordings and previously-computed data that live there.
+
+Reads resolve on either server, NEW first: every write now lands on the new
+server, so when a file exists on both, the new-server copy is the current one.
 
 Usage:
     from server_fallback import resolve_output_folder, resolve_existing_file, mirror_on_backup_server
 
-    out_dir = resolve_output_folder(some_folder)   # creates it; may be the backup mirror
-    ...
-    try:
-        with open(out_dir / "file.pkl", "wb") as f:
-            pickle.dump(data, f)
-    except OSError as e:
-        if e.errno != errno.ENOSPC:
-            raise
-        backup_dir = mirror_on_backup_server(out_dir)
-        backup_dir.mkdir(parents=True, exist_ok=True)
-        with open(backup_dir / "file.pkl", "wb") as f:
-            pickle.dump(data, f)
+    out_dir = resolve_output_folder(some_folder)   # redirected to the new server
+    with open(out_dir / "file.pkl", "wb") as f:
+        pickle.dump(data, f)
+
+The per-script `except OSError (ENOSPC) -> mirror_on_backup_server(...)` handlers
+still work, but they are now a genuine last resort: once output is already on
+the new server there is nowhere left to spill to, so ENOSPC re-raises.
+
+Set WRITE_TO_NEW_SERVER = False to restore the previous behaviour (write on the
+old server, spilling over to the new one only when free space runs low).
 """
 import shutil
 from pathlib import Path
 
-PRIMARY_SERVER_ROOT = r"\\10.129.151.108\xieluanlabs"
-BACKUP_SERVER_ROOT  = r"\\10.129.151.88\xieluanlabs2"
-MIN_FREE_BYTES      = 5 * 1024 ** 3  # switch to backup server once less than this remains free
+OLD_SERVER_ROOT = r"\\10.129.151.108\xieluanlabs"    # full - read only
+NEW_SERVER_ROOT = r"\\10.129.151.88\xieluanlabs2"    # write everything here
+
+# Send every output to the new server, regardless of free space on the old one.
+WRITE_TO_NEW_SERVER = True
+
+# Only consulted when WRITE_TO_NEW_SERVER is False.
+MIN_FREE_BYTES = 5 * 1024 ** 3
 
 
 def mirror_on_backup_server(path):
-    """Map a path under PRIMARY_SERVER_ROOT to the equivalent path under BACKUP_SERVER_ROOT."""
+    """Map a path under OLD_SERVER_ROOT to the equivalent path under NEW_SERVER_ROOT.
+
+    Returns None when `path` is not on the old server - either it is already on
+    the new server or it is local - i.e. "there is nowhere else to put this".
+    """
     path_str = str(path)
-    if path_str.lower().startswith(PRIMARY_SERVER_ROOT.lower()):
-        return Path(BACKUP_SERVER_ROOT + path_str[len(PRIMARY_SERVER_ROOT):])
+    if path_str.lower().startswith(OLD_SERVER_ROOT.lower()):
+        return Path(NEW_SERVER_ROOT + path_str[len(OLD_SERVER_ROOT):])
     return None
 
 
@@ -49,8 +59,22 @@ def _existing_ancestor(path):
 
 
 def resolve_output_folder(folder, min_free_bytes=MIN_FREE_BYTES):
-    """Return folder (created), or its mirror on the backup server if low on space."""
+    """Return the folder to write into, created: the new-server mirror of `folder`.
+
+    Old-server paths are redirected unconditionally - no disk_usage probe, which
+    also skips a slow network stat call. Paths that are already on the new server,
+    or that live on a local disk, are used as given.
+    """
     folder = Path(folder)
+
+    if WRITE_TO_NEW_SERVER:
+        target = mirror_on_backup_server(folder) or folder
+        target.mkdir(parents=True, exist_ok=True)
+        if target != folder:
+            print(f"Output redirected to the new server: {target}")
+        return target
+
+    # Legacy behaviour: write in place until the disk gets tight, then spill over.
     try:
         free = shutil.disk_usage(_existing_ancestor(folder)).free
     except OSError:
@@ -75,11 +99,15 @@ def resolve_output_folder(folder, min_free_bytes=MIN_FREE_BYTES):
 
 
 def resolve_existing_file(path):
-    """Return path if it exists, else its mirror on the backup server if that exists."""
+    """Return the path to read from: the new-server copy if it exists, else `path`.
+
+    New server first, since that is where everything is written now - if a file
+    exists on both servers, the old-server copy is the stale one. Falls back to
+    `path` unchanged (even when missing) so "file not found" errors still name
+    the path the caller asked for.
+    """
     path = Path(path)
-    if path.exists():
-        return path
-    backup = mirror_on_backup_server(path)
-    if backup is not None and backup.exists():
-        return backup
+    mirrored = mirror_on_backup_server(path)
+    if mirrored is not None and mirrored.exists():
+        return mirrored
     return path

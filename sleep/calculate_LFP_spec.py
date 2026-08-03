@@ -57,7 +57,7 @@ for shank_id in brain_shanks + spinal_shanks:
     print(f"{'='*60}")
     
     # Load recording
-    rec = se.NwbRecordingExtractor(str(nwb_file))
+    rec = se.read_nwb_recording(str(nwb_file))
     
     # Store original recording info
     original_fs = rec.get_sampling_frequency()

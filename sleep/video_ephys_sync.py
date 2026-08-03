@@ -13,13 +13,26 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from trodes_io.DIO import concatenate_din_data, get_dio_folders
+from server_fallback import (resolve_existing_file, resolve_output_folder,
+                             mirror_on_backup_server)
 
 
-# Default paths for interactive/script use.
-proc_file = r"\\10.129.151.88\xieluanlabs2\xl_cl\experiment_data\CnL42\260324\video\front_camera_CnL42_2026-03-24_2_PROC"
-rec_file = r"\\10.129.151.88\xieluanlabs2\xl_cl\experiment_data\CnL42\260324\CnL42SG_20260324\CnL42_presleep_20260324_174238.rec"
 DEFAULT_DIO_CHANNEL = 2
 DEFAULT_FS = 30000
+
+# Which edge-matching algorithm to use (see resolve_match_algorithm):
+#   'pulse'     - fixed-frequency square wave. Matches by cutting the train at
+#                 period outliers and sliding each clean segment onto PROC.
+#   'pulse_geo' - random ("geometric") inter-pulse intervals. Matches by using
+#                 the interval sequence itself as a barcode.
+#   'auto'      - pick from the spread of the PROC inter-pulse intervals.
+MATCH_ALGORITHMS = ("auto", "pulse", "pulse_geo")
+DEFAULT_MATCH_ALGORITHM = "auto"
+
+# Robust ITI spread (MAD/median) above which a train is treated as pulse_geo.
+# Measured: CnL42 fixed-period days ~0.02-0.04, CnL46 geo days ~0.3-0.4, so
+# anywhere in the middle separates them with a wide margin.
+GEO_ITI_CV_THRESHOLD = 0.15
 
 
 def load_proc_signal(path: Path) -> tuple[np.ndarray, np.ndarray]:
@@ -138,6 +151,25 @@ def clean_short_dio_states(
         "removed_short_states": removed,
         "min_duration_sec": float(min_duration_sec),
     }
+
+
+def default_min_dio_state_duration(time: np.ndarray, fs: float, algorithm: str) -> float:
+    """Pick the "shorter than this is a glitch, not a pulse" line for cleaning.
+
+    A fixed-period wave has essentially ONE state duration, so half its median
+    is safely below every real state. A pulse_geo train's real states span an
+    order of magnitude (0.105-0.62 s on CnL46 260727), and half of THAT median
+    lands at 0.125 s - above the genuine short pulses, which would delete ~5%
+    of the train. Key off the short tail instead, which sits just under the
+    shortest real state while still being far above contact-bounce glitches.
+    """
+    durations = np.diff(np.asarray(time, dtype=float).ravel()) / fs
+    durations = durations[durations > 0]
+    if durations.size == 0:
+        return 0.0
+    if algorithm == "pulse_geo":
+        return 0.5 * float(np.percentile(durations, 1))
+    return 0.5 * float(np.nanmedian(durations))
 
 
 def duty_cycle_diagnostics(time: np.ndarray, state: np.ndarray, fs: float) -> dict:
@@ -294,6 +326,378 @@ def match_clean_segments(
         "unmatched_sg_edge_count": int(sg_rising.size - sg_matched.size),
     }
     return proc_matched, sg_matched, diagnostics
+
+
+# =====================================================
+# pulse_geo: random-interval pulse trains
+# =====================================================
+# The 'pulse' matcher above assumes one period, so it can only re-anchor at
+# period outliers. When the generator emits RANDOM intervals instead, that
+# assumption is gone - but the randomness is itself the solution: a handful of
+# consecutive intervals is a near-unique barcode, so the two trains can be
+# anchored to each other directly, anywhere in the recording, without counting
+# pulses. Measured on CnL46 260727 pre: a 6-interval window matches its true
+# location to <1 ms while the best decoy sits 40-120 ms away.
+#
+# After anchoring, SG->PROC is a straight line (the two clocks differ by a
+# fixed rate offset - -15 ppm, i.e. 71 ms over that 77-minute session), so the
+# matcher fits slope+intercept and assigns pulses by nearest neighbour. Both
+# trains may drop pulses; nothing here assumes equal counts or contiguity.
+
+
+def robust_iti_cv(rising_sec: np.ndarray) -> float:
+    """Robust spread (MAD/median) of the inter-pulse intervals.
+
+    MAD rather than SD so one long gap - a paused acquisition, an unplugged
+    camera - cannot masquerade as jitter and flip the algorithm choice.
+    """
+    if rising_sec.size < 3:
+        return float("nan")
+    iti = np.diff(rising_sec)
+    iti = iti[np.isfinite(iti) & (iti > 0)]
+    if iti.size < 2:
+        return float("nan")
+    med = float(np.median(iti))
+    if med <= 0:
+        return float("nan")
+    return float(1.4826 * float(np.median(np.abs(iti - med))) / med)
+
+
+def resolve_match_algorithm(requested: str, proc_rising: np.ndarray) -> tuple[str, dict]:
+    """Resolve 'auto' to 'pulse' or 'pulse_geo' from the PROC interval spread."""
+    cv = robust_iti_cv(proc_rising)
+    if requested != "auto":
+        chosen = requested
+    elif not np.isfinite(cv):
+        # Too few edges to tell; the fixed-period matcher is the safer guess
+        # because it degrades to "one clean segment" rather than misfiring.
+        chosen = "pulse"
+    else:
+        chosen = "pulse_geo" if cv > GEO_ITI_CV_THRESHOLD else "pulse"
+    return chosen, {
+        "requested": requested,
+        "resolved": chosen,
+        "proc_iti_robust_cv": cv,
+        "geo_cv_threshold": GEO_ITI_CV_THRESHOLD,
+    }
+
+
+def fingerprint_anchor(
+    proc_iti: np.ndarray,
+    sg_iti: np.ndarray,
+    sg_start: int,
+    window: int,
+):
+    """Locate one run of SG intervals inside the PROC interval sequence.
+
+    Scores by worst-case (not mean) interval error, so a single badly placed
+    edge disqualifies a candidate instead of being averaged away. Returns
+    (proc_index, error_sec, runner_up_error_sec); the runner-up is what tells
+    the caller whether the match is actually unique or just the least bad.
+    """
+    if window < 2 or proc_iti.size < window or sg_start + window > sg_iti.size:
+        return None
+    query = sg_iti[sg_start:sg_start + window]
+    windows = np.lib.stride_tricks.sliding_window_view(proc_iti, window)
+    err = np.max(np.abs(windows - query), axis=1)
+    best = int(np.argmin(err))
+    # Offsets within one window of the winner share most of their intervals
+    # with it, so they are not independent alternatives - exclude them before
+    # asking "how much better is the winner than anything else?".
+    far = np.abs(np.arange(err.size) - best) > window
+    runner_up = float(np.min(err[far])) if np.any(far) else float("inf")
+    return best, float(err[best]), runner_up
+
+
+def geo_anchors(
+    proc_rising: np.ndarray,
+    sg_sec: np.ndarray,
+    window: int = 8,
+    n_probes: int = 12,
+    max_anchor_error_sec: float = 0.005,
+    min_margin_ratio: float = 4.0,
+    min_margin_sec: float = 0.01,
+):
+    """Tie the two trains together at several points spread across the session.
+
+    Several probes rather than one: anchors near BOTH ends are what let the
+    initial fit see the clock drift, and a probe that lands in a dropout-heavy
+    stretch can then be outvoted instead of steering the whole match.
+    """
+    proc_iti = np.diff(proc_rising)
+    sg_iti = np.diff(sg_sec)
+    accepted: list[tuple[int, int]] = []
+    rows: list[dict] = []
+    if proc_iti.size < window or sg_iti.size < window:
+        return accepted, rows
+
+    probes = np.unique(np.linspace(0, sg_iti.size - window, n_probes).round().astype(int))
+    for sg_start in probes:
+        found = fingerprint_anchor(proc_iti, sg_iti, int(sg_start), window)
+        if found is None:
+            continue
+        proc_start, err, runner_up = found
+        unique = runner_up >= max(min_margin_sec, min_margin_ratio * err)
+        ok = bool(err <= max_anchor_error_sec and unique)
+        rows.append(
+            {
+                "sg_edge": int(sg_start),
+                "proc_edge": int(proc_start),
+                "max_iti_error_sec": err,
+                "runner_up_error_sec": runner_up,
+                "unique": bool(unique),
+                "accepted": ok,
+            }
+        )
+        if ok:
+            accepted.append((int(sg_start), int(proc_start)))
+    return accepted, rows
+
+
+def _fit_time_map(sg_t: np.ndarray, proc_t: np.ndarray):
+    """Least-squares SG->PROC line, returned as (slope, sg_ref, proc_ref).
+
+    Kept in reference-point form and fitted on centred values because PROC
+    times are unix epoch seconds (~1.79e9): a bare intercept would spend most
+    of its float64 significand on the epoch rather than on the millisecond
+    offsets this matcher cares about.
+    """
+    sg_ref = float(sg_t[0])
+    proc_ref = float(proc_t[0])
+    slope, offset = np.polyfit(sg_t - sg_ref, proc_t - proc_ref, 1)
+    return float(slope), sg_ref, proc_ref + float(offset)
+
+
+def _apply_time_map(time_map, sg_t: np.ndarray) -> np.ndarray:
+    slope, sg_ref, proc_ref = time_map
+    return proc_ref + slope * (sg_t - sg_ref)
+
+
+def _initial_time_map(anchors, sg_sec, proc_rising, max_drift_ppm: float = 2000.0):
+    """Seed the SG->PROC line from the anchors."""
+    sg_t = np.asarray([sg_sec[a] for a, _ in anchors], dtype=float)
+    proc_t = np.asarray([proc_rising[p] for _, p in anchors], dtype=float)
+    if sg_t.size >= 2 and (sg_t[-1] - sg_t[0]) > 0:
+        time_map = _fit_time_map(sg_t, proc_t)
+        if abs(time_map[0] - 1.0) * 1e6 <= max_drift_ppm:
+            return time_map
+    # One anchor, no time spread, or a slope no real pair of clocks would
+    # produce: fall back to a pure offset at unity rate and let the iterative
+    # refit below recover the drift from the matches themselves.
+    return 1.0, float(sg_t[0]), float(np.median(proc_t - sg_t) + sg_t[0])
+
+
+def _nearest_pulse_matches(proc_rising: np.ndarray, mapped_sg: np.ndarray, tolerance: float):
+    """One-to-one nearest-neighbour match of mapped SG pulses onto PROC pulses."""
+    empty = (np.array([], dtype=int), np.array([], dtype=int))
+    if proc_rising.size < 2 or mapped_sg.size == 0:
+        return empty
+    idx = np.clip(np.searchsorted(proc_rising, mapped_sg), 1, proc_rising.size - 1)
+    left_closer = np.abs(mapped_sg - proc_rising[idx - 1]) <= np.abs(proc_rising[idx] - mapped_sg)
+    pick = np.where(left_closer, idx - 1, idx)
+    resid = np.abs(proc_rising[pick] - mapped_sg)
+    keep = np.flatnonzero(resid <= tolerance)
+    if keep.size == 0:
+        return empty
+    # A dropped video frame leaves two SG pulses pointing at one PROC edge.
+    # Sort by (PROC edge, distance) and take the first of each group so the
+    # closer claimant wins and the mapping stays strictly one-to-one.
+    order = keep[np.lexsort((resid[keep], pick[keep]))]
+    first_of_group = np.concatenate(([True], np.diff(pick[order]) != 0))
+    winners = np.sort(order[first_of_group])
+    return winners, pick[winners]
+
+
+def _matched_runs(sg_idx: np.ndarray, proc_idx: np.ndarray, min_pairs: int = 2):
+    """Split matched pairs into runs where NEITHER train skipped a pulse."""
+    if sg_idx.size == 0:
+        return []
+    breaks = np.flatnonzero((np.diff(sg_idx) != 1) | (np.diff(proc_idx) != 1)) + 1
+    return [run for run in np.split(np.arange(sg_idx.size), breaks) if run.size >= min_pairs]
+
+
+def match_geo_pulses(
+    proc_rising: np.ndarray,
+    sg_rising: np.ndarray,
+    fs: float,
+    initial_tolerance_sec: float = 0.05,
+    min_tolerance_sec: float = 0.004,
+    max_iterations: int = 6,
+    max_segment_median_error_sec: float = 0.01,
+    fingerprint_edges: int = 8,
+):
+    """Match a random-interval PROC train to its DIO counterpart.
+
+    Anchor by interval barcode, fit SG->PROC as a line, then alternate
+    nearest-neighbour assignment and refitting so the fit tightens onto the
+    pulses it just matched. Returns the same
+    (proc_matched, sg_matched, diagnostics) contract as match_clean_segments,
+    with sg_matched still in SAMPLES so the callers downstream are unchanged.
+    """
+    sg_sec = sg_rising / fs
+    empty = np.array([], dtype=float)
+    anchors, anchor_rows = geo_anchors(proc_rising, sg_sec, window=fingerprint_edges)
+    diagnostics = {
+        "algorithm": "pulse_geo",
+        "fingerprint_edges": int(fingerprint_edges),
+        "anchors": anchor_rows,
+        "accepted_anchor_count": int(len(anchors)),
+        "clean_segment_count": 0,
+        "accepted_segment_count": 0,
+        "segments": [],
+        "matched_edge_count": 0,
+        "unmatched_proc_edge_count": int(proc_rising.size),
+        "unmatched_sg_edge_count": int(sg_rising.size),
+    }
+    if not anchors:
+        diagnostics["failure"] = (
+            "No unique interval fingerprint anchor found. The two trains may be "
+            "from different sessions, or the intervals may not be random enough "
+            "for pulse_geo (try --match-algorithm pulse)."
+        )
+        return empty, empty, diagnostics
+
+    time_map = _initial_time_map(anchors, sg_sec, proc_rising)
+    # A pulse must never be able to reach its neighbour, or the match can slip
+    # by one for a whole stretch. The default suits the ~0.22 s shortest
+    # interval seen so far; clamp it for any train that runs tighter.
+    shortest_iti = float(np.min(np.diff(proc_rising))) if proc_rising.size > 1 else np.inf
+    max_tolerance = float(min(initial_tolerance_sec, 0.4 * shortest_iti))
+    tolerance = max_tolerance
+    diagnostics["initial_tolerance_sec"] = max_tolerance
+    diagnostics["shortest_proc_iti_sec"] = shortest_iti
+    sg_idx = np.array([], dtype=int)
+    proc_idx = np.array([], dtype=int)
+    resid = np.array([], dtype=float)
+    passes = []
+
+    for _ in range(max_iterations):
+        mapped = _apply_time_map(time_map, sg_sec)
+        new_sg, new_proc = _nearest_pulse_matches(proc_rising, mapped, tolerance)
+        if new_sg.size < 2:
+            break
+        new_resid = proc_rising[new_proc] - mapped[new_sg]
+        passes.append(
+            {
+                "tolerance_sec": tolerance,
+                "matched": int(new_sg.size),
+                "median_abs_residual_sec": float(np.median(np.abs(new_resid))),
+                "max_abs_residual_sec": float(np.max(np.abs(new_resid))),
+                "slope": float(time_map[0]),
+            }
+        )
+        settled = (
+            new_sg.size == sg_idx.size
+            and np.array_equal(new_sg, sg_idx)
+            and np.array_equal(new_proc, proc_idx)
+        )
+        sg_idx, proc_idx, resid = new_sg, new_proc, new_resid
+        if settled:
+            break
+        time_map = _fit_time_map(sg_sec[sg_idx], proc_rising[proc_idx])
+        # Re-tighten around what the fit actually achieves, so later passes
+        # reject pulses that only fitted under the loose seeding tolerance.
+        med = float(np.median(resid))
+        mad = float(np.median(np.abs(resid - med)))
+        tolerance = float(np.clip(10.0 * 1.4826 * mad, min_tolerance_sec, max_tolerance))
+
+    if sg_idx.size < 2:
+        diagnostics["failure"] = (
+            "Interval fingerprint anchored the trains, but fewer than two pulses "
+            "survived nearest-neighbour matching."
+        )
+        return empty, empty, diagnostics
+
+    # Report per-run interval agreement, mirroring the 'pulse' segment rows so
+    # run_sync's accept/reject thresholds mean the same thing for both.
+    segment_rows = []
+    for run in _matched_runs(sg_idx, proc_idx):
+        proc_run = proc_rising[proc_idx[run]]
+        sg_run = sg_sec[sg_idx[run]]
+        err = np.abs(np.diff(proc_run) - np.diff(sg_run))
+        median_err = float(np.median(err))
+        segment_rows.append(
+            {
+                "sg_start": int(sg_idx[run[0]]),
+                "sg_end": int(sg_idx[run[-1]]) + 1,
+                "proc_start": int(proc_idx[run[0]]),
+                "proc_end": int(proc_idx[run[-1]]) + 1,
+                "n_pairs": int(run.size),
+                "accepted": bool(median_err <= max_segment_median_error_sec),
+                "median_iti_error_sec": median_err,
+                "max_iti_error_sec": float(np.max(err)),
+            }
+        )
+    if not segment_rows:
+        # Dropouts so dense that no two matched pulses are adjacent. Every pair
+        # still passed the global fit, so report that instead of claiming the
+        # match failed.
+        abs_resid = np.abs(resid - np.median(resid))
+        segment_rows.append(
+            {
+                "sg_start": int(sg_idx[0]),
+                "sg_end": int(sg_idx[-1]) + 1,
+                "proc_start": int(proc_idx[0]),
+                "proc_end": int(proc_idx[-1]) + 1,
+                "n_pairs": int(sg_idx.size),
+                "accepted": bool(np.median(abs_resid) <= max_segment_median_error_sec),
+                "median_iti_error_sec": float(np.median(abs_resid)),
+                "max_iti_error_sec": float(np.max(abs_resid)),
+                "note": "no adjacent matched pairs; errors are affine-fit residuals",
+            }
+        )
+
+    centred = resid - np.median(resid)
+    diagnostics.update(
+        {
+            "clean_segment_count": int(len(segment_rows)),
+            "accepted_segment_count": int(sum(row["accepted"] for row in segment_rows)),
+            "segments": segment_rows,
+            "matched_edge_count": int(sg_idx.size),
+            "unmatched_proc_edge_count": int(proc_rising.size - proc_idx.size),
+            "unmatched_sg_edge_count": int(sg_rising.size - sg_idx.size),
+            "iterations": passes,
+            "final_tolerance_sec": tolerance,
+            "time_map": {
+                "slope": float(time_map[0]),
+                "sg_ref_sec": float(time_map[1]),
+                "proc_ref_sec": float(time_map[2]),
+                "clock_drift_ppm": float((time_map[0] - 1.0) * 1e6),
+            },
+            "fit_residual_median_abs_sec": float(np.median(np.abs(centred))),
+            "fit_residual_max_abs_sec": float(np.max(np.abs(centred))),
+        }
+    )
+    return proc_rising[proc_idx], sg_rising[sg_idx], diagnostics
+
+
+def match_pulse_trains(
+    algorithm: str,
+    proc_rising: np.ndarray,
+    sg_rising: np.ndarray,
+    fs: float,
+    args,
+):
+    """Run whichever edge matcher `algorithm` names."""
+    if algorithm == "pulse_geo":
+        return match_geo_pulses(
+            proc_rising,
+            sg_rising,
+            fs,
+            initial_tolerance_sec=args.geo_match_tolerance_sec,
+            fingerprint_edges=args.geo_fingerprint_edges,
+            max_segment_median_error_sec=args.max_segment_median_error_sec,
+        )
+    if algorithm == "pulse":
+        proc_matched, sg_matched, diagnostics = match_clean_segments(
+            proc_rising,
+            sg_rising,
+            fs,
+            max_segment_median_error_sec=args.max_segment_median_error_sec,
+        )
+        diagnostics["algorithm"] = "pulse"
+        return proc_matched, sg_matched, diagnostics
+    raise ValueError(f"Unknown match algorithm {algorithm!r}; expected one of {MATCH_ALGORITHMS}.")
 
 
 def find_best_edge_match(
@@ -521,12 +925,130 @@ def sample_match_errors(
     return rows
 
 
+def resolve_rec_folder(path: Path) -> Path:
+    """Return the copy of a .rec folder that actually has exported DIO.
+
+    A .rec folder often exists on BOTH servers while the Trodes DIO export
+    only ran on one of them, so plain existence (resolve_existing_file) can
+    hand back a copy with no *.DIO subfolder. Prefer a copy that has one.
+    """
+    candidates = [Path(path)]
+    mirrored = mirror_on_backup_server(path)
+    if mirrored is not None:
+        candidates.append(mirrored)
+    for candidate in candidates:
+        try:
+            if candidate.exists() and get_dio_folders(candidate):
+                return candidate
+        except OSError:
+            continue
+    # No DIO anywhere: fall back to whichever exists so load_rec_dio's own
+    # "run Trodes export for DIO first" error names a real path.
+    return resolve_existing_file(path)
+
+
+def session_job(session_key, session_cfg, args, rec_folder):
+    """Build one sync job (paths + label) from a registered sleep session.
+
+    Pre-task and post-task sleep are separate videos recorded against separate
+    .rec epochs, so each needs its OWN sync pickle. Paths come from
+    sleep_pipeline_config.sleep_sessions (i.e. sleep_day_configs.json for
+    ACTIVE_DATE) and outputs are suffixed "_pre" / "_post" - exactly what
+    plot_sleep_spectrograms.py looks for.
+
+    Returns None if that session has no video/rec registered, so a day that
+    only has one of the two still processes the session it does have.
+    """
+    if session_cfg.get('proc_file') is None or session_cfg.get('rec_file_folder') is None:
+        print(f"Skipping {session_key}: no proc_file / rec_file_folder registered "
+              f"for this date (run set_sleep_day.py to add it).")
+        return None
+
+    suffix = session_cfg['suffix']
+    rec_path = resolve_rec_folder(Path(session_cfg['rec_file_folder']))
+    # Read the .rec from wherever its DIO export lives, but write beside the
+    # NWBs in rec_folder - that is the ONLY place plot_sleep_spectrograms.py
+    # looks (rec_folder / f"sync_times{suffix}.pkl"). The two are usually the
+    # same directory, but a day whose .rec sits on a server while rec_folder
+    # is a local disk (CnL46 260727: G:\) would otherwise write a perfectly
+    # good pickle where nothing downstream can find it.
+    out_dir = resolve_output_folder(Path(rec_folder))
+    return {
+        "label": session_key,
+        "proc_path": resolve_existing_file(Path(session_cfg['proc_file'])),
+        "rec_path": rec_path,
+        "output_path": args.output or (out_dir / f"sync_times{suffix}.pkl"),
+        "sample_figure_path": args.sample_figure or (
+            out_dir / f"sync_square_wave_match_samples{suffix}.png"),
+    }
+
+
+def build_jobs(args):
+    """Decide which sync run(s) this invocation performs.
+
+    - --session pre|post : just that session
+    - no --session       : BOTH active sessions for ACTIVE_DATE, writing
+                           sync_times_pre.pkl and sync_times_post.pkl in one run
+
+    All paths come from sleep_day_configs.json - there is no explicit-path or
+    unsuffixed-output mode.
+    """
+    from sleep_pipeline_config import sleep_sessions, active_sleep_sessions, rec_folder
+
+    if args.session is not None:
+        sessions = {args.session: sleep_sessions[args.session]}
+    else:
+        # Same filter the rest of the pipeline uses: a session with both
+        # sample bounds None means "not recorded that day" and is skipped.
+        sessions = active_sleep_sessions(sleep_sessions)
+
+    if len(sessions) > 1 and (args.output is not None or args.sample_figure is not None):
+        raise SystemExit(
+            "--output / --sample-figure apply to a single run, but this would "
+            "process " + ", ".join(sessions) + ". Pass --session to pick one."
+        )
+
+    jobs = [session_job(key, cfg, args, rec_folder) for key, cfg in sessions.items()]
+    return [job for job in jobs if job is not None]
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Compare video PROC sync square wave with rec-folder DIO and save sync_times.pkl."
     )
-    parser.add_argument("--proc-file", type=Path, default=Path(proc_file))
-    parser.add_argument("--rec-file", type=Path, default=Path(rec_file))
+    parser.add_argument(
+        "--session",
+        choices=("pre", "post"),
+        default=None,
+        help="Sync only this sleep session. Default: every active session for "
+             "ACTIVE_DATE (writes sync_times_pre.pkl and sync_times_post.pkl).",
+    )
+    parser.add_argument(
+        "--match-algorithm",
+        choices=MATCH_ALGORITHMS,
+        default=DEFAULT_MATCH_ALGORITHM,
+        help="How PROC edges are matched to DIO edges. 'pulse' assumes a "
+             "fixed-frequency square wave; 'pulse_geo' assumes random "
+             "inter-pulse intervals and matches on the interval barcode. "
+             "Default 'auto' picks per session from the PROC interval spread.",
+    )
+    parser.add_argument(
+        "--geo-match-tolerance-sec",
+        type=float,
+        default=0.05,
+        help="pulse_geo only: how far a mapped DIO pulse may sit from a PROC "
+             "pulse on the first pass. Must stay below half the shortest "
+             "inter-pulse interval or a pulse can claim its neighbour. Later "
+             "passes tighten this automatically.",
+    )
+    parser.add_argument(
+        "--geo-fingerprint-edges",
+        type=int,
+        default=8,
+        help="pulse_geo only: how many consecutive intervals form the barcode "
+             "used to anchor the trains. Raise it if anchors come back "
+             "non-unique, lower it if pulses are dropped very densely.",
+    )
     parser.add_argument("--dio-channel", type=int, default=DEFAULT_DIO_CHANNEL)
     parser.add_argument("--fs", type=float, default=DEFAULT_FS)
     parser.add_argument("--proc-threshold", type=float, default=None)
@@ -544,17 +1066,19 @@ def parse_args():
     return parser.parse_args()
 
 
-def main():
-    args = parse_args()
-    proc_path = args.proc_file
-    rec_path = args.rec_file
-    output_path = args.output or (rec_path.parent / "sync_times.pkl")
-    sample_figure_path = args.sample_figure or (rec_path.parent / "sync_square_wave_match_samples.png")
-
+def run_sync(args, proc_path, rec_path, output_path, sample_figure_path):
+    """Run the PROC<->DIO comparison for one video/rec pair. Returns True if saved."""
     print(f"Loading PROC signal: {proc_path}")
     proc_time, proc_signal = load_proc_signal(proc_path)
     proc_rising, proc_falling, proc_binary, proc_threshold = sampled_edges(
         proc_time, proc_signal, args.proc_threshold
+    )
+
+    algorithm, algorithm_diag = resolve_match_algorithm(args.match_algorithm, proc_rising)
+    print(
+        f"Match algorithm: {algorithm}"
+        + (f" (auto, PROC interval MAD/median = {algorithm_diag['proc_iti_robust_cv']:.3f})"
+           if args.match_algorithm == "auto" else "")
     )
 
     print(f"Loading rec DIO: {rec_path} Din{args.dio_channel}")
@@ -564,21 +1088,27 @@ def main():
     if args.disable_dio_cleaning:
         dio_cleaning = {"removed_transition_count": 0, "disabled": True}
     else:
+        min_state_duration = args.min_dio_state_duration_sec
+        if min_state_duration is None:
+            # Algorithm-aware, because a pulse_geo train's real states are far
+            # shorter than half its median duration - see the helper's docstring.
+            min_state_duration = default_min_dio_state_duration(sg_time, args.fs, algorithm)
         sg_time, sg_state, dio_cleaning = clean_short_dio_states(
             sg_time,
             sg_state,
             args.fs,
-            args.min_dio_state_duration_sec,
+            min_state_duration,
         )
 
     sg_rising, sg_falling, sg_state = dio_edges(sg_time, sg_state)
     raw_sg_rising, raw_sg_falling, _ = dio_edges(raw_sg_time, raw_sg_state)
 
-    proc_rising_matched, sg_rising_matched, segment_diagnostics = match_clean_segments(
+    proc_rising_matched, sg_rising_matched, segment_diagnostics = match_pulse_trains(
+        algorithm,
         proc_rising,
         sg_rising,
         args.fs,
-        max_segment_median_error_sec=args.max_segment_median_error_sec,
+        args,
     )
     accepted_segments = [row for row in segment_diagnostics["segments"] if row.get("accepted")]
     if accepted_segments:
@@ -593,6 +1123,7 @@ def main():
     diagnostics = {}
     diagnostics.update(
         {
+            "match_algorithm": algorithm_diag,
             "n_compared_edges": int(proc_rising_matched.size),
             "median_iti_error_sec": median_iti_error,
             "max_iti_error_sec": max_iti_error,
@@ -626,6 +1157,17 @@ def main():
     print(f"  Accepted clean segments: {segment_diagnostics['accepted_segment_count']}")
     print(f"  Unmatched PROC edges: {segment_diagnostics['unmatched_proc_edge_count']}")
     print(f"  Unmatched ephys edges: {segment_diagnostics['unmatched_sg_edge_count']}")
+    if algorithm == "pulse_geo":
+        print(f"  Fingerprint anchors accepted: "
+              f"{segment_diagnostics['accepted_anchor_count']}/"
+              f"{len(segment_diagnostics['anchors'])}")
+        if "time_map" in segment_diagnostics:
+            print(f"  Clock drift: {segment_diagnostics['time_map']['clock_drift_ppm']:+.2f} ppm")
+            print(f"  Fit residual: median "
+                  f"{segment_diagnostics['fit_residual_median_abs_sec'] * 1000:.3f} ms, max "
+                  f"{segment_diagnostics['fit_residual_max_abs_sec'] * 1000:.3f} ms")
+        if "failure" in segment_diagnostics:
+            print(f"  pulse_geo failed: {segment_diagnostics['failure']}")
     print(f"  Median ITI error: {diagnostics['median_iti_error_sec']:.6f} s")
     print(f"  Max ITI error: {diagnostics['max_iti_error_sec']:.6f} s")
     print("  Representative mapped-edge errors:")
@@ -660,20 +1202,50 @@ def main():
             f"{args.max_median_iti_error_sec} s)."
         )
 
-    plot_sample_matches(
-        sample_figure_path,
-        proc_time,
-        proc_binary,
-        sg_time,
-        sg_state,
-        proc_rising_matched,
-        sg_rising_matched,
-        args.fs,
-        args.sample_window_sec,
-        args.sample_edge_window_sec,
-        args.sample_count,
-    )
-    print(f"Saved sample match figure: {sample_figure_path}")
+    if proc_rising_matched.size >= 2 and sg_rising_matched.size >= 2:
+        plot_sample_matches(
+            sample_figure_path,
+            proc_time,
+            proc_binary,
+            sg_time,
+            sg_state,
+            proc_rising_matched,
+            sg_rising_matched,
+            args.fs,
+            args.sample_window_sec,
+            args.sample_edge_window_sec,
+            args.sample_count,
+        )
+        print(f"Saved sample match figure: {sample_figure_path}")
+    else:
+        # Nothing matched, so there is no mapping to draw the overlay with.
+        print("Skipped sample match figure: fewer than two matched edges.")
+    return bool(good_match or args.force_save_sync)
+
+
+def main():
+    args = parse_args()
+    jobs = build_jobs(args)
+    if not jobs:
+        print("No sleep sessions to sync - nothing to do.")
+        return
+
+    saved = []
+    for job in jobs:
+        print("\n" + "#" * 70)
+        print(f"SLEEP SESSION: {job['label']}")
+        print("#" * 70)
+        if run_sync(args, job["proc_path"], job["rec_path"],
+                    job["output_path"], job["sample_figure_path"]):
+            saved.append(job)
+
+    if len(jobs) > 1:
+        print("\n" + "=" * 70)
+        print(f"SYNC COMPLETE - {len(saved)}/{len(jobs)} session(s) saved")
+        for job in jobs:
+            status = "saved  " if job in saved else "NOT SAVED"
+            print(f"  {job['label']}: {status} {job['output_path']}")
+        print("=" * 70)
 
 
 if __name__ == "__main__":

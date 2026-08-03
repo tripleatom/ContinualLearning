@@ -13,3 +13,4 @@ passive_view_video/logs
 experiment_patterns_code
 .claude
 .vscode
+*.bak

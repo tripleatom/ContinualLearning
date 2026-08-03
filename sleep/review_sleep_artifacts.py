@@ -9,7 +9,7 @@ from pathlib import Path
 from server_fallback import resolve_output_folder
 
 rec_file = r"\\10.129.151.108\xieluanlabs\xl_cl\ephys\sleep\CnL39SG\CnL39SG_20251102_210043.rec\CnL39SG_20251102_210043sh0.nwb"
-rec = se.NwbRecordingExtractor(rec_file)
+rec = se.read_nwb_recording(rec_file)
 
 # Extract shank number and recording name
 ish = int(rec_file.split('sh')[-1].split('.')[0])

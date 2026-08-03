@@ -8,6 +8,12 @@ Default workflow:
 
 You can also skip export and run downstream analyses on an existing pkl:
     python batch_grating_analysis.py --pkl path/to/grating_data_merged.pkl
+
+...and run only some of them:
+    python batch_grating_analysis.py --pkl path/to/data.pkl --stages tuning,svm
+
+For a GUI over this whole pipeline (including the DIO step), see
+grating_pipeline_gui.py.
 """
 from __future__ import annotations
 
@@ -22,8 +28,16 @@ matplotlib.use("Agg", force=True)
 import matplotlib.pyplot as plt
 
 
+# Downstream analyses, in the order they are run. --stages picks a subset.
+DOWNSTREAM_STAGES = ("lda", "svm", "embedding", "tuning")
+
 SCRIPT_DIR = Path(__file__).resolve().parent
-REPO_ROOT = SCRIPT_DIR.parents[3]
+# Repo root = the ancestor holding the passive_visual package, needed on sys.path
+# for the fully qualified passive_visual.* imports used by the export stage.
+REPO_ROOT = next(
+    (p for p in SCRIPT_DIR.parents if (p / "passive_visual").is_dir()),
+    SCRIPT_DIR.parents[2],
+)
 for path in (SCRIPT_DIR, REPO_ROOT):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
@@ -157,12 +171,21 @@ def run_downstream(
     svm_gamma,
     create_tuning_summary: bool,
     continue_on_error: bool,
+    stages: "set[str] | None" = None,
 ) -> dict:
-    """Run all downstream analyses from an exported grating pkl."""
-    import GratingEmbedding
-    import GratingLDA
-    import GratingSVM
-    import GratingTuningCurve
+    """
+    Run downstream analyses from an exported grating pkl.
+
+    stages selects which of DOWNSTREAM_STAGES to run (None = all). Each analysis
+    module is imported only if its stage was selected, so running one stage does
+    not pay the import cost of the others.
+    """
+    stages = set(DOWNSTREAM_STAGES) if stages is None else set(stages)
+    unknown = stages - set(DOWNSTREAM_STAGES)
+    if unknown:
+        raise ValueError(
+            f"Unknown stage(s): {sorted(unknown)}. Valid: {DOWNSTREAM_STAGES}"
+        )
 
     pkl_path = Path(pkl_path)
     if not pkl_path.exists():
@@ -181,20 +204,18 @@ def run_downstream(
         "osi_png": osi_png,
     }
 
-    _run_stage(
-        "LDA",
-        lambda: GratingLDA.run_analysis(
+    def _lda():
+        import GratingLDA
+        return GratingLDA.run_analysis(
             data_path=pkl_path,
             time_window=time_window,
             save_plots=True,
             output_path=analysis_prefix,
-        ),
-        continue_on_error,
-    )
+        )
 
-    _run_stage(
-        "SVM",
-        lambda: GratingSVM.run_analysis(
+    def _svm():
+        import GratingSVM
+        return GratingSVM.run_analysis(
             data_path=pkl_path,
             time_window=time_window,
             save_plots=True,
@@ -202,33 +223,40 @@ def run_downstream(
             kernel=svm_kernel,
             C=svm_c,
             gamma=svm_gamma,
-        ),
-        continue_on_error,
-    )
+        )
 
-    _run_stage(
-        "Embedding",
-        lambda: GratingEmbedding.run_analysis(
+    def _embedding():
+        import GratingEmbedding
+        return GratingEmbedding.run_analysis(
             data_path=pkl_path,
             time_window=time_window,
             save_plots=True,
             output_path=analysis_prefix,
-        ),
-        continue_on_error,
-    )
+        )
 
-    _run_stage(
-        "Tuning curves",
-        lambda: GratingTuningCurve.generate_tuning_curves(
+    def _tuning():
+        # generate_tuning_curves() plots the OSI distribution itself (plot_osi=True
+        # by default) from the tuning_statistics.csv it just wrote, saved to osi_png.
+        import GratingTuningCurve
+        return GratingTuningCurve.generate_tuning_curves(
             data_path=pkl_path,
             time_window=time_window,
             output_folder=tuning_folder,
             create_summary=create_tuning_summary,
-        ),
-        continue_on_error,
-    )
-    # generate_tuning_curves() plots the OSI distribution itself (plot_osi=True
-    # by default) from the tuning_statistics.csv it just wrote, saved to osi_png.
+        )
+
+    stage_fns = {"lda": ("LDA", _lda), "svm": ("SVM", _svm),
+                 "embedding": ("Embedding", _embedding),
+                 "tuning": ("Tuning curves", _tuning)}
+
+    skipped = [s for s in DOWNSTREAM_STAGES if s not in stages]
+    if skipped:
+        print(f"Skipping stage(s): {', '.join(skipped)}")
+
+    for stage in DOWNSTREAM_STAGES:  # fixed order regardless of how stages was given
+        if stage in stages:
+            label, fn = stage_fns[stage]
+            _run_stage(label, fn, continue_on_error)
 
     return outputs
 
@@ -265,6 +293,15 @@ def parse_args() -> argparse.Namespace:
         default=1.0,
         help="Analysis window end in seconds relative to stimulus onset.",
     )
+    parser.add_argument(
+        "--stages",
+        default="all",
+        help=(
+            "Comma-separated downstream stages to run: "
+            f"{','.join(DOWNSTREAM_STAGES)}, or 'all' (default). "
+            "Only the selected stages' modules are imported."
+        ),
+    )
     parser.add_argument("--svm-kernel", default="rbf", help="SVM kernel.")
     parser.add_argument("--svm-c", type=float, default=1.0, help="SVM C parameter.")
     parser.add_argument(
@@ -285,6 +322,12 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _parse_stages(value: str) -> set:
+    if value.strip().lower() in ("all", ""):
+        return set(DOWNSTREAM_STAGES)
+    return {s.strip().lower() for s in value.split(",") if s.strip()}
+
+
 def main() -> None:
     args = parse_args()
     time_window = (args.t0, args.t1)
@@ -300,6 +343,7 @@ def main() -> None:
         svm_gamma=svm_gamma,
         create_tuning_summary=not args.no_tuning_summary,
         continue_on_error=args.continue_on_error,
+        stages=_parse_stages(args.stages),
     )
 
     print("\n" + "=" * 72)
