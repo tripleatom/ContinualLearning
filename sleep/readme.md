@@ -22,12 +22,29 @@ Run the active pipeline in this order:
    `dlc_body` (centroid of `VELOCITY_KEYPOINTS` from the `_DLC.hdf5`
    companion file, default the five trunk points). Each source writes its own
    pkl, and `plot_sleep_spectrograms.py` loads whichever is selected.
+
+   Jitter is removed from **position**, not from speed: the track is resampled
+   onto a uniform grid (the camera's frame rate is not fixed), low-passed at
+   `VELOCITY_CUTOFF_HZ` with a zero-phase Butterworth, differentiated once, and
+   only then turned into a speed magnitude. Order matters - `sqrt(vx^2+vy^2)`
+   rectifies zero-mean jitter into a positive speed offset that no later
+   averaging can remove. Frames further than `VELOCITY_MAX_GAP_SEC` from a real
+   detection stay NaN rather than being interpolated across, because a long
+   dropout interpolates to a straight line and a straight line reads as "still".
+
+   Downstream, the speed is reduced exactly once more, on a
+   `VELOCITY_WINDOW_SEC` window (10 s, derived from `spec_params` so it matches
+   the spectrogram window) - in `score_nrem_delta_velocity.py` for the NREM
+   speed gate and in `plot_sleep_spectrograms.py` for the plotted panel. Nothing
+   smooths the speed after that.
 3. `extract_sleep_lfp.py`
-   Extract and preprocess 500 Hz LFP traces from NWB recordings.
+   Extract and preprocess 1250 Hz LFP traces from NWB recordings.
 4. `compute_sleep_spectrograms.py`
-   Compute per-channel spectrograms from the extracted LFP.
+   Compute per-channel spectrograms from the extracted LFP, reduced to a
+   log-spaced 1-100 Hz frequency axis before saving.
 5. `compute_sleep_features.py`
-   Compute PC1 and delta, theta, sigma, gamma, and theta-ratio features.
+   Compute PC1 and delta, sigma, gamma, and theta-ratio features, all
+   derived from the saved spectrogram (the LFP traces are not re-read).
 6. `plot_sleep_spectrograms.py`
    Create per-channel spectrogram figures and trace-data exports.
 
@@ -63,10 +80,11 @@ standalone LFP extraction and plotting workflow.
 
 ## Spectrogram features
 
-- Window: 1,024 samples, approximately 2.0 seconds at 500 Hz
-- Overlap: 75%
-- FFT size: 2,048, approximately 0.24 Hz frequency resolution
-- Time resolution: approximately 0.5 seconds
+- Window: 12,500 samples = 10 seconds at 1250 Hz
+- Step: 1 second (saved spectrogram sampled at 1 Hz)
+- FFT size: 12,500, 0.1 Hz native frequency resolution
+- Saved frequency axis: 100 log-spaced bins spanning 1-100 Hz (linear rows
+  averaged into each bin; the lowest few bins interpolated)
 - Per-channel processing across each configured shank
 - Compressed NumPy output for downstream feature computation
 

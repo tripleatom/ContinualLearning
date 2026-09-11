@@ -1,3 +1,4 @@
+import argparse
 import errno
 import numpy as np
 from scipy import signal
@@ -14,6 +15,44 @@ from sleep_pipeline_config import (
     mirror_on_backup_server,
 )
 
+# Saved frequency axis: log-spaced bin centers, reduced from the linear FFT
+# grid per channel below. This is the `freqs` every downstream consumer sees.
+log_freqs = np.logspace(np.log10(spec_params["log_fmin"]),
+                        np.log10(spec_params["log_fmax"]),
+                        spec_params["n_log_bins"])
+
+
+def logbin_rows(Sxx, f, centers):
+    """Reduce linear-grid PSD rows (n_freqs, n_times) onto log-spaced centers.
+
+    Bin edges are the geometric midpoints between neighboring centers. Rows of
+    the linear grid falling inside a bin are averaged; a bin narrower than the
+    linear spacing (the lowest few, where log bins are ~0.05 Hz against the
+    0.1 Hz grid) instead gets the PSD linearly interpolated at its center, so
+    no bin comes out empty.
+    """
+    inner = np.sqrt(centers[:-1] * centers[1:])
+    edges = np.concatenate(([centers[0] ** 2 / inner[0]], inner,
+                            [centers[-1] ** 2 / inner[-1]]))
+    out = np.empty((centers.size, Sxx.shape[1]), dtype=Sxx.dtype)
+    for i, center in enumerate(centers):
+        rows = (f >= edges[i]) & (f < edges[i + 1])
+        if rows.any():
+            out[i] = Sxx[rows].mean(axis=0)
+        else:
+            j = np.searchsorted(f, center)
+            w = (center - f[j - 1]) / (f[j] - f[j - 1])
+            out[i] = (1.0 - w) * Sxx[j - 1] + w * Sxx[j]
+    return out
+
+parser = argparse.ArgumentParser(
+    description="Compute per-channel spectrograms from extracted LFP traces.")
+parser.add_argument(
+    "--overwrite", action="store_true",
+    help="Recompute even when the spectrograms file already exists "
+         "(default: existing outputs are kept and the shank is skipped).")
+args = parser.parse_args()
+
 # === MAIN LOOP ===
 sessions_to_run = active_sleep_sessions(sleep_sessions)
 if not sessions_to_run:
@@ -26,6 +65,15 @@ for session_key, session_cfg in sessions_to_run.items():
     print(f"{'#'*70}")
 
     for ish in shanks:
+        # Checked before loading the (large) LFP file - an already-done shank
+        # should never pay for that load just to overwrite the same output.
+        output_check = resolve_existing_file(
+            low_freq_folder / f"{session_label}_sh{ish}_spectrograms.npz")
+        if not args.overwrite and output_check.exists():
+            print(f"\nShank {ish}: {output_check.name} already exists - "
+                  f"skipping ({output_check})")
+            continue
+
         print(f"\n{'='*70}")
         print(f"PROCESSING SHANK {ish}")
         print(f"{'='*70}\n")
@@ -76,16 +124,18 @@ for session_key, session_cfg in sessions_to_run.items():
 
             # Save freq/time only once
             if freqs is None:
-                freqs = f.astype("float32")
+                freqs = log_freqs.astype("float32")
                 times = t.astype("float32")
 
-            # Convert to float32 to reduce file size
-            spectrograms.append(Sxx.astype("float32"))
+            # Reduce the full linear grid (0.1 Hz rows up to Nyquist) to the
+            # log-spaced axis before keeping anything; float32 for file size.
+            spectrograms.append(logbin_rows(Sxx, f, log_freqs).astype("float32"))
 
         spectrograms = np.array(spectrograms, dtype="float32")   # (n_channels, n_freqs, n_times)
 
         print(f"\n✓ DONE — spectrograms shape: {spectrograms.shape}")
-        print(f"  Frequency resolution: {freqs[1] - freqs[0]:.3f} Hz")
+        print(f"  Frequency axis: {len(freqs)} log-spaced bins, "
+              f"{freqs[0]:.2f}-{freqs[-1]:.1f} Hz")
         print(f"  Time resolution: {times[1] - times[0]:.3f} s")
 
         # === SAVE RESULTS ===

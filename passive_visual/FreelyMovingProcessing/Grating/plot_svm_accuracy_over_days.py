@@ -70,7 +70,17 @@ def find_day_pkls(base_dir: Path, excluded: set[str]) -> dict[str, Path]:
 
     Keys are the full session folder name (e.g. CnL42SG_20260123). A session is
     skipped if its 6-digit (YYMMDD) or 8-digit (YYYYMMDD) date is in `excluded`.
+
+    Curated (non-"_raw") pkls are always preferred over "_raw" pkls (exported
+    when no curated_analyzer existed for that session, see GratingExport.py);
+    "_raw" is only used if the session has no curated pkl at all. Within a tier,
+    a merged pkl is preferred over a per-task one, and ties broken by mtime.
     """
+    def _tier(p: Path) -> tuple[bool, bool]:
+        is_raw = p.stem.endswith("_raw")
+        is_merged = p.stem.removesuffix("_raw").endswith("_grating_data_merged")
+        return (is_raw, not is_merged)  # sorts non-raw-merged first, raw-per-task last
+
     pkls: dict[str, Path] = {}
     for analysis_dir in sorted(base_dir.glob("*/passive_embedding_analysis")):
         session = analysis_dir.parent.name
@@ -79,11 +89,11 @@ def find_day_pkls(base_dir: Path, excluded: set[str]) -> dict[str, Path]:
             d = digits.group(1)
             if d in excluded or (len(d) == 8 and d[2:] in excluded):
                 continue
-        candidates = sorted(analysis_dir.glob("*_grating_data_merged.pkl"))
-        if not candidates:
-            candidates = sorted(analysis_dir.glob("*_grating_data*.pkl"))
-        if not candidates:
+        all_candidates = sorted(analysis_dir.glob("*_grating_data*.pkl"))
+        if not all_candidates:
             continue
+        best_tier = min(_tier(p) for p in all_candidates)
+        candidates = [p for p in all_candidates if _tier(p) == best_tier]
         pkls[session] = max(candidates, key=lambda p: p.stat().st_mtime)
     return pkls
 

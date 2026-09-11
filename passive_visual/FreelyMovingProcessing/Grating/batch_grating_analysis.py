@@ -71,7 +71,10 @@ def export_from_grating_config() -> Path:
         PASSIVE_END,
         PASSIVE_WINDOWS,
     )
-    from passive_visual.FreelyMovingProcessing.Grating.grating_utils import load_session_paths
+    from passive_visual.FreelyMovingProcessing.Grating.grating_utils import (
+        format_grating_values,
+        load_session_paths,
+    )
 
     rec_folders, passive_log_paths = load_session_paths(ANIMAL_ID, EXPERIMENT_DATE)
     if not rec_folders:
@@ -143,7 +146,10 @@ def export_from_grating_config() -> Path:
 
     print(f"Exported units: {len(merged['spike_data'])}")
     print(f"Exported trials: {merged['metadata']['n_trials']}")
-    print(f"Orientations: {merged['trial_info']['unique_orientations']}")
+    print(
+        "Orientations: "
+        f"{format_grating_values(merged['trial_info']['unique_orientations'])}"
+    )
     return output_pkl
 
 

@@ -54,6 +54,7 @@ from grating_utils import (
     calculate_orientation_selectivity,
     plot_trial_distribution,
     resolve_data_path,
+    format_grating_value,
 )
 
 
@@ -444,7 +445,7 @@ def _plot_3d_scatter(fig, data, labels, orientations, colors,
         for i, ori in enumerate(orientations):
             mask = labels == ori
             ax.scatter(data[mask, 0], data[mask, 1], data[mask, 2],
-                       c=[colors[i]], label=f'{ori}{label_suffix}',
+                       c=[colors[i]], label=f'{format_grating_value(ori)}{label_suffix}',
                        alpha=0.85, s=60, edgecolors='none')
         ax.set_xlabel(axis_labels[0], fontsize=18, fontweight='bold', labelpad=8)
         ax.set_ylabel(axis_labels[1], fontsize=18, fontweight='bold', labelpad=8)
@@ -473,7 +474,7 @@ def _plot_2d_scatter(fig, data, labels, orientations, colors,
     for i, ori in enumerate(orientations):
         mask = labels == ori
         ax.scatter(data[mask, 0], data[mask, 1],
-                   c=[colors[i]], label=f'{ori}{label_suffix}',
+                   c=[colors[i]], label=f'{format_grating_value(ori)}{label_suffix}',
                    alpha=0.85, s=60, edgecolors='none')
     ax.set_xlabel(axis_labels[0], fontsize=20, fontweight='bold')
     ax.set_ylabel(axis_labels[1], fontsize=20, fontweight='bold')
@@ -594,7 +595,7 @@ def _plot_circular_fit(fig, results, orientations, colors,
     for i, ori in enumerate(orientations):
         ax.scatter(centroids[i, 0], centroids[i, 1], c=[colors[i]],
                    s=220, edgecolors='black', linewidth=1.8, zorder=3,
-                   label=f'{ori}{label_suffix}')
+                   label=f'{format_grating_value(ori)}{label_suffix}')
 
     theta = np.linspace(0, 2 * np.pi, 200)
     cx, cy = cf['center']
@@ -629,7 +630,7 @@ def _plot_pv_polar(fig, results, orientations, colors,
         ax.plot([0, theta], [0, m], '-', color=colors[i], linewidth=2.8)
         ax.scatter([theta], [m], c=[colors[i]], s=130,
                    edgecolors='black', linewidth=1.2, zorder=3,
-                   label=f'{ori}{label_suffix}')
+                   label=f'{format_grating_value(ori)}{label_suffix}')
 
     order = np.argsort(angles)
     closed_theta = np.append(angles[order], angles[order][0])
@@ -810,17 +811,17 @@ def cross_sf_projection_analysis(firing_rates, orientation_labels, sf_labels,
                     continue
                 ax.scatter(Z[m, 0], Z[m, 1], c=[colors[k]],
                            s=50, alpha=0.8, edgecolors='none',
-                           label=f'{ori}°' if (i == 0 and j == 0) else None)
+                           label=f'{format_grating_value(ori)}°' if (i == 0 and j == 0) else None)
 
             if len(np.unique(labels_proj)) > 1 and Z.shape[1] >= 2:
                 sil = silhouette_score(Z[:, :2], labels_proj)
                 knn = _knn_label_purity(Z[:, :2], labels_proj, k=5)
                 cross_metrics[i, j] = knn
-                ax.set_title(f"fit={sf_fit}→proj={sf_proj}\n"
+                ax.set_title(f"fit={format_grating_value(sf_fit)}→proj={format_grating_value(sf_proj)}\n"
                              f"sil={sil:.2f}, kNN={knn:.2f}",
                              fontsize=13, fontweight='bold')
             else:
-                ax.set_title(f"fit={sf_fit}→proj={sf_proj}",
+                ax.set_title(f"fit={format_grating_value(sf_fit)}→proj={format_grating_value(sf_proj)}",
                              fontsize=13, fontweight='bold')
 
             ax.set_xlabel('PC1', fontsize=12, fontweight='bold')
@@ -841,13 +842,15 @@ def cross_sf_projection_analysis(firing_rates, orientation_labels, sf_labels,
     plt.tight_layout(rect=(0, 0, 1, 0.96))
 
     print("Cross-SF kNN purity (rows=fit, cols=proj):")
-    header = "        " + "  ".join([f"{sf:>6}" for sf in unique_sfs])
+    header = "        " + "  ".join(
+        [f"{format_grating_value(sf):>6}" for sf in unique_sfs]
+    )
     print(header)
     for i, sf_fit in enumerate(unique_sfs):
         row = "  ".join([f"{cross_metrics[i, j]:6.3f}"
                         if not np.isnan(cross_metrics[i, j]) else "   nan"
                         for j in range(n_sf)])
-        print(f"  {sf_fit:>5}: {row}")
+        print(f"  {format_grating_value(sf_fit):>5}: {row}")
 
     if save_path:
         save_path = Path(save_path)
@@ -891,7 +894,7 @@ def run_analysis(data_path, time_window=(0.07, 0.16), save_plots=True, output_pa
             fr_sf = firing_rates[sf_mask]
             labels_sf = orientation_labels[sf_mask]
             sf_tag = f'_sf{sf}'
-            sf_display = f'SF={sf} cpd'
+            sf_display = f'SF={format_grating_value(sf)} cpd'
 
         print(f"\n{'='*60}\nEmbedding {sf_display}  ({len(labels_sf)} trials)\n{'='*60}")
 
@@ -940,7 +943,7 @@ def run_analysis(data_path, time_window=(0.07, 0.16), save_plots=True, output_pa
             if len(unique_sf_ori) < 2:
                 continue
 
-            print(f"\n{'='*60}\nSF embedding — orientation={ori}°"
+            print(f"\n{'='*60}\nSF embedding — orientation={format_grating_value(ori)}°"
                   f"  ({len(sf_ori)} trials)\n{'='*60}")
 
             trial_info_ori = {
@@ -959,7 +962,7 @@ def run_analysis(data_path, time_window=(0.07, 0.16), save_plots=True, output_pa
             fig = create_analysis_figure(results, unit_ids, trial_info_ori,
                                          save_path=fig_path,
                                          label_suffix=' cpd')
-            fig.suptitle(f"Unsupervised Embedding — Orientation={ori}°",
+            fig.suptitle(f"Unsupervised Embedding — Orientation={format_grating_value(ori)}°",
                          fontsize=24, fontweight='bold', y=1.0)
 
             all_results.append((results, fr_ori, sf_ori, unit_ids))

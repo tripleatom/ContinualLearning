@@ -21,6 +21,19 @@ import warnings
 warnings.filterwarnings('ignore')
 
 
+def format_grating_value(value):
+    """Render a numeric grating parameter with exactly two decimal places."""
+    try:
+        return f"{float(value):.2f}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def format_grating_values(values):
+    """Render a sequence of grating parameters consistently for logs/titles."""
+    return "[" + ", ".join(format_grating_value(value) for value in values) + "]"
+
+
 # =============================================================================
 # SESSION PATH RESOLUTION
 # =============================================================================
@@ -463,12 +476,12 @@ def calculate_firing_rates(neural_data, time_window=(0.07, 0.16)):
     print(f"\nCalculating firing rates:")
     print(f"  Units: {n_units} | Trials: {n_trials}")
     print(f"  Window: {window_start:.3f}-{window_end:.3f}s ({window_duration:.3f}s)")
-    print(f"  Orientations: {unique_orientations}")
+    print(f"  Orientations: {format_grating_values(unique_orientations)}")
     for ori in unique_orientations:
-        print(f"    {ori}°: {orientations.count(ori)} trials")
+        print(f"    {format_grating_value(ori)}°: {orientations.count(ori)} trials")
     if has_sf:
         unique_sfs = sorted(set(sf for sf in spatial_freqs_all if sf is not None))
-        print(f"  Spatial frequencies: {unique_sfs}")
+        print(f"  Spatial frequencies: {format_grating_values(unique_sfs)}")
 
     firing_rates = np.full((n_trials, n_units), np.nan)
     for unit_idx, unit_id in enumerate(unit_ids):
@@ -536,7 +549,7 @@ def calculate_orientation_selectivity(unit_ids, orientation_labels, firing_rates
     print(f"  Mean OSI: {osi.mean():.3f}")
     print(f"  Top units:")
     for idx in np.argsort(osi)[::-1][:min(10, len(unit_ids))]:
-        print(f"    {unit_ids[idx]}: OSI={osi[idx]:.3f}, Pref={pref_orientation_deg[idx]:.1f}°")
+        print(f"    {unit_ids[idx]}: OSI={osi[idx]:.3f}, Pref={pref_orientation_deg[idx]:.2f}°")
 
     return {
         'unit_ids': unit_ids,
@@ -732,7 +745,7 @@ def plot_confusion_matrix(fig, conf_matrix, orientations, label_suffix='°', sub
     cb = fig.colorbar(im, ax=ax)
     cb.ax.tick_params(labelsize=16)
 
-    tick_labels = [f'{ori}{label_suffix}' for ori in orientations]
+    tick_labels = [f'{format_grating_value(ori)}{label_suffix}' for ori in orientations]
     ax.set_xticks(np.arange(len(tick_labels)))
     ax.set_yticks(np.arange(len(tick_labels)))
     ax.set_xticklabels(tick_labels, fontsize=16)
@@ -837,7 +850,7 @@ def plot_per_class_accuracy(fig, results, orientations, colors, label_suffix='°
     ax.set_ylim(0, 1)
     ax.set_title('Per-Class Accuracy', fontsize=24, fontweight='bold', pad=12)
     ax.set_xticks(range(len(orientations)))
-    ax.set_xticklabels([f'{ori}{label_suffix}' for ori in orientations],
+    ax.set_xticklabels([f'{format_grating_value(ori)}{label_suffix}' for ori in orientations],
                        fontsize=16)
     ax.tick_params(axis='both', labelsize=18, width=2.0, length=7)
     ax.legend(fontsize=16, frameon=False)
@@ -866,7 +879,7 @@ def plot_polar_accuracy(fig, results, orientations, subplot_pos=(3, 4, 6)):
     ax.set_title('Polar Decoding Accuracy', fontsize=24,
                  fontweight='bold', pad=14)
     ax.set_thetagrids(np.arange(0, 360, 45),
-                      [f'{a / 2:g}°' for a in np.arange(0, 360, 45)],
+                      [f'{a / 2:.2f}°' for a in np.arange(0, 360, 45)],
                       fontsize=18)
     ax.set_yticklabels([])
     ax.tick_params(axis='x', pad=12)
@@ -892,7 +905,7 @@ def plot_sf_accuracy_bar(fig, results, sfs, colors, label_suffix=' cpd',
     ax.set_title('Per-SF Decoding Accuracy', fontsize=24,
                  fontweight='bold', pad=12)
     ax.set_xticks(range(len(sfs)))
-    ax.set_xticklabels([f'{sf}{label_suffix}' for sf in sfs], fontsize=16)
+    ax.set_xticklabels([f'{format_grating_value(sf)}{label_suffix}' for sf in sfs], fontsize=16)
     ax.tick_params(axis='both', labelsize=18, width=2.0, length=7)
     ax.legend(fontsize=16, frameon=False)
     ax.grid(True, alpha=0.3, axis='y')
@@ -917,7 +930,7 @@ def plot_trial_distribution(fig, trial_info, orientations, colors, label_suffix=
     ax.set_ylabel('Number of Trials', fontsize=22, fontweight='bold')
     ax.set_title('Trial Distribution', fontsize=24, fontweight='bold', pad=12)
     ax.set_xticks(range(len(orientations)))
-    ax.set_xticklabels([f'{ori}{label_suffix}' for ori in orientations],
+    ax.set_xticklabels([f'{format_grating_value(ori)}{label_suffix}' for ori in orientations],
                        fontsize=16)
     ax.tick_params(axis='both', labelsize=18, width=2.0, length=7)
     for spine in ('top', 'right'):
@@ -977,7 +990,7 @@ def plot_summary_text(fig, results, labels, unit_ids, trial_info, label_suffix='
 {extra_lines}
     Experiment Info:
     • Total trials: {len(labels)}
-    • Classes: {len(unique_classes)} ({min(unique_classes)}{label_suffix} - {max(unique_classes)}{label_suffix})
+    • Classes: {len(unique_classes)} ({format_grating_value(min(unique_classes))}{label_suffix} - {format_grating_value(max(unique_classes))}{label_suffix})
     • Units: {len(unit_ids)}
     • Stimulus duration: {exp_params.get('stimulus_duration', 'N/A')}s
     • ITI duration: {exp_params.get('iti_duration', 'N/A')}s

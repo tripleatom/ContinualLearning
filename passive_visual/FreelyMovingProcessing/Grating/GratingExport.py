@@ -243,7 +243,10 @@ def extract_grating_neural_data_for_embedding(
         n_repeats = len(df) if df is not None else 0
         trial_duration = stimulus_duration + ITI_duration
 
-    print(f"Stimulus duration: {stimulus_duration}s, ITI: {ITI_duration}s, Total trials: {n_repeats}")
+    print(
+        f"Stimulus duration: {stimulus_duration:.2f}s, "
+        f"ITI: {ITI_duration:.2f}s, Total trials: {n_repeats}"
+    )
 
     task_id = task_file_path.stem
     processed_dio_folder = task_file_path.parent / f"{task_id}_DIO.npz"
@@ -272,6 +275,25 @@ def extract_grating_neural_data_for_embedding(
             print("No orientation column found, using dummy orientations")
             orientations = np.zeros(n_trials)
 
+    # Keep grating parameters numeric for downstream calculations, but normalize
+    # their saved precision so text-parsing artifacts do not create spurious
+    # classes (for example 124.999999 vs 125.0). Updating the DataFrame also
+    # makes all_trial_parameters use the same two-decimal numeric precision.
+    grating_columns = (
+        'L_Orient', 'L_SF', 'L_Contrast', 'L_Phase',
+        'R_Orient', 'R_SF', 'R_Contrast', 'R_Phase',
+    )
+    for column in grating_columns:
+        if column in df.columns:
+            df[column] = np.round(df[column].astype(float), 2)
+    orientations = np.round(np.asarray(orientations, dtype=float), 2)
+    if 'L_SF' in df.columns:
+        spatial_freqs = df['L_SF'].values
+    if 'L_Contrast' in df.columns:
+        contrasts = df['L_Contrast'].values
+    if 'L_Phase' in df.columns:
+        phases = df['L_Phase'].values
+
     spatial_freqs = df['L_SF'].values if 'L_SF' in df.columns else np.full(n_trials, None)
     contrasts = df['L_Contrast'].values if 'L_Contrast' in df.columns else np.full(n_trials, None)
     phases = df['L_Phase'].values if 'L_Phase' in df.columns else np.full(n_trials, None)
@@ -279,9 +301,20 @@ def extract_grating_neural_data_for_embedding(
     unique_orientations = np.unique(orientations)
     unique_spatial_freqs = np.unique(spatial_freqs) if 'L_SF' in df.columns else 'N/A'
     unique_phases = np.unique(phases) if 'L_Phase' in df.columns else 'N/A'
-    print(f"Unique orientations: {unique_orientations}")
-    print(f"Unique spatial frequencies: {unique_spatial_freqs}")
-    print(f"Unique phases: {unique_phases}")
+    formatted_orientations = ", ".join(f"{ori:.2f}" for ori in unique_orientations)
+    print(f"Unique orientations: [{formatted_orientations}]")
+    if isinstance(unique_spatial_freqs, np.ndarray):
+        sf_display = ", ".join(f"{value:.2f}" for value in unique_spatial_freqs)
+        print(f"Unique spatial frequencies: [{sf_display}]")
+    else:
+        sf_display = str(unique_spatial_freqs)
+        print(f"Unique spatial frequencies: {unique_spatial_freqs}")
+    if isinstance(unique_phases, np.ndarray):
+        phase_display = ", ".join(f"{value:.2f}" for value in unique_phases)
+        print(f"Unique phases: [{phase_display}]")
+    else:
+        phase_display = str(unique_phases)
+        print(f"Unique phases: {unique_phases}")
     print(f"Number of trials: {n_trials}")
 
     if len(rising_times) < n_trials or len(falling_times) < n_trials:
@@ -468,7 +501,11 @@ def extract_grating_neural_data_for_embedding(
         'shanks_processed': shanks_processed
     }
 
-    print(f"\nExtraction complete: {unit_counter} units, {n_trials} trials, orientations: {unique_orientations}, spatial_freqs: {unique_spatial_freqs}, phases: {unique_phases}")
+    print(
+        f"\nExtraction complete: {unit_counter} units, {n_trials} trials, "
+        f"orientations: [{formatted_orientations}], "
+        f"spatial_freqs: [{sf_display}], phases: [{phase_display}]"
+    )
 
     return neural_data
 
@@ -610,8 +647,15 @@ def find_grating_pkl(animal_id, experiment_date, sortout_folder, log_dir=None):
       - merged:    <rec_name>_grating_data_merged.pkl
       - per-task:  <rec_name>_<task_time>_grating_data.pkl
 
-    Exactly one file (across both formats combined) is expected. Raises if none
-    or more than one match is found, rather than silently picking one.
+    Each format also has a "_raw" variant (e.g. <rec_name>_grating_data_merged_raw.pkl)
+    produced when no curated_analyzer existed at export time and the raw/uncurated
+    sorting_analyzer was used instead (see 'curation_status' in the pkl's metadata).
+    Curated (non-raw) pkls are always preferred; "_raw" pkls are only used as a
+    fallback when no non-raw pkl exists for the session.
+
+    Exactly one file is expected within whichever tier (non-raw, or raw as a
+    fallback) is used. Raises if none, or more than one match is found in that
+    tier, rather than silently picking one.
 
     Parameters
     ----------
@@ -637,22 +681,33 @@ def find_grating_pkl(animal_id, experiment_date, sortout_folder, log_dir=None):
 
     output_dir = _passive_embedding_dir(sortout_folder)
 
-    merged_path = output_dir / f"{rec_name}_grating_data_merged.pkl"
-    per_task_matches = sorted(output_dir.glob(f"{rec_name}_*_grating_data.pkl"))
-    matches = ([merged_path] if merged_path.exists() else []) + per_task_matches
+    def _matches(raw_tag):
+        merged = output_dir / f"{rec_name}_grating_data_merged{raw_tag}.pkl"
+        per_task = sorted(output_dir.glob(f"{rec_name}_*_grating_data{raw_tag}.pkl"))
+        return ([merged] if merged.exists() else []) + per_task
+
+    matches = _matches('')
+    used_raw = False
+    if not matches:
+        matches = _matches('_raw')
+        used_raw = bool(matches)
 
     if not matches:
         raise FileNotFoundError(
             f"No grating_data pkl found for {animal_id}/{experiment_date} in {output_dir} "
-            f"(looked for '{rec_name}_grating_data_merged.pkl' and "
-            f"'{rec_name}_<task_time>_grating_data.pkl')"
+            f"(looked for '{rec_name}_grating_data_merged[_raw].pkl' and "
+            f"'{rec_name}_<task_time>_grating_data[_raw].pkl')"
         )
     if len(matches) > 1:
+        tier = "raw" if used_raw else "non-raw"
         raise ValueError(
-            f"Expected exactly one grating_data pkl for {animal_id}/{experiment_date} in "
+            f"Expected exactly one {tier} grating_data pkl for {animal_id}/{experiment_date} in "
             f"{output_dir}, found {len(matches)} - aborting:\n" +
             "\n".join(f"  {p.name}" for p in matches)
         )
+    if used_raw:
+        print(f"  No curated grating_data pkl found for {animal_id}/{experiment_date} - "
+              f"using raw (unsorted) export: {matches[0].name}")
 
     return matches[0]
 
@@ -736,17 +791,23 @@ if __name__ == "__main__":
         if merge_output and len(all_data) > 1:
             print(f"\nMerging {len(all_data)} experiments...")
             neural_data = merge_grating_neural_data(all_data)
-            filepath = output_dir / f"{rec_name}_grating_data_merged.pkl"
+            raw_tag = '_raw' if neural_data['metadata'].get('curation_status') != 'curated' else ''
+            filepath = output_dir / f"{rec_name}_grating_data_merged{raw_tag}.pkl"
             print(f"Saving merged data to {filepath}")
             with open(filepath, 'wb') as f:
                 pickle.dump(neural_data, f, protocol=pickle.HIGHEST_PROTOCOL)
             print(f"\n- {len(neural_data['spike_data'])} units")
             print(f"- {neural_data['metadata']['n_trials']} trials total")
-            print(f"- Orientations: {neural_data['trial_info']['unique_orientations']}")
+            orientation_display = ", ".join(
+                f"{float(value):.2f}"
+                for value in neural_data['trial_info']['unique_orientations']
+            )
+            print(f"- Orientations: [{orientation_display}]")
         else:
             for nd, log_path in zip(all_data, passive_log_paths):
                 task_time = log_path.stem.rsplit('_', 1)[-1]  # just the HHmmss timestamp
-                filepath = output_dir / f"{rec_name}_{task_time}_grating_data.pkl"
+                raw_tag = '_raw' if nd['metadata'].get('curation_status') != 'curated' else ''
+                filepath = output_dir / f"{rec_name}_{task_time}_grating_data{raw_tag}.pkl"
                 print(f"Saving {filepath}")
                 with open(filepath, 'wb') as f:
                     pickle.dump(nd, f, protocol=pickle.HIGHEST_PROTOCOL)

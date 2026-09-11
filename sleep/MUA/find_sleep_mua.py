@@ -46,7 +46,11 @@ from pathlib import Path
 import numpy as np
 from scipy.ndimage import gaussian_filter1d
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+for _p in (Path(__file__).resolve().parent,               # .../sleep/MUA
+           Path(__file__).resolve().parents[2]):          # repo root
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
+from server_fallback import resolve_output_folder  # noqa: E402
 from mua_detect import (  # noqa: E402
     detect_mua,
     has_artifact_cache,
@@ -113,7 +117,7 @@ DETECT_TIME_RADIUS_MSEC = 0.5
 # spike within +/- 2 sites, so one unit near the boundary between two channels
 # is not counted twice. Set 0.0 for fully independent per-channel MUA, or None
 # to suppress across the whole shank (MS5's own default).
-DETECT_CHANNEL_RADIUS = 50.0
+DETECT_CHANNEL_RADIUS = 0.0
 
 # Per-channel median/MAD rather than whitening. Whitening decorrelates channels,
 # which is what the sorter wants but which can smear one large spike onto its
@@ -525,8 +529,10 @@ def main():
     total_frames = se.read_nwb_recording(str(probe_nwb)).get_num_frames()
 
     windows = epoch_windows(SESSION_FOLDER, total_frames)
-    out_dir = SESSION_FOLDER / OUTPUT_SUBFOLDER
-    out_dir.mkdir(parents=True, exist_ok=True)
+    # Results belong with the day on the share even when SESSION_FOLDER is a
+    # local working copy of the NWBs; resolve_output_folder does that mapping
+    # (and creates the folder), leaving the local disk holding raw data only.
+    out_dir = Path(resolve_output_folder(SESSION_FOLDER / OUTPUT_SUBFOLDER))
 
     print('=' * 70)
     print(f'MUA detection (no sorting) — {NWB_BASE}')

@@ -13,9 +13,24 @@ Two sources, selected by `VELOCITY_SOURCE` in sleep_pipeline_config.py:
                  the head during sleep, and low-confidence frames become gaps
                  that are interpolated rather than silently frozen.
 
-Both paths end in the same Savitzky-Golay differentiation and write the same
-pkl keys (time_stamp / velocity / velocity_x / velocity_y) on the PROC
-time base, so video<->ephys sync downstream is unchanged.
+Both paths end in the same filtering (lowpass_velocity) and write the same pkl
+keys (time_stamp / velocity / velocity_x / velocity_y) on the PROC time base,
+so video<->ephys sync downstream is unchanged.
+
+How the jitter is handled
+-------------------------
+Differentiation amplifies tracking jitter, and taking the speed magnitude then
+RECTIFIES it: zero-mean position noise becomes a strictly positive speed
+offset, so a motionless animal reads as a nonzero speed whose value depends on
+lighting and tracking quality rather than on behaviour. Averaging afterwards
+cannot undo that - it shrinks the variance of the bias, never the bias. So all
+noise suppression happens in position space, before the derivative and before
+the magnitude:
+
+    clean position -> low-pass position -> differentiate once -> magnitude
+    -> one windowed aggregation matched to the spectrogram (aggregate_speed)
+
+and nothing smooths the speed again after that.
 """
 import pickle
 import re
@@ -25,7 +40,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from datetime import datetime
 from scipy.ndimage import median_filter
-from scipy.signal import savgol_filter
+from scipy.signal import butter, filtfilt, savgol_filter
 
 from server_fallback import (mirror_on_backup_server, resolve_existing_file,
                              resolve_output_folder)
@@ -38,6 +53,13 @@ BODY_KEYPOINTS = ('left_midside', 'right_midside',
 
 # Per-frame likelihood a keypoint must reach to enter the centroid.
 DEFAULT_LIKELIHOOD_THRESHOLD = 0.6
+
+# Filtering defaults. Mirrored in sleep_pipeline_config.py (VELOCITY_CUTOFF_HZ,
+# VELOCITY_FILTER_ORDER, VELOCITY_MAX_GAP_SEC) - repeated here so this module
+# stays importable on its own, e.g. from plot_proc_velocity_distribution.py.
+DEFAULT_CUTOFF_HZ = 0.5
+DEFAULT_FILTER_ORDER = 2
+DEFAULT_MAX_GAP_SEC = 0.5
 
 # source -> output filename stem. 'velocity_advanced' is the historical name
 # and must not change: existing pkls (and plot_sleep_spectrograms) use it.
@@ -166,103 +188,301 @@ def compute_velocity(proc_file, velocity_threshold=530, method='savgol',
     v_raw_clean = np.where(v_raw > velocity_threshold, 0, v_raw)
     v = np.where(v > velocity_threshold, 0, v)
 
-    # Optional: Apply additional smoothing to velocity itself
-    if method in ['savgol', 'median', 'gaussian'] and len(v) > window_length:
-        # Smooth velocity as well for extra smoothness
-        v_smoothed = savgol_filter(v, window_length=min(window_length, len(v)//2*2+1),
-                                   polyorder=min(polyorder, min(window_length, len(v)//2*2+1)-1))
-        v = v_smoothed
-
+    # Deliberately NOT smoothed again here. Smoothing the speed after the
+    # magnitude has been taken cannot remove the rectified jitter offset, only
+    # its variance - the smoothing that matters already happened on x and y
+    # above. See lowpass_velocity for the method these panels are compared to.
     return t, v, v_raw_clean
 
 
 def compute_velocity_advanced(proc_file, velocity_threshold=530,
-                              window_length=11, polyorder=3):
-    """
-    Advanced velocity computation using Savitzky-Golay differentiation.
-    This directly computes the derivative while smoothing, which is more
-    accurate than smoothing then differencing.
+                              cutoff_hz=DEFAULT_CUTOFF_HZ,
+                              order=DEFAULT_FILTER_ORDER,
+                              max_gap_sec=DEFAULT_MAX_GAP_SEC):
+    """Velocity of the PROC head centre, jitter filtered out of position.
 
-    Parameters
-    ----------
-    proc_file : str
-        Path to the _PROC pickle file containing tracking data
-    velocity_threshold : float, optional
-        Maximum velocity threshold. Values above this are set to NaN (default: 530)
-    window_length : int, optional
-        Length of the filter window (must be odd). Default: 11
-    polyorder : int, optional
-        Order of polynomial for Savitzky-Golay filter. Default: 3
+    On frames where tracking fails the acquisition program repeats the previous
+    frame's centre verbatim, so a dropout is a run of byte-identical positions
+    rather than a gap. Those repeats are not observations - they are marked
+    unobserved here, which lets `lowpass_velocity` interpolate short runs and
+    refuse to invent a speed across long ones. (This is the failure mode the
+    'dlc_body' source avoids entirely; see the module docstring.)
 
-    Returns
-    -------
-    t : numpy.ndarray
-        Time stamps
-    v : numpy.ndarray
-        Velocity values (smoothed)
-    vx : numpy.ndarray
-        X component of velocity
-    vy : numpy.ndarray
-        Y component of velocity
+    Returns (time_stamp, v, vx, vy, info) - see `lowpass_velocity` for `info`.
     """
-    # Load data
     data = pickle.load(open(resolve_proc_file(proc_file), 'rb'))
 
-    x = data['center_x']
-    y = data['center_y']
-    time_stamp = data['time_stamp']
+    x = np.asarray(data['center_x'], dtype=float)
+    y = np.asarray(data['center_y'], dtype=float)
+    time_stamp = np.asarray(data['time_stamp'], dtype=float)
 
-    v_interp, vx_interp, vy_interp = savgol_velocity(
-        x, y, time_stamp, velocity_threshold, window_length, polyorder)
+    repeated = np.zeros(x.size, dtype=bool)
+    repeated[1:] = (x[1:] == x[:-1]) & (y[1:] == y[:-1])
 
-    return time_stamp, v_interp, vx_interp, vy_interp
+    v, vx, vy, info = lowpass_velocity(
+        x, y, time_stamp, observed=~repeated, cutoff_hz=cutoff_hz, order=order,
+        max_gap_sec=max_gap_sec, velocity_threshold=velocity_threshold)
+    info['source'] = 'proc_center'
+    info['n_frozen_frames'] = int(repeated.sum())
+    info['frozen_fraction'] = float(np.mean(repeated))
+
+    return time_stamp, v, vx, vy, info
 
 
-def savgol_velocity(x, y, time_stamp, velocity_threshold=530,
-                    window_length=11, polyorder=3):
-    """Speed and components from an (x, y, t) track, by Savitzky-Golay derivative.
+# =====================================================
+# FILTERING
+# =====================================================
 
-    Shared by both velocity sources (PROC centre and DLC keypoint centroid) so
-    the two differ only in which point is tracked, never in the math.
+def uniform_grid(time_stamp, target_fs=None):
+    """A uniform time grid spanning `time_stamp`, and the rate it samples at.
 
-    Returns (v, vx, vy), all on the given `time_stamp`, with values above
-    `velocity_threshold` removed and interpolated over.
+    The front camera does not run at a fixed frame rate, and every practical
+    filter (Butterworth, Savitzky-Golay, any FIR) is defined on evenly spaced
+    samples. The old code papered over this by handing savgol_filter a single
+    `delta=dt_mean`, which silently assumes the very uniformity that is missing
+    and makes the effective cutoff drift with the frame rate. Resampling once,
+    explicitly, is both honest and exact enough: frame-time jitter is
+    milliseconds against a cutoff of ~2 seconds.
     """
-    x = np.asarray(x, dtype=float)
-    y = np.asarray(y, dtype=float)
+    time_stamp = np.asarray(time_stamp, dtype=float)
+    dt = float(np.median(np.diff(time_stamp)))
+    if not np.isfinite(dt) or dt <= 0:
+        raise ValueError("Frame timestamps are not increasing; cannot resample.")
+    if target_fs is None:
+        target_fs = 1.0 / dt
+    span = time_stamp[-1] - time_stamp[0]
+    grid = time_stamp[0] + np.arange(int(np.floor(span * target_fs)) + 1) / target_fs
+    return grid, float(target_fs), dt
+
+
+def reject_position_jumps(x, y, velocity_threshold=530, median_window=5,
+                          jump_px=None, dt=None):
+    """Mark samples that teleport away from a short median-filtered track.
+
+    Outlier rejection belongs in POSITION, not in speed. A single bad detection
+    makes two large steps - out and back - so a speed threshold flags both and
+    then interpolates the speed across them, smearing one bad frame over its
+    neighbours. Dropping the position sample instead leaves the trajectory
+    continuous for the low-pass to see.
+
+    `jump_px` defaults to the per-frame displacement that `velocity_threshold`
+    allows (threshold x median frame interval), so the two stay consistent.
+
+    Returns (mask of samples to reject, the jump_px actually used).
+    """
+    if jump_px is None:
+        if dt is None:
+            raise ValueError("Pass either jump_px or dt to derive it from.")
+        jump_px = float(velocity_threshold) * float(dt)
+
+    window = int(median_window) | 1  # median_filter wants an odd window
+    residual = np.hypot(x - median_filter(x, size=window),
+                        y - median_filter(y, size=window))
+    return residual > jump_px, float(jump_px)
+
+
+def covered_frames(time_stamp, observed, max_gap_sec):
+    """Frames whose position rests on a real detection near enough in time.
+
+    A frame is covered if it was observed itself, or if it sits inside a gap
+    between observations no longer than `max_gap_sec`. Everything else - long
+    dropouts, and the run-in/run-out before the first and after the last
+    observation - is left uncovered, because interpolating position across a
+    long gap draws a straight line, and a straight line differentiates to a
+    low, entirely plausible speed. Reported as "the animal was still" that is
+    the one error an immobility gate must never make.
+    """
+    observed = np.asarray(observed, dtype=bool)
+    covered = observed.copy()
+    index = np.flatnonzero(observed)
+    if index.size < 2:
+        return covered
+
+    observed_time = time_stamp[index]
+    left = np.searchsorted(observed_time, time_stamp, side='right') - 1
+    inside = (left >= 0) & (left < observed_time.size - 1)
+    gap = np.full(time_stamp.size, np.inf)
+    gap[inside] = (observed_time[np.clip(left + 1, 0, observed_time.size - 1)]
+                   - observed_time[np.clip(left, 0, observed_time.size - 1)])[inside]
+    return covered | (inside & (gap <= max_gap_sec))
+
+
+def lowpass_velocity(x, y, time_stamp, observed=None, *,
+                     cutoff_hz=DEFAULT_CUTOFF_HZ, order=DEFAULT_FILTER_ORDER,
+                     max_gap_sec=DEFAULT_MAX_GAP_SEC, velocity_threshold=530,
+                     jump_px=None, median_window=5, target_fs=None):
+    """Speed and components from an (x, y, t) track, jitter removed in position.
+
+    Shared by both velocity sources so the two differ only in which point is
+    tracked, never in the math. The steps, in the order that matters:
+
+      1. interpolate the unobserved samples so the track is continuous - both
+         the jump detector and the low-pass need an unbroken trajectory
+      2. reject position outliers (`reject_position_jumps`), mark them
+         unobserved too, and interpolate those as well
+      3. resample onto a uniform grid (`uniform_grid`), because the camera's
+         frame rate is not fixed
+      4. zero-phase Butterworth low-pass at `cutoff_hz`, forward+backward
+      5. differentiate ONCE with central differences. No smoothing is needed
+         here: after step 4 the position is band-limited, so the derivative is
+         too. A Savitzky-Golay derivative would smooth a second time, at a
+         window length nobody chose in seconds.
+      6. speed = hypot(vx, vy), taken only now that the jitter is gone
+      7. interpolate back onto the caller's `time_stamp`, and NaN the frames
+         that no observation supports (`covered_frames`)
+
+    `observed` marks which samples are real detections (default: the finite
+    ones). Speed near a long dropout is still influenced by the interpolated
+    stretch beside it; `aggregate_speed`'s coverage fraction is what guards
+    against that at the timescale the speed is actually read on.
+
+    Returns (v, vx, vy, info) on the given `time_stamp`, NaN where uncovered.
+    """
+    x = np.asarray(x, dtype=float).copy()
+    y = np.asarray(y, dtype=float).copy()
     time_stamp = np.asarray(time_stamp, dtype=float)
 
-    # Calculate mean sampling rate
-    dt_mean = np.mean(np.diff(time_stamp))
-
-    # Use Savitzky-Golay filter with derivative mode
-    # This computes the derivative while smoothing in one step
-    vx = savgol_filter(x, window_length=window_length, polyorder=polyorder,
-                       deriv=1, delta=dt_mean)
-    vy = savgol_filter(y, window_length=window_length, polyorder=polyorder,
-                       deriv=1, delta=dt_mean)
-
-    # Calculate velocity magnitude
-    v = np.sqrt(vx**2 + vy**2)
-
-    # Remove outliers: set velocities above threshold to NaN (better than 0)
-    v = np.where(v > velocity_threshold, np.nan, v)
-    vx = np.where(np.abs(vx) > velocity_threshold, np.nan, vx)
-    vy = np.where(np.abs(vy) > velocity_threshold, np.nan, vy)
-
-    # Optionally interpolate over NaN values
-    # This is better than setting to 0
-    mask = ~np.isnan(v)
-    if np.sum(mask) > 0:  # If we have valid values
-        v_interp = np.interp(time_stamp, time_stamp[mask], v[mask])
-        vx_interp = np.interp(time_stamp, time_stamp[mask], vx[mask])
-        vy_interp = np.interp(time_stamp, time_stamp[mask], vy[mask])
+    if observed is None:
+        observed = np.isfinite(x) & np.isfinite(y)
     else:
-        v_interp = v
-        vx_interp = vx
-        vy_interp = vy
+        observed = np.asarray(observed, dtype=bool) & np.isfinite(x) & np.isfinite(y)
+    if not observed.any():
+        raise ValueError("No observed positions to compute velocity from.")
 
-    return v_interp, vx_interp, vy_interp
+    # A continuous track first, so the jump detector sees no NaN holes.
+    x[~observed] = np.nan
+    y[~observed] = np.nan
+    x = fill_gaps(x, time_stamp)
+    y = fill_gaps(y, time_stamp)
+
+    grid, grid_fs, dt = uniform_grid(time_stamp, target_fs)
+    jumps, jump_px = reject_position_jumps(
+        x, y, velocity_threshold, median_window, jump_px, dt)
+    if jumps.any():
+        observed = observed & ~jumps
+        if not observed.any():
+            raise ValueError("Every position sample was rejected as a jump; "
+                             f"jump_px={jump_px:.1f} is too strict.")
+        x[jumps] = np.nan
+        y[jumps] = np.nan
+        x = fill_gaps(x, time_stamp)
+        y = fill_gaps(y, time_stamp)
+
+    x_grid = np.interp(grid, time_stamp, x)
+    y_grid = np.interp(grid, time_stamp, y)
+
+    nyquist = grid_fs / 2.0
+    if cutoff_hz >= nyquist:
+        raise ValueError(f"cutoff_hz={cutoff_hz} is at or above the Nyquist "
+                         f"frequency of the {grid_fs:.1f} fps track ({nyquist:.1f} Hz).")
+    b, a = butter(order, cutoff_hz / nyquist, btype='low')
+    padlen = 3 * max(len(a), len(b))
+    if grid.size <= padlen:
+        raise ValueError(f"Track is only {grid.size} samples - too short to "
+                         f"filter at {cutoff_hz} Hz.")
+    x_grid = filtfilt(b, a, x_grid)
+    y_grid = filtfilt(b, a, y_grid)
+
+    # One differentiation of an already band-limited track.
+    vx_grid = np.gradient(x_grid, 1.0 / grid_fs)
+    vy_grid = np.gradient(y_grid, 1.0 / grid_fs)
+
+    vx = np.interp(time_stamp, grid, vx_grid)
+    vy = np.interp(time_stamp, grid, vy_grid)
+    v = np.hypot(vx, vy)
+
+    # After a 0.5 Hz low-pass this should never fire; kept as a guard, and
+    # counted so a session where it does fire is visible rather than silent.
+    over = v > velocity_threshold
+    covered = covered_frames(time_stamp, observed, max_gap_sec) & ~over
+    for values in (v, vx, vy):
+        values[~covered] = np.nan
+
+    info = {
+        'filter': 'butterworth+filtfilt on resampled position',
+        'cutoff_hz': float(cutoff_hz),
+        'filter_order': int(order),
+        'grid_fs': grid_fs,
+        'frame_interval_median': dt,
+        'frame_interval_iqr': float(np.subtract(*np.percentile(np.diff(time_stamp),
+                                                               [75, 25]))),
+        'velocity_threshold': float(velocity_threshold),
+        'jump_px': jump_px,
+        'median_window': int(median_window),
+        'max_gap_sec': float(max_gap_sec),
+        'n_jump_outliers': int(jumps.sum()),
+        'n_over_threshold': int(over.sum()),
+        'covered_mask': covered,
+        'n_uncovered': int((~covered).sum()),
+        'uncovered_fraction': float(np.mean(~covered)),
+    }
+    return v, vx, vy, info
+
+
+# =====================================================
+# AGGREGATION ONTO THE ANALYSIS GRID
+# =====================================================
+
+def aggregate_speed(time_stamp, speed, target_times, window_sec,
+                    min_coverage=0.5, with_median=False):
+    """Mean speed in a centred `window_sec` window at each of `target_times`.
+
+    This is the ONLY averaging applied to the speed after `lowpass_velocity`:
+    one reduction, whose support is chosen to match the spectrogram window the
+    speed will be read against (10 s), so the two signals a bout is scored from
+    have the same bandwidth. The pipeline used to stack a per-epoch mean and a
+    multi-epoch boxcar on top of the in-filter smoothing, giving a total
+    support that was never written down anywhere and that changed with
+    epoch_sec.
+
+    Windows overlap when the step is shorter than the window - that is the
+    point, and it is exactly what the spectrogram's own 10 s / 1 s grid does.
+
+    A window is NaN unless it holds at least `min_coverage` of the frames its
+    duration implies, so "we could not see the animal" never reads as "the
+    animal was still". Returns a dict with mean / median / n_frames / coverage.
+    """
+    time_stamp = np.asarray(time_stamp, dtype=float)
+    speed = np.asarray(speed, dtype=float)
+    target_times = np.asarray(target_times, dtype=float)
+
+    finite = np.isfinite(speed)
+    valid_time = time_stamp[finite]
+    valid_speed = speed[finite]
+
+    half = float(window_sec) / 2.0
+    lo = np.searchsorted(valid_time, target_times - half, side='left')
+    hi = np.searchsorted(valid_time, target_times + half, side='right')
+
+    cumulative = np.concatenate([[0.0], np.cumsum(valid_speed)])
+    n_frames = (hi - lo).astype(float)
+    with np.errstate(invalid='ignore', divide='ignore'):
+        mean = (cumulative[hi] - cumulative[lo]) / n_frames
+    mean[n_frames == 0] = np.nan
+
+    dt = float(np.median(np.diff(time_stamp))) if time_stamp.size > 1 else np.nan
+    expected = float(window_sec) / dt if dt > 0 else np.nan
+    coverage = n_frames / expected if expected > 0 else np.full(n_frames.shape, np.nan)
+    mean[coverage < min_coverage] = np.nan
+
+    median = None
+    if with_median:
+        # O(window) per target, so only worth it on a coarse grid (epochs),
+        # not on the frame grid the plots use.
+        median = np.full(target_times.size, np.nan)
+        for i, (start, stop) in enumerate(zip(lo, hi)):
+            if stop > start and coverage[i] >= min_coverage:
+                median[i] = np.median(valid_speed[start:stop])
+
+    return {
+        'mean': mean,
+        'median': median,
+        'n_frames': n_frames,
+        'coverage': coverage,
+        'window_sec': float(window_sec),
+        'min_coverage': float(min_coverage),
+        'expected_frames_per_window': expected,
+    }
 
 
 # =====================================================
@@ -418,8 +638,11 @@ def fill_gaps(values, time_stamp):
 
 def compute_velocity_from_keypoints(proc_file, keypoints=BODY_KEYPOINTS,
                                     likelihood_threshold=DEFAULT_LIKELIHOOD_THRESHOLD,
-                                    velocity_threshold=530, window_length=11,
-                                    polyorder=3, weighted=True):
+                                    velocity_threshold=530,
+                                    cutoff_hz=DEFAULT_CUTOFF_HZ,
+                                    order=DEFAULT_FILTER_ORDER,
+                                    max_gap_sec=DEFAULT_MAX_GAP_SEC,
+                                    weighted=True):
     """Velocity of a DLC keypoint centroid, on the PROC time base.
 
     Parameters mirror compute_velocity_advanced; `keypoints` chooses which
@@ -448,30 +671,30 @@ def compute_velocity_from_keypoints(proc_file, keypoints=BODY_KEYPOINTS,
     n_used = n_used_all[idx_dlc]
     dropped = ~np.isfinite(x)
 
-    x = fill_gaps(x, time_stamp)
-    y = fill_gaps(y, time_stamp)
-    v, vx, vy = savgol_velocity(x, y, time_stamp, velocity_threshold,
-                                window_length, polyorder)
+    # Low-confidence frames are handed over as "not observed" rather than
+    # pre-filled: lowpass_velocity interpolates the short runs itself and
+    # refuses to invent a speed across the long ones.
+    v, vx, vy, filter_info = lowpass_velocity(
+        x, y, time_stamp, observed=~dropped, cutoff_hz=cutoff_hz, order=order,
+        max_gap_sec=max_gap_sec, velocity_threshold=velocity_threshold)
 
     info = {
         'source': 'dlc_body',
         'keypoints': list(keypoints),
         'likelihood_threshold': float(likelihood_threshold),
         'likelihood_weighted': bool(weighted),
-        'velocity_threshold': float(velocity_threshold),
-        'window_length': int(window_length),
-        'polyorder': int(polyorder),
         'alignment': how,
         'n_frames': int(time_stamp.size),
         'n_proc_frames': int(np.asarray(proc_data['frame_time']).size),
         'n_low_confidence_frames': int(dropped.sum()),
         'low_confidence_fraction': float(np.mean(dropped)),
         'mean_keypoints_used': float(np.mean(n_used)),
-        'centroid_x': x,
-        'centroid_y': y,
+        'centroid_x': fill_gaps(x, time_stamp),
+        'centroid_y': fill_gaps(y, time_stamp),
         'n_keypoints_used': n_used,
         'low_confidence_mask': dropped,
         'source_dlc_file': str(dlc_file),
+        **filter_info,
     }
     return time_stamp, v, vx, vy, info
 
@@ -503,7 +726,10 @@ def stamp_figure(fig, text):
 
 def generate_velocity_outputs(proc_file, source='proc_center', overwrite=False,
                               show_plots=False, keypoints=BODY_KEYPOINTS,
-                              likelihood_threshold=DEFAULT_LIKELIHOOD_THRESHOLD):
+                              likelihood_threshold=DEFAULT_LIKELIHOOD_THRESHOLD,
+                              cutoff_hz=DEFAULT_CUTOFF_HZ,
+                              order=DEFAULT_FILTER_ORDER,
+                              max_gap_sec=DEFAULT_MAX_GAP_SEC):
     """Generate the velocity pickle and diagnostic plots for one PROC file.
 
     `source` selects which point is tracked - 'proc_center' (the PROC file's
@@ -537,7 +763,8 @@ def generate_velocity_outputs(proc_file, source='proc_center', overwrite=False,
     if source == 'dlc_body':
         return _generate_keypoint_velocity(
             proc_file, session_name, velocity_output_file, figures_path,
-            keypoints, likelihood_threshold, show_plots)
+            keypoints, likelihood_threshold, show_plots,
+            cutoff_hz, order, max_gap_sec)
 
     # Compare different methods
     fig, axes = plt.subplots(2, 2, figsize=(15, 10))
@@ -569,19 +796,28 @@ def generate_velocity_outputs(proc_file, source='proc_center', overwrite=False,
         plt.show()
     plt.close(fig)
 
-    # Demonstrate advanced method
-    print("\nTesting advanced method...")
-    t_adv, v_adv, vx_adv, vy_adv = compute_velocity_advanced(
-        proc_file, window_length=11)
+    print("\nFiltering position and differentiating...")
+    t_adv, v_adv, vx_adv, vy_adv, info = compute_velocity_advanced(
+        proc_file, cutoff_hz=cutoff_hz, order=order, max_gap_sec=max_gap_sec)
+    print(f"  Camera: {1 / info['frame_interval_median']:.1f} fps median "
+          f"(frame interval IQR {info['frame_interval_iqr'] * 1000:.1f} ms), "
+          f"resampled to {info['grid_fs']:.1f} Hz for filtering")
+    print(f"  Frozen (repeated) frames: {info['n_frozen_frames']:,} "
+          f"({info['frozen_fraction']:.1%})")
+    print(f"  Position jumps rejected: {info['n_jump_outliers']:,} "
+          f"(>{info['jump_px']:.1f} px from the local median)")
+    print(f"  Frames left NaN (no observation within "
+          f"{info['max_gap_sec']:g}s): {info['n_uncovered']:,} "
+          f"({info['uncovered_fraction']:.1%})")
     # save data to pickle
     velocity_data = {
         'time_stamp': t_adv,
         'velocity': v_adv,
         'velocity_x': vx_adv,
         'velocity_y': vy_adv,
-        'source': 'proc_center',
         'source_proc_file': str(proc_file),
         'source_proc_name': proc_file.name,
+        **info,
     }
     with open(velocity_output_file, 'wb') as f:
         pickle.dump(velocity_data, f)
@@ -591,7 +827,7 @@ def generate_velocity_outputs(proc_file, source='proc_center', overwrite=False,
 
     axes[0].plot(t_adv, v_adv, linewidth=1)
     axes[0].set_ylabel('Speed')
-    axes[0].set_title('Advanced Method: Savitzky-Golay Derivative')
+    axes[0].set_title(f"Position low-passed at {cutoff_hz:g} Hz, then differentiated")
     axes[0].grid(True, alpha=0.3)
 
     axes[1].plot(t_adv, vx_adv, label='Vx', alpha=0.7)
@@ -603,7 +839,11 @@ def generate_velocity_outputs(proc_file, source='proc_center', overwrite=False,
 
     plt.tight_layout()
     stamp_figure(fig, f"source=proc_center (PROC center_x/center_y)  |  "
-                      f"savgol deriv window=11 polyorder=3 threshold=530  |  "
+                      f"butterworth order={order} cutoff={cutoff_hz:g}Hz on position "
+                      f"resampled to {info['grid_fs']:.1f}Hz, then d/dt  |  "
+                      f"jump>{info['jump_px']:.1f}px rejected, max_gap="
+                      f"{max_gap_sec:g}s  |  {info['frozen_fraction']:.1%} frozen, "
+                      f"{info['uncovered_fraction']:.1%} left NaN  |  "
                       f"proc={proc_file}")
     advanced_fig_file = figures_path / f'{session_name}_velocity_advanced.png'
     plt.savefig(advanced_fig_file, dpi=150)
@@ -616,19 +856,30 @@ def generate_velocity_outputs(proc_file, source='proc_center', overwrite=False,
 
 def _generate_keypoint_velocity(proc_file, session_name, velocity_output_file,
                                 figures_path, keypoints, likelihood_threshold,
-                                show_plots):
+                                show_plots, cutoff_hz=DEFAULT_CUTOFF_HZ,
+                                order=DEFAULT_FILTER_ORDER,
+                                max_gap_sec=DEFAULT_MAX_GAP_SEC):
     """The 'dlc_body' branch of generate_velocity_outputs."""
     print(f"\nComputing velocity from DLC keypoints: {', '.join(keypoints)}")
     t, v, vx, vy, info = compute_velocity_from_keypoints(
-        proc_file, keypoints=keypoints, likelihood_threshold=likelihood_threshold)
+        proc_file, keypoints=keypoints, likelihood_threshold=likelihood_threshold,
+        cutoff_hz=cutoff_hz, order=order, max_gap_sec=max_gap_sec)
 
     print(f"  DLC file: {info['source_dlc_file']}")
     print(f"  Alignment: {info['alignment']} "
           f"({info['n_frames']} of {info['n_proc_frames']} PROC frames)")
     print(f"  Keypoints above likelihood {likelihood_threshold}: "
           f"{info['mean_keypoints_used']:.2f} of {len(keypoints)} per frame on average")
-    print(f"  Frames with no confident keypoint (interpolated): "
+    print(f"  Frames with no confident keypoint: "
           f"{info['n_low_confidence_frames']:,} ({info['low_confidence_fraction']:.1%})")
+    print(f"  Camera: {1 / info['frame_interval_median']:.1f} fps median "
+          f"(frame interval IQR {info['frame_interval_iqr'] * 1000:.1f} ms), "
+          f"resampled to {info['grid_fs']:.1f} Hz for filtering")
+    print(f"  Position jumps rejected: {info['n_jump_outliers']:,} "
+          f"(>{info['jump_px']:.1f} px from the local median)")
+    print(f"  Frames left NaN (no confident keypoint within "
+          f"{info['max_gap_sec']:g}s): {info['n_uncovered']:,} "
+          f"({info['uncovered_fraction']:.1%})")
     print(f"  Speed: median {np.nanmedian(v):.2f}, p95 {np.nanpercentile(v, 95):.2f}, "
           f"max {np.nanmax(v):.2f} (position units/s)")
 
@@ -649,8 +900,8 @@ def _generate_keypoint_velocity(proc_file, session_name, velocity_output_file,
 
     axes[0].plot(t, v, linewidth=1)
     axes[0].set_ylabel('Speed')
-    axes[0].set_title(f"Keypoint centroid ({', '.join(keypoints)}) - "
-                      f"Savitzky-Golay derivative")
+    axes[0].set_title(f"Keypoint centroid ({', '.join(keypoints)}) - position "
+                      f"low-passed at {cutoff_hz:g} Hz, then differentiated")
     axes[0].grid(True, alpha=0.3)
 
     axes[1].plot(t, vx, label='Vx', alpha=0.7)
@@ -659,11 +910,14 @@ def _generate_keypoint_velocity(proc_file, session_name, velocity_output_file,
     axes[1].legend()
     axes[1].grid(True, alpha=0.3)
 
-    # Tracking quality: how many keypoints actually carried each frame, with
-    # the interpolated (no confident keypoint) frames shaded.
+    # Tracking quality: how many keypoints actually carried each frame. Grey =
+    # no confident keypoint (interpolated); red = long enough that the speed
+    # was left NaN rather than interpolated across.
     axes[2].plot(t, info['n_keypoints_used'], linewidth=0.5, color='tab:green')
     for start, stop in _mask_spans(t, info['low_confidence_mask']):
         axes[2].axvspan(start, stop, color='lightgray', alpha=0.6, lw=0)
+    for start, stop in _mask_spans(t, ~info['covered_mask']):
+        axes[2].axvspan(start, stop, color='tab:red', alpha=0.35, lw=0)
     axes[2].set_ylabel(f'Keypoints used\n(likelihood >= {likelihood_threshold})')
     axes[2].set_ylim(-0.2, len(keypoints) + 0.2)
     axes[2].set_xlabel('Time (s)')
@@ -672,10 +926,12 @@ def _generate_keypoint_velocity(proc_file, session_name, velocity_output_file,
     plt.tight_layout()
     stamp_figure(fig, f"source=dlc_body keypoints={','.join(keypoints)} "
                       f"likelihood>={likelihood_threshold} weighted="
-                      f"{info['likelihood_weighted']}  |  savgol deriv "
-                      f"window={info['window_length']} polyorder={info['polyorder']} "
-                      f"threshold={info['velocity_threshold']:g}  |  "
-                      f"{info['low_confidence_fraction']:.1%} frames interpolated  |  "
+                      f"{info['likelihood_weighted']}  |  butterworth order={order} "
+                      f"cutoff={cutoff_hz:g}Hz on position resampled to "
+                      f"{info['grid_fs']:.1f}Hz, then d/dt  |  "
+                      f"jump>{info['jump_px']:.1f}px rejected, max_gap={max_gap_sec:g}s  |  "
+                      f"{info['low_confidence_fraction']:.1%} low-confidence, "
+                      f"{info['uncovered_fraction']:.1%} left NaN  |  "
                       f"dlc={info['source_dlc_file']}")
     figure_file = figures_path / f'{session_name}_velocity_body.png'
     plt.savefig(figure_file, dpi=150)
@@ -708,8 +964,11 @@ if __name__ == "__main__":
 
     from sleep_pipeline_config import (
         ACTIVE_DATE,
+        VELOCITY_CUTOFF_HZ,
+        VELOCITY_FILTER_ORDER,
         VELOCITY_KEYPOINTS,
         VELOCITY_LIKELIHOOD_THRESHOLD,
+        VELOCITY_MAX_GAP_SEC,
         VELOCITY_SOURCE,
         active_sleep_sessions,
         sleep_sessions,
@@ -730,6 +989,17 @@ if __name__ == "__main__":
     parser.add_argument(
         "--likelihood-threshold", type=float, default=VELOCITY_LIKELIHOOD_THRESHOLD,
         help="Per-frame DLC likelihood a keypoint must reach to be averaged in.")
+    parser.add_argument(
+        "--cutoff-hz", type=float, default=VELOCITY_CUTOFF_HZ,
+        help="Position low-pass cutoff in Hz, applied before differentiating. "
+             f"Default: {VELOCITY_CUTOFF_HZ} Hz.")
+    parser.add_argument(
+        "--filter-order", type=int, default=VELOCITY_FILTER_ORDER,
+        help="Butterworth order (run forward+backward, so zero phase).")
+    parser.add_argument(
+        "--max-gap-sec", type=float, default=VELOCITY_MAX_GAP_SEC,
+        help="Frames further than this from a real detection are left NaN "
+             "instead of interpolated.")
     parser.add_argument(
         "--overwrite", action="store_true",
         help="Recompute even when the velocity pickle already exists "
@@ -755,6 +1025,9 @@ if __name__ == "__main__":
                 overwrite=args.overwrite,
                 keypoints=tuple(args.keypoints),
                 likelihood_threshold=args.likelihood_threshold,
+                cutoff_hz=args.cutoff_hz,
+                order=args.filter_order,
+                max_gap_sec=args.max_gap_sec,
             )
         except (FileNotFoundError, KeyError, ValueError) as exc:
             print(f"WARNING: {exc}")

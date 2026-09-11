@@ -1063,6 +1063,10 @@ def parse_args():
     parser.add_argument("--min-dio-state-duration-sec", type=float, default=None)
     parser.add_argument("--disable-dio-cleaning", action="store_true")
     parser.add_argument("--force-save-sync", action="store_true")
+    parser.add_argument(
+        "--overwrite", action="store_true",
+        help="Recompute even when sync_times<suffix>.pkl already exists "
+             "(default: existing outputs are kept and the session is skipped).")
     return parser.parse_args()
 
 
@@ -1232,6 +1236,16 @@ def main():
 
     saved = []
     for job in jobs:
+        # Checked before any of the (slow) edge-matching work below - an
+        # already-synced session should never redo it just to overwrite the
+        # same pickle.
+        existing = resolve_existing_file(job["output_path"])
+        if not args.overwrite and existing.exists():
+            print(f"\n{job['label']}: {existing.name} already exists - "
+                  f"skipping ({existing})")
+            saved.append(job)
+            continue
+
         print("\n" + "#" * 70)
         print(f"SLEEP SESSION: {job['label']}")
         print("#" * 70)

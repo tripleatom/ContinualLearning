@@ -17,7 +17,7 @@ import argparse
 import sys
 warnings.filterwarnings('ignore')
 
-from grating_utils import resolve_data_path
+from grating_utils import format_grating_value, format_grating_values, resolve_data_path
 
 
 # =============================================================================
@@ -64,7 +64,7 @@ def calculate_tuning_curves(neural_data, time_window=(0.07, 0.16)):
     
     print(f"\nCalculating tuning curves:")
     print(f"  Units: {len(unit_ids)}")
-    print(f"  Orientations: {unique_orientations}")
+    print(f"  Orientations: {format_grating_values(unique_orientations)}")
     print(f"  Time window: {window_start:.3f}-{window_end:.3f}s ({window_duration:.3f}s)")
     
     unit_tuning_data = {}
@@ -230,7 +230,7 @@ def plot_single_tuning_curve(unit_id, tuning_data, unit_info=None,
     ax1.set_ylabel('Firing Rate (Hz)', fontsize=22, fontweight='bold')
     ax1.set_title('Tuning Curve', fontsize=24, fontweight='bold', pad=12)
     ax1.set_xticks(orientations)
-    ax1.set_xticklabels([f'{o:g}' for o in orientations],
+    ax1.set_xticklabels([format_grating_value(o) for o in orientations],
                         rotation=45, ha='right')
     ax1.tick_params(axis='both', labelsize=20, width=2.5, length=9)
     for spine in ('left', 'bottom'):
@@ -270,7 +270,7 @@ def plot_single_tuning_curve(unit_id, tuning_data, unit_info=None,
     for k, ori in enumerate(orientations):
         psth_rate = gaussian_filter1d(np.array(tuning_data['psth_per_ori'][ori]), sigma=1.5)
         ax3.plot(psth_t, psth_rate, color=psth_colors[k],
-                 linewidth=3.5, label=f'{ori}°', alpha=0.9)
+                 linewidth=3.5, label=f'{format_grating_value(ori)}°', alpha=0.9)
     ax3.axvline(0, color='black', linewidth=3.0, linestyle='--', label='onset')
     ax3.axvspan(time_window[0], time_window[1], alpha=0.15, color='gray',
                 label='analysis\nwindow')
@@ -342,7 +342,7 @@ def plot_single_tuning_curve(unit_id, tuning_data, unit_info=None,
     stats_text = (
         f"TUNING STATISTICS\n"
         f"OSI:        {tuning_data['osi']:.3f}\n"
-        f"Preferred:  {tuning_data['preferred_orientation_deg']:.1f}°\n"
+        f"Preferred:  {tuning_data['preferred_orientation_deg']:.2f}°\n"
         f"Mod. Index: {tuning_data['modulation_index']:.3f}\n"
         f"Max FR:     {tuning_data['max_rate']:.2f} Hz\n"
         f"Min FR:     {tuning_data['min_rate']:.2f} Hz\n"
@@ -499,7 +499,7 @@ def generate_tuning_curves(data_path, time_window=(0.07, 0.16),
     output_folder.mkdir(parents=True, exist_ok=True)
     print(f"\nSaving tuning curves to: {output_folder}")
 
-    # Generate individual plots + per-unit pkl
+    # Generate individual plots
     print(f"\nGenerating individual tuning curve plots...")
     unit_ids = sorted(unit_tuning_data.keys())
 
@@ -513,16 +513,6 @@ def generate_tuning_curves(data_path, time_window=(0.07, 0.16),
                                  unit_info=unit_info,
                                  time_window=time_window,
                                  save_path=save_path)
-
-        # Per-unit pkl: tuning data + unit identity/waveform/ACG
-        pkl_path = output_folder / f"{clean_id}_tuning.pkl"
-        unit_pkg = {
-            'unit_id': unit_id,
-            'tuning': unit_tuning_data[unit_id],
-            'unit_info': unit_info,
-        }
-        with open(pkl_path, 'wb') as f:
-            pickle.dump(unit_pkg, f, protocol=pickle.HIGHEST_PROTOCOL)
 
         if i % 10 == 0:
             print(f"  Processed {i}/{len(unit_ids)} units...")

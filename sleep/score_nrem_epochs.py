@@ -14,7 +14,7 @@ dropped; bouts >= consolidated_sec are the "fully asleep" windows handed to the
 UP/DOWN stage (score_cortical_up_down_states.py).
 
 Outputs (in low_freq/sleep_segmentation/):
-  {session}_sleep_periods.pkl   — nrem_mask_lfp, bouts, consolidated windows, scores
+  {session}_sleep_periods.pkl   — nrem_mask, bouts, consolidated windows, scores
   {session}_sleep_periods.png   — Buzsaki-style figure with colored state bar
 """
 from pathlib import Path
@@ -28,6 +28,8 @@ import matplotlib.pyplot as plt
 from sleep_pipeline_config import (rec_folder, session_name, shanks, plot_params,
                                    artifact_params, sleep_detect_params as P,
                                    resolve_existing_file, resolve_output_folder)
+from band_powers_io import (band_time, band_fs, load_spectrograms,
+                            epoch_average, epoch_times)
 from sleep_artifact_detection import (broadband_level, robust_z,
                                       detect_broadband_artifacts, mask_to_spans)
 
@@ -47,36 +49,35 @@ with open(bp_file, "rb") as f:
     all_data = pickle.load(f)
 
 
-def epoch_mean(sig, ep_samples):
-    """Average a 1D signal into non-overlapping epochs."""
-    n = len(sig) // ep_samples * ep_samples
-    return sig[:n].reshape(-1, ep_samples).mean(axis=1)
-
-
 # ── aggregate slow-wave (PC1) + delta/sigma + movement across shanks/channels ──
-pc1_oriented_list = []      # per channel, on lfp_time, oriented so high=NREM
+pc1_oriented_list = []      # per channel, on band_t, oriented so high=NREM
 delta_list, sigma_list, gamma_list = [], [], []
 bb_specbase_list = []       # broadband movement level, on spectrogram time base
 mean_spec_list = []         # mean log-power spectrogram for display
 
-lfp_time = None
+# `band_t` is the grid the band powers and PC1 are stored on: the spectrogram
+# grid for a compact file, the 500 Hz LFP grid for one written before that
+# change. Everything below works off those timestamps, so both layouts score
+# identically. `band_rate` is the rate of THAT grid - not sd["sampling_rate"],
+# which stays the 500 Hz rate the envelopes were computed at.
+band_t = None
 spec_times = None
 freqs = None
-fs = None
+band_rate = None
 
 for ish in use_shanks:
     if ish not in all_data["shanks_data"]:
         print(f"  [skip] shank {ish} not in data")
         continue
     sd = all_data["shanks_data"][ish]
-    if lfp_time is None:
-        lfp_time = sd["lfp_time"]
+    if band_t is None:
+        band_t = band_time(sd)
         spec_times = sd["spectrogram_times"]
         freqs = sd["spectrogram_freqs"]
-        fs = sd["sampling_rate"]
+        band_rate = band_fs(sd)
     ch_ids = sd["channel_ids"]
-    pc1 = sd["pc1_spectrogram"]                 # (n_ch, n_samples) on lfp_time
-    spec = sd["spectrograms"]                   # (n_ch, n_freqs, n_times)
+    pc1 = sd["pc1_spectrogram"]                 # (n_ch, n_samples) on band_t
+    spec = load_spectrograms(sd, bp_file, ish)  # (n_ch, n_freqs, n_times)
 
     # orient each channel's PC1 by its correlation with delta, then collect
     for ci, ch in enumerate(ch_ids):
@@ -100,43 +101,44 @@ for ish in use_shanks:
 mean_spec = np.mean(np.stack([m[:, :len(spec_times)] for m in mean_spec_list]),
                     axis=0)                      # (n_freqs, n_times)
 
-# align channel signals to a common length on lfp_time
-n_lfp = min(min(len(a) for a in pc1_oriented_list), len(lfp_time))
-lfp_time = lfp_time[:n_lfp]
-pc1_mean = np.mean([a[:n_lfp] for a in pc1_oriented_list], axis=0)
-delta_mean = np.mean([a[:n_lfp] for a in delta_list], axis=0)
-sigma_mean = np.mean([a[:n_lfp] for a in sigma_list], axis=0)
-gamma_mean = np.mean([a[:n_lfp] for a in gamma_list], axis=0)
+# align channel signals to a common length on band_t
+n_band = min(min(len(a) for a in pc1_oriented_list), len(band_t))
+band_t = band_t[:n_band]
+pc1_mean = np.mean([a[:n_band] for a in pc1_oriented_list], axis=0)
+delta_mean = np.mean([a[:n_band] for a in delta_list], axis=0)
+sigma_mean = np.mean([a[:n_band] for a in sigma_list], axis=0)
+gamma_mean = np.mean([a[:n_band] for a in gamma_list], axis=0)
 _ = pc1_mean  # PC1 retained in output for reference; tilt index drives scoring
 
 # spectral-tilt slow-wave index: z(log delta) - z(log gamma).
 # High in NREM (delta up, gamma down); low during movement/wake (gamma up).
 # This is immune to the delta-contamination that broke a broadband proxy.
-delta_z_lfp = robust_z(np.log(delta_mean + 1e-12))
-gamma_z_lfp = robust_z(np.log(gamma_mean + 1e-12))
-sw_lfp = delta_z_lfp - gamma_z_lfp
+delta_z_band = robust_z(np.log(delta_mean + 1e-12))
+gamma_z_band = robust_z(np.log(gamma_mean + 1e-12))
+sw_band = delta_z_band - gamma_z_band
 
-# artifact mask on spectrogram base, mapped to lfp_time
+# artifact mask on spectrogram base, mapped onto band_t
 if P["use_artifact_mask"]:
     art_mask_spec, _ = detect_broadband_artifacts(
         mean_spec, freqs, spec_times[:mean_spec.shape[1]],
         n_mad=artifact_params["n_mad"], dilate_sec=artifact_params["dilate_sec"],
         fmax=artifact_params["fmax"])
-    art_mask_lfp = np.interp(lfp_time, spec_times[:len(art_mask_spec)],
-                             art_mask_spec.astype(float)) > 0.5
+    art_mask_band = np.interp(band_t, spec_times[:len(art_mask_spec)],
+                              art_mask_spec.astype(float)) > 0.5
 else:
     art_mask_spec = np.zeros(mean_spec.shape[1], bool)
-    art_mask_lfp = np.zeros(n_lfp, bool)
+    art_mask_band = np.zeros(n_band, bool)
 
 # ── epoch the signals and score NREM ──────────────────────────────────────────
+# Epochs come from the timestamps, not from a sample count: at 0.512 s bins a
+# 4 s epoch is 7.8125 samples, and rounding that to 8 would stretch every epoch
+# by 2.4% - minutes of drift over a session.
 ep_sec = P["epoch_sec"]
-ep_samp = int(ep_sec * fs)
-n_ep = n_lfp // ep_samp
-ep_t = (np.arange(n_ep) + 0.5) * ep_sec + lfp_time[0]
-
-sw_ep = epoch_mean(sw_lfp, ep_samp)[:n_ep]          # delta-gamma tilt (SD units)
-move_ep = epoch_mean(gamma_z_lfp, ep_samp)[:n_ep]   # high-freq (gamma) proxy
-art_ep = epoch_mean(art_mask_lfp.astype(float), ep_samp)[:n_ep] > 0.5
+sw_ep = epoch_average(sw_band, band_t, ep_sec)          # delta-gamma tilt (SD units)
+move_ep = epoch_average(gamma_z_band, band_t, ep_sec)   # high-freq (gamma) proxy
+art_ep = epoch_average(art_mask_band.astype(float), band_t, ep_sec) > 0.5
+n_ep = sw_ep.size
+ep_t = epoch_times(ep_sec, n_ep)
 
 # light smoothing
 k = max(1, int(P["smooth_epochs"]))
@@ -192,15 +194,14 @@ consolidated = [iv for iv in bout_intervals
                 if (iv[1] - iv[0]) >= P["consolidated_sec"]]
 fully_asleep = max(consolidated, key=lambda iv: iv[1] - iv[0], default=None)
 
-# NREM mask on full LFP time base
-nrem_mask_lfp = np.zeros(n_lfp, bool)
-for b in merged:
-    s = b[0] * ep_samp
-    e = min(b[1] * ep_samp, n_lfp)
-    nrem_mask_lfp[s:e] = True
+# NREM mask on the band-power time base, built from the bout times rather than
+# an epoch-to-sample count, so it holds at whatever rate that grid is.
+nrem_mask_band = np.zeros(n_band, bool)
+for start, end in bout_intervals:
+    nrem_mask_band |= (band_t >= start) & (band_t < end)
 
 # ── report ────────────────────────────────────────────────────────────────────
-total_nrem_s = nrem_mask_lfp.sum() / fs
+total_nrem_s = float(nrem_mask_band.sum()) / band_rate
 print(f"\nEpochs: {n_ep} x {ep_sec}s   NREM epochs: {nrem_ep_clean.sum()}")
 print(f"NREM bouts (>= {P['min_bout_sec']}s): {len(bout_intervals)}")
 print(f"Consolidated windows (>= {P['consolidated_sec']}s): {len(consolidated)}")
@@ -218,13 +219,17 @@ with open(out_pkl, "wb") as f:
     pickle.dump({
         "session": session_name,
         "shanks": list(use_shanks),
-        "lfp_time": lfp_time,
-        "fs": fs,
+        # The time base the scoring ran on, named for what it is: the band-power
+        # grid (~2 Hz for a compact band-power file, 500 Hz for a legacy one).
+        # The old "lfp_time"/"fs"/"nrem_mask_lfp" keys implied the LFP rate,
+        # which is no longer what these are sampled at.
+        "band_time": band_t,
+        "band_fs": band_rate,
         "epoch_sec": ep_sec,
         "epoch_times": ep_t,
         "sw_index": sw_ep, "gamma_z": move_ep,
         "nrem_epoch_mask": nrem_ep_clean,
-        "nrem_mask_lfp": nrem_mask_lfp,
+        "nrem_mask": nrem_mask_band,
         "bout_intervals_s": bout_intervals,
         "consolidated_windows_s": consolidated,
         "fully_asleep_window_s": fully_asleep,
@@ -233,7 +238,7 @@ with open(out_pkl, "wb") as f:
 print(f"Saved → {out_pkl}")
 
 # ── figure: Buzsaki-style with state bar on top ───────────────────────────────
-t0, t1 = lfp_time[0], lfp_time[-1]
+t0, t1 = band_t[0], band_t[-1]
 art_spans = mask_to_spans(spec_times[:len(art_mask_spec)], art_mask_spec)
 
 # display spectrogram: dB power, robust z PER FREQUENCY over non-artifact bins
@@ -290,8 +295,8 @@ def trace_panel(gs_idx, x, y, ylabel, color, thresh=None):
 
 trace_panel(2, ep_t, sw_ep, "Slow-wave\nδ−γ tilt", "steelblue", P["nrem_sw_z_thresh"])
 trace_panel(3, ep_t, move_ep, "Gamma\n40-100Hz (z)", "goldenrod", P.get("move_z_thresh"))
-ax5 = trace_panel(4, lfp_time, robust_z(delta_mean), "Delta\n0.5-4 Hz", "k")
-ax6 = trace_panel(5, lfp_time, robust_z(sigma_mean), "Sigma\n9-25 Hz", "k")
+ax5 = trace_panel(4, band_t, robust_z(delta_mean), "Delta\n0.5-4 Hz", "k")
+ax6 = trace_panel(5, band_t, robust_z(sigma_mean), "Sigma\n9-25 Hz", "k")
 ax6.set_xlabel("Time (s)"); ax6.set_xticklabels(
     [f"{int(t)}" for t in ax6.get_xticks()])
 

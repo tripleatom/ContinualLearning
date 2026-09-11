@@ -3,7 +3,12 @@ from pathlib import Path
 
 ANIMAL_ID = "CnL46"       # used for experiment data paths and CSV log
 SORTOUT_ANIMAL_ID = "CnL46"  # used for sortout folder (may differ from ANIMAL_ID)
-EXPERIMENT_DATE = "260726"
+EXPERIMENT_DATE = "260729"
+
+# DIO timestamp frequency in Hz, shared by all sessions of each animal.
+# Animals without an entry retain the historical 30 kHz default.
+FS_BY_ANIMAL = {'GC-v2-2': 31250, 'CnL46': 30000}
+FS = FS_BY_ANIMAL.get(ANIMAL_ID, 30000)
 
 # Which lab drive holds this session's sortout: "xieluanlabs" or "xieluanlabs2".
 SORTOUT_DRIVE = "xieluanlabs2"
@@ -28,7 +33,7 @@ SORTOUT_FOLDER = _sortout_root / SORTOUT_ANIMAL_ID / f"{SORTOUT_ANIMAL_ID}_20{EX
 # Sample index in the concatenated sorter recording where the passive session starts.
 # Set to 0 if the sorter ran only on the passive rec_folders (most common).
 # Set to the actual offset if the sorter included recordings before the passive session.
-PASSIVE_START = 62734834
+PASSIVE_START = 0
 # Sample index where the passive session ends (None = use last spike in sorter output).
 PASSIVE_END   = None
 

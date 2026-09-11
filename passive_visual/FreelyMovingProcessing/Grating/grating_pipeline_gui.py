@@ -65,6 +65,7 @@ CONFIG_SCALARS = (
     "PASSIVE_START",
     "PASSIVE_END",
     "PASSIVE_WINDOWS",
+    "FS_BY_ANIMAL",
 )
 
 
@@ -167,6 +168,25 @@ def write_config_values(values, backup=True):
         if name not in CONFIG_SCALARS:
             raise KeyError(f"{name} is not a GUI-managed config scalar")
         new_text = _literal_text(name, value)
+        if name == "FS_BY_ANIMAL":
+            # Use the AST span so hand-formatted multiline dictionaries work too.
+            assignment = next((n for n in ast.parse(text).body
+                               if isinstance(n, ast.Assign) and any(
+                                   isinstance(t, ast.Name) and t.id == name
+                                   for t in n.targets)), None)
+            if assignment is None:
+                raise ValueError(f"No assignment for {name} found in {CONFIG_PATH.name}")
+            node = assignment.value
+            old_text = ast.get_source_segment(text, node)
+            if _same_value(old_text, new_text):
+                continue
+            lines = text.splitlines(keepends=True)
+            start = sum(len(s.encode('utf-8')) for s in lines[:node.lineno - 1]) + node.col_offset
+            end = sum(len(s.encode('utf-8')) for s in lines[:node.end_lineno - 1]) + node.end_col_offset
+            encoded = text.encode('utf-8')
+            text = (encoded[:start] + new_text.encode('utf-8') + encoded[end:]).decode('utf-8')
+            changes.append((name, old_text, new_text))
+            continue
         pattern = _assignment_pattern(name)
         match = pattern.search(text)
         if match is None:
@@ -221,6 +241,18 @@ def has_sort_data(folder):
     except OSError:
         pass
     return False
+
+
+def _pkl_tier(p):
+    """Sort key preferring curated (non-"_raw") pkls, then merged over per-task.
+
+    "_raw" pkls are produced by GratingExport when no curated_analyzer existed
+    at export time (see 'curation_status' in the pkl's metadata) and should only
+    be used when no curated pkl exists for the session.
+    """
+    is_raw = p.stem.endswith("_raw")
+    is_merged = p.stem.removesuffix("_raw").endswith("_grating_data_merged")
+    return (is_raw, not is_merged)
 
 
 def resolve_session(animal, date):
@@ -310,11 +342,15 @@ def preflight(animal, date, sortout_animal, drive):
         if not _exists(out_dir):
             continue
         candidates = []
-        merged = out_dir / f"{rec_name}_grating_data_merged.pkl"
-        if _exists(merged):
-            candidates.append(merged)
+        for merged in (out_dir / f"{rec_name}_grating_data_merged.pkl",
+                       out_dir / f"{rec_name}_grating_data_merged_raw.pkl"):
+            if _exists(merged):
+                candidates.append(merged)
         try:
-            candidates += sorted(out_dir.glob(f"{rec_name}_*_grating_data.pkl"))
+            candidates += sorted(
+                list(out_dir.glob(f"{rec_name}_*_grating_data.pkl")) +
+                list(out_dir.glob(f"{rec_name}_*_grating_data_raw.pkl"))
+            )
         except OSError:
             pass
         for pkl in candidates:
@@ -322,18 +358,23 @@ def preflight(animal, date, sortout_animal, drive):
                 seen.add(str(pkl))
                 info["pkls"].append(pkl)
 
+    # Curated pkls first, then merged-over-per-task; mtime (newest first) breaks
+    # ties within a tier. info["pkls"][0] is therefore always the preferred pick.
+    info["pkls"].sort(key=lambda p: (_pkl_tier(p), -p.stat().st_mtime))
+
     return info
 
 
 def detect_pkl(animal, date, sortout_animal, drive):
-    """Newest exported grating pkl for a session, or "" if none exist yet."""
+    """Best exported grating pkl for a session (curated preferred over "_raw"),
+    or "" if none exist yet."""
     try:
         info = preflight(animal, date, sortout_animal, drive)
     except Exception:
         return ""
     if not info["pkls"]:
         return ""
-    return str(max(info["pkls"], key=lambda p: p.stat().st_mtime))
+    return str(info["pkls"][0])
 
 
 # =============================================================================
@@ -369,6 +410,11 @@ class PipelineGUI(tk.Tk):
             value=self.settings.get("interpreter") or default_interpreter(interpreters))
 
         self.animal_var = tk.StringVar(value=cfg.get("ANIMAL_ID", ""))
+        self._fs_animal = self.animal_var.get().strip()
+        self._fs_drafts = {animal: str(rate) for animal, rate in
+                           cfg.get("FS_BY_ANIMAL", {}).items()}
+        self.fs_var = tk.StringVar(value=self._fs_drafts.get(self._fs_animal, "30000"))
+        self.animal_var.trace_add("write", self._sampling_animal_changed)
         self.date_var = tk.StringVar(value=cfg.get("EXPERIMENT_DATE", ""))
         self.sortout_animal_var = tk.StringVar(value=cfg.get("SORTOUT_ANIMAL_ID", ""))
         self.drive_var = tk.StringVar(value=cfg.get("SORTOUT_DRIVE", SORTOUT_DRIVES[-1]))
@@ -498,6 +544,12 @@ class PipelineGUI(tk.Tk):
         interp = ttk.Frame(session)
         interp.grid(row=3, column=1, columnspan=5, sticky="ew", padx=(4, 0), pady=(6, 0))
         interp.columnconfigure(0, weight=1)
+        ttk.Label(session, text="Sampling rate (Hz):").grid(
+            row=4, column=0, sticky="w", pady=(6, 0))
+        ttk.Entry(session, textvariable=self.fs_var, width=14).grid(
+            row=4, column=1, sticky="w", padx=(4, 12), pady=(6, 0))
+        ttk.Label(session, text="Shared by all sessions of this animal").grid(
+            row=4, column=2, columnspan=4, sticky="w", pady=(6, 0))
         ttk.Combobox(interp, textvariable=self.interpreter_var,
                      values=interpreters).grid(row=0, column=0, sticky="ew")
         ttk.Button(interp, text="Browse...", command=self.browse_interpreter).grid(
@@ -626,6 +678,12 @@ class PipelineGUI(tk.Tk):
 
     # -- preflight ---------------------------------------------------------
 
+    def _sampling_animal_changed(self, *_args):
+        if self._fs_animal:
+            self._fs_drafts[self._fs_animal] = self.fs_var.get()
+        self._fs_animal = self.animal_var.get().strip()
+        self.fs_var.set(self._fs_drafts.get(self._fs_animal, "30000"))
+
     def _animal_changed(self):
         animal = self.animal_var.get().strip()
         if animal and not self.sortout_animal_var.get().strip():
@@ -738,6 +796,15 @@ class PipelineGUI(tk.Tk):
         if not animal or not date:
             raise ValueError("Animal and date are required.")
 
+        try:
+            fs = int(self.fs_var.get().strip())
+            if fs <= 0:
+                raise ValueError
+        except ValueError:
+            raise ValueError("Sampling rate must be a positive integer in Hz.")
+        fs_by_animal = dict(read_config_values().get("FS_BY_ANIMAL", {}))
+        fs_by_animal[animal] = fs
+
         start_text = self.passive_start_var.get().strip() or "0"
         try:
             passive_start = int(start_text)
@@ -761,6 +828,7 @@ class PipelineGUI(tk.Tk):
 
         return {
             "ANIMAL_ID": animal,
+            "FS_BY_ANIMAL": fs_by_animal,
             "SORTOUT_ANIMAL_ID": self.sortout_animal_var.get().strip() or animal,
             "EXPERIMENT_DATE": date,
             "SORTOUT_DRIVE": self.drive_var.get(),

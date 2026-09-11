@@ -1,3 +1,4 @@
+import argparse
 import errno
 import re
 import numpy as np
@@ -17,6 +18,7 @@ from sleep_pipeline_config import (
     N_JOBS,
     CHUNK_DURATION,
     resolve_output_folder,
+    resolve_existing_file,
     mirror_on_backup_server,
 )
 
@@ -122,7 +124,18 @@ def build_lfp_recording(rec):
     return rec_lfp
 
 
-def process_shank(ish, session_key, session_cfg, job_kwargs):
+def process_shank(ish, session_key, session_cfg, job_kwargs, overwrite=False):
+    # Checked before anything else - loading + preprocessing the NWB is the
+    # expensive part, so an already-done shank should never pay for it just to
+    # overwrite the same file. low_freq sits beside the NWBs (see SAVE OUTPUT
+    # below), so the path is known without resolving the NWB path first.
+    out_name = f"{session_name}{session_cfg['suffix']}_sh{ish}_lfp_traces.npz"
+    existing = resolve_existing_file(Path(rec_folder) / "low_freq" / out_name)
+    if not overwrite and existing.exists():
+        print(f"\nShank {ish} [{session_key}]: {out_name} already exists - "
+              f"skipping ({existing})")
+        return
+
     print("\n" + "=" * 75)
     print(f"PROCESSING SHANK {ish}  [session={session_key}]")
     print("=" * 75 + "\n")
@@ -201,7 +214,7 @@ def process_shank(ish, session_key, session_cfg, job_kwargs):
     # SAVE OUTPUT
     # =====================================================
     out_dir = resolve_output_folder(Path(rec_path).parent / "low_freq")
-    out_file = out_dir / f"{session_name}{session_cfg['suffix']}_sh{ish}_lfp_traces.npz"
+    out_file = out_dir / out_name
 
     savez_kwargs = dict(
         traces=traces,
@@ -247,6 +260,14 @@ def process_shank(ish, session_key, session_cfg, job_kwargs):
 #   recursively launch the whole pipeline.
 # =====================================================
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Extract per-shank LFP traces for the active sleep sessions.")
+    parser.add_argument(
+        "--overwrite", action="store_true",
+        help="Recompute even when the LFP traces file already exists "
+             "(default: existing outputs are kept and the shank is skipped).")
+    args = parser.parse_args()
+
     job_kwargs = dict(n_jobs=N_JOBS, chunk_duration=CHUNK_DURATION, progress_bar=True)
 
     sessions_to_run = active_sleep_sessions(sleep_sessions)
@@ -258,7 +279,7 @@ if __name__ == "__main__":
         print(f"SLEEP SESSION: {session_key}")
         print("#" * 75)
         for ish in shanks:
-            process_shank(ish, session_key, session_cfg, job_kwargs)
+            process_shank(ish, session_key, session_cfg, job_kwargs, overwrite=args.overwrite)
 
     print("\n" + "#" * 75)
     print("ALL SHANKS PROCESSED")

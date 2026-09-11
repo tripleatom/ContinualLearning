@@ -1,4 +1,5 @@
 from grating_utils import parse_grating_experiment
+from grating_config import FS
 import numpy as np
 from pathlib import Path
 from datetime import datetime
@@ -159,7 +160,7 @@ def fix_rising_edges(rising_times, n_trials, trial_duration_samples, tolerance=0
                 # Large gap treated as a task/session boundary — do not fill.
                 log.append(f"Skipped large gap at index {i} "
                            f"(interval {interval/expected:.2f}x expected, "
-                           f"{interval/30000:.1f}s ≥ max_gap threshold)")
+                           f"{interval/FS:.1f}s ≥ max_gap threshold)")
                 i += 1
             else:
                 # If it's the very first interval, the first edge is likely a
@@ -193,7 +194,7 @@ def fix_rising_edges(rising_times, n_trials, trial_duration_samples, tolerance=0
 
 
 def segment_rising_edges_by_task(rising_times, task_n_trials_list, task_trial_durations_samples,
-                                  buffer_samples=None, fs=30000):
+                                  buffer_samples=None, fs=FS):
     """
     Split a continuous array of rising edges into per-task segments.
 
@@ -215,7 +216,7 @@ def segment_rising_edges_by_task(rising_times, task_n_trials_list, task_trial_du
         Extra samples added after the last expected trial of each task before
         the cut. Defaults to 10 * fs (10 seconds).
     fs : int
-        Sampling rate, used only to set the default buffer (default 30000).
+        Sampling rate, used only to set the default buffer (default: configured animal rate).
 
     Returns
     -------
@@ -257,7 +258,7 @@ def segment_rising_edges_by_task(rising_times, task_n_trials_list, task_trial_du
     return segments
 
 
-def segment_by_large_gaps(rising_times, gap_threshold_samples, fs=30000):
+def segment_by_large_gaps(rising_times, gap_threshold_samples, fs=FS):
     """
     Segment rising edges into groups separated by gaps larger than gap_threshold_samples.
 
@@ -291,7 +292,7 @@ def segment_by_large_gaps(rising_times, gap_threshold_samples, fs=30000):
     return segments
 
 
-def plot_rising_edge_segments(rising_times, segments, task_metas, fs=30000,
+def plot_rising_edge_segments(rising_times, segments, task_metas, fs=FS,
                                gap_threshold_s=10.0, save_path=None):
     """
     Plot all rising edges (ITI vs edge index) colored by segment, with a bar chart
@@ -403,170 +404,6 @@ def plot_rising_edge_segments(rising_times, segments, task_metas, fs=30000,
     plt.show()
 
 
-def fix_residual_jitter(rising_edges, trial_duration_samples, tolerance=0.02, group_window=10):
-    """
-    Fix residual timing errors after fix_rising_edges.
-
-    Bad gaps (outside [1-tol, 1+tol] * expected, and < 1.5 * expected) that fall
-    within group_window edge-indices of each other are treated as a cluster and
-    fixed together by interpolating evenly between the good anchor edges on either
-    side of the cluster.  Isolated bad gaps are fixed individually by snapping to
-    the correct neighbour.
-
-    Parameters
-    ----------
-    rising_edges : np.ndarray
-        Edge indices (output of fix_rising_edges).
-    trial_duration_samples : int
-        Expected inter-trial interval in samples.
-    tolerance : float
-        Fractional tolerance (default 0.02 = ±2 %).
-    group_window : int
-        Bad gap indices within this many positions of each other are merged into
-        one cluster (default 10).
-
-    Returns
-    -------
-    fixed : np.ndarray
-        Corrected edge indices.
-    log : list of str
-        Description of each fix applied.
-    """
-    edges = list(rising_edges)
-    expected = trial_duration_samples
-    lo = (1 - tolerance) * expected
-    hi = (1 + tolerance) * expected
-    log = []
-
-    def _bad_gap_indices(e):
-        """Return indices i where gap e[i+1]-e[i] is outside tolerance but < 1.5x."""
-        bad = []
-        for i in range(len(e) - 1):
-            g = e[i + 1] - e[i]
-            if not (lo <= g <= hi) and g <= 1.5 * expected:
-                bad.append(i)
-        return bad
-
-    def _group_indices(bad, window):
-        """Merge bad gap indices within `window` of each other into clusters."""
-        if not bad:
-            return []
-        groups, cur = [], [bad[0]]
-        for idx in bad[1:]:
-            if idx - cur[-1] <= window:
-                cur.append(idx)
-            else:
-                groups.append(cur)
-                cur = [idx]
-        groups.append(cur)
-        return groups
-
-    # ── Cluster fix pass ───────────────────────────────────────────────────────
-    # Repeat until no new clusters form (a cluster fix may reveal new bad gaps).
-    for _ in range(20):
-        bad = _bad_gap_indices(edges)
-        if not bad:
-            break
-        groups = _group_indices(bad, group_window)
-        any_fixed = False
-
-        for grp in groups:
-            if len(grp) == 1:
-                continue  # handled by single-point pass below
-
-            # Edge indices spanning the cluster:
-            #   left anchor  = grp[0]          (edge before first bad gap)
-            #   right anchor = grp[-1] + 1     (edge after last bad gap)
-            la = grp[0]
-            ra = grp[-1] + 1
-            if ra >= len(edges):
-                log.append(f"  Cluster [{la}:{ra}]: right anchor out of bounds, skipped")
-                continue
-
-            # Verify anchors are reliable
-            left_ok  = (la == 0 or lo <= edges[la] - edges[la - 1] <= hi)
-            right_ok = (ra + 1 >= len(edges) or lo <= edges[ra + 1] - edges[ra] <= hi)
-
-            if not (left_ok or right_ok):
-                log.append(f"  Cluster [{la}:{ra}]: neither anchor reliable, skipped")
-                continue
-
-            n_gaps   = ra - la          # number of intervals to fill
-            span     = edges[ra] - edges[la]
-            expected_span = n_gaps * expected
-
-            if abs(span - expected_span) / expected_span > 0.15:
-                log.append(f"  Cluster [{la}:{ra}]: span {span/expected:.3f}x expected "
-                           f"({n_gaps} gaps), too far off — skipped")
-                continue
-
-            # Interpolate evenly between the two anchor edges using local avg step
-            step = _local_good_avg(edges, la, lo, hi, expected)
-            for k in range(1, n_gaps):
-                old = edges[la + k]
-                new = int(edges[la] + k * step)
-                edges[la + k] = new
-                log.append(f"  Cluster [{la}:{ra}] index {la+k}: {old} → {new}  "
-                           f"({n_gaps}-gap cluster, span={span/expected:.3f}x, "
-                           f"step={step} from local avg)")
-            any_fixed = True
-
-        if not any_fixed:
-            break
-
-    # ── Single-point fix pass ──────────────────────────────────────────────────
-    i = 0
-    while i < len(edges) - 1:
-        gap = edges[i + 1] - edges[i]
-
-        if lo <= gap <= hi or gap > 1.5 * expected:
-            i += 1
-            continue
-
-        prev_good = i > 0 and lo <= edges[i] - edges[i - 1] <= hi
-        next_good = i + 2 < len(edges) and lo <= edges[i + 2] - edges[i + 1] <= hi
-
-        if prev_good:
-            step = _local_good_avg(edges, i, lo, hi, expected)
-            new = int(edges[i] + step)
-            right_neighbor_ok = (i + 2 >= len(edges) or lo <= edges[i + 2] - new <= hi)
-            if right_neighbor_ok:
-                bad = edges[i + 1]
-                edges[i + 1] = new
-                log.append(f"  index {i+1}: {bad} → {new}  "
-                           f"(gap {gap/expected:.3f}x, anchored to left edge {edges[i]}, "
-                           f"step={step} from local avg)")
-                i += 1
-            else:
-                log.append(f"  index {i+1}: gap {gap/expected:.3f}x — "
-                           f"proposed snap {new} would break right gap "
-                           f"({(edges[i+2]-new)/expected:.3f}x), skipped")
-                i += 1
-
-        elif next_good:
-            step = _local_good_avg(edges, i + 1, lo, hi, expected)
-            new = int(edges[i + 1] - step)
-            left_neighbor_ok = (i == 0 or lo <= new - edges[i - 1] <= hi)
-            if left_neighbor_ok:
-                bad = edges[i]
-                edges[i] = new
-                log.append(f"  index {i}: {bad} → {new}  "
-                           f"(gap {gap/expected:.3f}x, anchored to right edge {edges[i + 1]}, "
-                           f"step={step} from local avg)")
-                i = max(0, i - 1)
-            else:
-                log.append(f"  index {i}: gap {gap/expected:.3f}x — "
-                           f"proposed snap {new} would break left gap "
-                           f"({(new-edges[i-1])/expected:.3f}x), skipped")
-                i += 1
-
-        else:
-            log.append(f"  index {i}: gap {gap/expected:.3f}x — no correct neighbour, skipped")
-            i += 1
-
-    return np.array(edges), log
-
-
 def parse_txt_trial_times(task_file_path):
     """
     Extract per-trial stimulus Start/End wall-clock times from a grating .txt
@@ -594,7 +431,7 @@ def parse_txt_trial_times(task_file_path):
     return start_sec, end_sec
 
 
-def align_edges_to_txt(rising_edges, txt_start_sec, fs=30000):
+def align_edges_to_txt(rising_edges, txt_start_sec, fs=FS):
     """
     Locate which contiguous block of txt trials a (possibly incomplete) rising-
     edge train corresponds to, and fit the linear map txt-seconds -> ephys-sample.
@@ -647,7 +484,7 @@ def align_edges_to_txt(rising_edges, txt_start_sec, fs=30000):
             'mse': float(best_err), 'residual_ms': residual_ms}
 
 
-def fix_missing_trials_from_txt(rising_edges, task_file_path, stimulus_duration, fs=30000):
+def fix_missing_trials_from_txt(rising_edges, task_file_path, stimulus_duration, fs=FS):
     """
     Complete a partial rising-edge train using the wall-clock trial Start times
     logged in a grating .txt file.
@@ -726,7 +563,7 @@ def fix_missing_trials_from_txt(rising_edges, task_file_path, stimulus_duration,
             'n_real': n_real, 'n_reconstructed': len(missing_idx), 'fit': fit}
 
 
-def process_task(task_file_path, rising_segment, fs=30000):
+def process_task(task_file_path, rising_segment, fs=FS):
     """
     Fix DIO edges, plot diagnostics, and save results for a single task.
 
@@ -737,7 +574,7 @@ def process_task(task_file_path, rising_segment, fs=30000):
     rising_segment : np.ndarray
         Rising edge sample indices that belong to this task.
     fs : int
-        Sampling rate (default 30000).
+        Sampling rate (default: configured animal rate).
     """
     task_file = parse_grating_experiment(task_file_path)
     task_id = task_file_path.stem
@@ -749,30 +586,26 @@ def process_task(task_file_path, rising_segment, fs=30000):
     trial_duration = stimulus_duration + ITI_duration
 
     print(f"\n  Task: {task_id}")
-    print(f"  stimulus={stimulus_duration}s  ITI={ITI_duration}s  "
-          f"trial_duration={trial_duration}s  n_trials={n_repeats}")
+    print(f"  stimulus={stimulus_duration:.2f}s  ITI={ITI_duration:.2f}s  "
+          f"trial_duration={trial_duration:.2f}s  n_trials={n_repeats}")
     print(f"  Segment edges: {len(rising_segment)} (expected {n_repeats})")
 
     trial_duration_samples = int(trial_duration * fs)
 
-    # Step 1: remove glitch bursts and insert missing trials
-    rising_fixed, rising_screened, fix_log = fix_rising_edges(
+    # Pre-screen: collapse glitch runs (edges obviously too close together).
+    # 'rising_screened' feeds the PRE-SCREENED row/version and the txt-referring
+    # fix below.
+    _, rising_screened, fix_log = fix_rising_edges(
         rising_segment, n_repeats, trial_duration_samples)
 
-    # Step 2: fix residual single-edge jitter (e.g. 4 s or 2.75 s gaps)
-    rising_fixed, jitter_log = fix_residual_jitter(rising_fixed, trial_duration_samples)
-
     n_removed_prescreen = len(rising_segment) - len(rising_screened)
-    all_log = fix_log + jitter_log
     print(f"  Pre-screen: {len(rising_segment)} → {len(rising_screened)} "
           f"({n_removed_prescreen} removed)")
     print("  Fix log:")
-    for entry in all_log:
+    for entry in fix_log:
         print(f"    {entry}")
 
-    falling_fixed = rising_fixed + int(stimulus_duration * fs)
-
-    # Step 3: txt-referring reconstruction of any trials missing from the DIO.
+    # txt-referring reconstruction of any trials missing from the DIO.
     # Uses the .txt trial Start times to fill in a contiguous block of trials
     # missing at the start/end of the recording (e.g. trigger dropout), while
     # preserving every recorded edge. Aligned from the glitch-screened edges.
@@ -783,19 +616,17 @@ def process_task(task_file_path, rising_segment, fs=30000):
     except (ValueError, FileNotFoundError, KeyError) as e:
         print(f"  txt-referring fix unavailable: {e}")
 
-    # Diagnostics plot — RAW / PRE-SCREENED / FIXED (+ TXT-REFERRING if available)
-    n_panels = 4 if txt_result is not None else 3
+    # Diagnostics plot — RAW / PRE-SCREENED (+ TXT-REFERRING if available)
+    n_panels = 3 if txt_result is not None else 2
     fig, axes = plt.subplots(n_panels, 1, figsize=(12, 3 * n_panels), sharex=False)
     fig.suptitle(f"{task_id}\n"
-                 f"raw={len(rising_segment)}  screened={len(rising_screened)}  "
-                 f"fixed={len(rising_fixed)}"
+                 f"raw={len(rising_segment)}  screened={len(rising_screened)}"
                  + (f"  txt_fixed={len(txt_result['rising_times'])}" if txt_result else "")
                  + f"  expected={n_repeats}",
                  fontsize=11)
 
     raw_diff      = np.diff(rising_segment)  / fs
     screened_diff = np.diff(rising_screened) / fs
-    fixed_diff    = np.diff(rising_fixed)    / fs
 
     tolerance = 0.04
     lo = (1 - tolerance) * trial_duration
@@ -805,11 +636,10 @@ def process_task(task_file_path, rising_segment, fs=30000):
         (axes[0], raw_diff,      'steelblue',  f'RAW ({len(rising_segment)} edges)'),
         (axes[1], screened_diff, 'darkorange',
          f'PRE-SCREENED ({len(rising_screened)} edges, {n_removed_prescreen} removed)'),
-        (axes[2], fixed_diff,    'green',      f'FIXED ({len(rising_fixed)} edges)'),
     ]:
         ax.plot(diff, marker='o', ms=3, lw=0.8, color=color)
         ax.axhline(trial_duration, color='r', linestyle='--',
-                   lw=1.2, label=f'expected ({trial_duration}s)')
+                   lw=1.2, label=f'expected ({trial_duration:.2f}s)')
         ax.set_title(title, fontsize=10)
         ax.set_ylabel('Interval (s)', fontsize=9)
         ax.legend(fontsize=8)
@@ -830,7 +660,7 @@ def process_task(task_file_path, rising_segment, fs=30000):
 
     # TXT-REFERRING panel: full-length train with recorded vs reconstructed edges
     if txt_result is not None:
-        ax = axes[3]
+        ax = axes[2]
         tr = txt_result['rising_times']
         recon = txt_result['is_reconstructed']
         txt_diff = np.diff(tr) / fs
@@ -856,11 +686,11 @@ def process_task(task_file_path, rising_segment, fs=30000):
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     stamp = (
         f"Generated {timestamp} | script={Path(__file__).name} | task={task_id}\n"
-        f"folder={folder_path} | stimulus={stimulus_duration}s, ITI={ITI_duration}s, "
-        f"trial_duration={trial_duration}s, display_tolerance=±{tolerance*100:.0f}% | "
+        f"folder={folder_path} | stimulus={stimulus_duration:.2f}s, ITI={ITI_duration:.2f}s, "
+        f"trial_duration={trial_duration:.2f}s, display_tolerance=±{tolerance*100:.0f}% | "
         f"n_trials_expected={n_repeats}\n"
         f"raw={len(rising_segment)}, screened={len(rising_screened)} "
-        f"({n_removed_prescreen} pre-screened out), fixed={len(rising_fixed)}"
+        f"({n_removed_prescreen} pre-screened out)"
     )
     _stamp_figure(fig, stamp)
 
@@ -871,19 +701,15 @@ def process_task(task_file_path, rising_segment, fs=30000):
     version_data = {
         'raw':      (rising_segment,  rising_segment  + int(stimulus_duration * fs)),
         'screened': (rising_screened, rising_screened + int(stimulus_duration * fs)),
-        'fixed':    (rising_fixed,    falling_fixed),
     }
-    version_options = ['raw', 'screened', 'fixed']
+    version_options = ['raw', 'screened']
     if txt_result is not None:
         version_options.append('txt_fixed')
         version_data['txt_fixed'] = (txt_result['rising_times'], txt_result['falling_times'])
 
-    # Default to the txt reconstruction when the interval-based fix did not reach
-    # the expected trial count but the txt fix did; otherwise default to 'fixed'.
-    default_version = 'fixed'
-    if txt_result is not None and len(rising_fixed) != n_repeats \
-            and len(txt_result['rising_times']) == n_repeats:
-        default_version = 'txt_fixed'
+    # Default to the txt reconstruction when available; otherwise the
+    # glitch-screened edges.
+    default_version = 'txt_fixed' if txt_result is not None else 'screened'
 
     rax = fig.add_axes([0.85, 0.45, 0.13, 0.18])
     rax.set_title('Save version', fontsize=9)
@@ -933,7 +759,8 @@ for p in task_file_paths:
     print(f"  {p.stem}: {n} trials, {stim+iti}s/trial")
 
 # ── Raw DIO signal ─────────────────────────────────────────────────────────────
-fs = 30000
+fs = FS
+print(f"DIO timestamp sampling rate for {animal_id}: {fs} Hz (grating_config.py)")
 # If True, use cleaned recording-level <rec_stem>_DIO.npz files generated by
 # dio_single.py when every rec_folder has one. This script still segments those
 # cleaned rising edges by task and writes task-level <task_stem>_DIO.npz files.
@@ -983,17 +810,17 @@ if ASK_TRIAL_DURATION:
     try:
         user_input = input(
             f"Expected trial duration (stimulus+ITI) in seconds? "
-            f"[Enter for default = {global_trial_duration_s:g}s, parsed from task file]: "
+            f"[Enter for default = {global_trial_duration_s:.2f}s, parsed from task file]: "
         ).strip()
     except EOFError:
         user_input = ""
     if user_input:
         global_trial_duration_s = float(user_input)
-        print(f"Using user-specified trial duration: {global_trial_duration_s:g}s")
+        print(f"Using user-specified trial duration: {global_trial_duration_s:.2f}s")
 global_trial_duration_samples = int(global_trial_duration_s * fs)
 global_n_trials = total_expected
 
-print(f"Global fix: trial_duration={global_trial_duration_s}s  "
+print(f"Global fix: trial_duration={global_trial_duration_s:.2f}s  "
       f"max_gap={gap_threshold_s}s  total_expected={global_n_trials}")
 
 if PREFER_RECORDING_LEVEL_DIO:

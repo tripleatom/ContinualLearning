@@ -7,7 +7,7 @@ Drives the sequence normally run by hand for each recording day:
     2. proc_func_velocity.py         tracking PROC -> *_velocity_advanced.pkl
     3. extract_sleep_lfp.py          NWB -> low_freq/*_lfp_traces.npz
     4. compute_sleep_spectrograms.py LFP traces -> *_spectrograms.npz
-    5. compute_sleep_features.py     LFP + spectrograms -> *_all_shanks_band_powers.pkl
+    5. compute_sleep_features.py     spectrograms -> *_all_shanks_band_powers.pkl
     6. plot_sleep_spectrograms.py    band powers -> per-channel figures + trace pkl
 
 The GUI picks the animal and recording day (a pair registered in
@@ -41,6 +41,7 @@ stage cannot take the GUI down with it.
 Run with:  python sleep_pipeline_gui.py
 """
 import ast
+import io
 import json
 import os
 import queue
@@ -84,8 +85,10 @@ SESSIONS = ("pre", "post")
 CONFIG_SCALARS = ("ACTIVE_ANIMAL", "ACTIVE_DATE", "SESSION_FILTER", "shanks",
                   "VELOCITY_SOURCE")
 # Read but never written - only needed to turn sample indices into seconds and
-# to name the velocity file each stage expects.
-CONFIG_READONLY = ("original_fs", "VELOCITY_KEYPOINTS")
+# to name the velocity file each stage expects, or (preproc_params / spec_params
+# / DOWNSAMPLE_METHOD) to show stages 3-4's params in the UI.
+CONFIG_READONLY = ("original_fs", "VELOCITY_KEYPOINTS", "preproc_params",
+                   "spec_params", "DOWNSAMPLE_METHOD")
 
 # Velocity sources, mirroring proc_func_velocity.VELOCITY_SOURCES (imported by
 # name here rather than from that module, which needs scipy/matplotlib).
@@ -524,6 +527,46 @@ STAGES = [
 STAGE_LABELS = {key: label for key, label, _ in STAGES}
 STAGE_SCRIPTS = {key: script for key, _, script in STAGES}
 
+# Third-party packages each stage script actually imports (checked against
+# each script's own `import` lines - the stdlib-only ones this GUI depends on
+# are not listed, since it's the CHOSEN interpreter's set that matters here).
+STAGE_PACKAGES = {
+    "sync": ("numpy", "matplotlib"),
+    "velocity": ("numpy", "matplotlib", "scipy"),
+    "lfp": ("numpy", "spikeinterface"),
+    "spectrograms": ("numpy", "scipy"),
+    "features": ("numpy", "sklearn"),
+    "plots": ("numpy", "matplotlib", "scipy", "tqdm"),
+}
+# Every package any stage needs - used for the startup sanity check (which
+# stages will actually run isn't known yet at that point), vs. build_plan's
+# check, which only asks about the stages selected for a given run.
+ALL_STAGE_PACKAGES = sorted({pkg for pkgs in STAGE_PACKAGES.values() for pkg in pkgs})
+
+
+def check_interpreter_packages(python, packages):
+    """None if `python` can import every name in `packages`; otherwise the
+    interpreter's own error message (its last traceback line) explaining why.
+
+    One `python -c "import a, b, ..."` subprocess for the whole set, run
+    before any stage starts - catching a wrong-environment pick (e.g. the
+    interpreter dropdown left on an env with no matplotlib) here means one
+    clear message instead of every selected stage failing in turn with a
+    multi-page traceback each.
+    """
+    if not packages:
+        return None
+    try:
+        result = subprocess.run(
+            [python, "-c", "import " + ", ".join(sorted(packages))],
+            capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"could not check this interpreter: {exc}"
+    if result.returncode == 0:
+        return None
+    lines = [line for line in result.stderr.strip().splitlines() if line.strip()]
+    return lines[-1] if lines else f"exited {result.returncode} with no output"
+
 
 def missing_prerequisites(info, selected, session_filter="both"):
     """Warnings for stages whose inputs are neither on disk nor produced earlier in this run.
@@ -603,6 +646,11 @@ class PipelineGUI(tk.Tk):
         self.velocity_source_var = tk.StringVar(
             value=cfg.get("VELOCITY_SOURCE", "proc_center"))
         self.velocity_keypoints = cfg.get("VELOCITY_KEYPOINTS") or ()
+        self.preproc_params = cfg.get("preproc_params") or {}
+        self.spec_params = cfg.get("spec_params") or {}
+        self.downsample_method = cfg.get("DOWNSAMPLE_METHOD", "")
+        self.lfp_params_var = tk.StringVar(value=self._lfp_params_text())
+        self.spec_params_var = tk.StringVar(value=self._spec_params_text())
         self.write_config_var = tk.BooleanVar(value=True)
 
         self.stage_vars = {k: tk.BooleanVar(value=self.settings.get("stages", {}).get(k, True))
@@ -610,8 +658,10 @@ class PipelineGUI(tk.Tk):
         self.dio_channel_var = tk.StringVar(
             value=str(self.settings.get("dio_channel", DEFAULT_DIO_CHANNEL)))
         self.force_sync_var = tk.BooleanVar(value=self.settings.get("force_sync", False))
-        self.velocity_overwrite_var = tk.BooleanVar(
-            value=self.settings.get("velocity_overwrite", False))
+        # Single control for every stage's --overwrite (1-6). Before this
+        # existed, every stage but velocity always overwrote unconditionally,
+        # with no way to skip output that's already there.
+        self.recompute_var = tk.BooleanVar(value=self.settings.get("recompute", False))
         self.channels_var = tk.StringVar(value=self.settings.get("channels", ""))
         self.max_channels_var = tk.StringVar(value=self.settings.get("max_channels", ""))
         self.output_suffix_var = tk.StringVar(value=self.settings.get("output_suffix", ""))
@@ -623,6 +673,16 @@ class PipelineGUI(tk.Tk):
         self._proc = None
         self._stop = False
         self._running = False
+        # Bumped on every run_preflight() call; a background scan's result is
+        # only applied if it's still the most recently requested one - a slow
+        # scan for the day you just navigated AWAY from (e.g. the post-pipeline
+        # refresh racing a date change right after it) must not clobber a
+        # faster, newer scan's result once it lands.
+        self._preflight_seq = 0
+        # Which queue row start_queue() is currently on / how many have failed
+        # so far - reset at the start of each run, read by _queue_finished.
+        self._queue_index = 0
+        self._queue_fail_count = 0
         # Worker threads never touch widgets or Tk variables directly; they push
         # output lines and UI callables onto these, drained on the UI thread.
         self._log_queue = queue.Queue()
@@ -632,6 +692,7 @@ class PipelineGUI(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.after(100, self._drain_log)
         self.after(200, self.run_preflight)
+        self.after(250, self._validate_interpreter, interpreters)
 
     # -- settings ----------------------------------------------------------
 
@@ -648,7 +709,7 @@ class PipelineGUI(tk.Tk):
             "stages": {k: v.get() for k, v in self.stage_vars.items()},
             "dio_channel": self.dio_channel_var.get(),
             "force_sync": self.force_sync_var.get(),
-            "velocity_overwrite": self.velocity_overwrite_var.get(),
+            "recompute": self.recompute_var.get(),
             "channels": self.channels_var.get(),
             "max_channels": self.max_channels_var.get(),
             "output_suffix": self.output_suffix_var.get(),
@@ -662,10 +723,10 @@ class PipelineGUI(tk.Tk):
     # -- construction ------------------------------------------------------
 
     def _build_ui(self, interpreters):
-        # Rows: 0 day, 1 preflight, 2 stages, 3 run bar, 4 log.
+        # Rows: 0 day, 1 preflight, 2 stages, 3 queue, 4 run bar, 5 log.
         self.columnconfigure(0, weight=1)
         self.rowconfigure(1, weight=1)
-        self.rowconfigure(4, weight=2)
+        self.rowconfigure(5, weight=2)
 
         # -- Recording day -------------------------------------------------
         day = ttk.LabelFrame(self, text="Recording day", padding=(8, 6))
@@ -778,6 +839,8 @@ class PipelineGUI(tk.Tk):
                    command=lambda: self._set_all_stages(True)).pack(side="left")
         ttk.Button(row0, text="None", width=6,
                    command=lambda: self._set_all_stages(False)).pack(side="left", padx=(4, 0))
+        ttk.Checkbutton(row0, text="recompute every stage even if output exists",
+                        variable=self.recompute_var).pack(side="left", padx=(16, 0))
 
         row1 = ttk.Frame(stages)
         row1.pack(fill="x", pady=(8, 0))
@@ -794,8 +857,20 @@ class PipelineGUI(tk.Tk):
         ttk.Label(row1, text=f"({', '.join(self.velocity_keypoints)})"
                              if self.velocity_keypoints else "",
                   foreground="#666").pack(side="left", padx=(0, 12))
-        ttk.Checkbutton(row1, text="recompute if it already exists",
-                        variable=self.velocity_overwrite_var).pack(side="left")
+
+        row1b = ttk.Frame(stages)
+        row1b.pack(fill="x", pady=(4, 0))
+        ttk.Label(row1b, text="3. LFP:").pack(side="left")
+        ttk.Label(row1b, textvariable=self.lfp_params_var, foreground="#666").pack(
+            side="left", padx=(4, 16))
+
+        row1c = ttk.Frame(stages)
+        row1c.pack(fill="x", pady=(2, 0))
+        ttk.Label(row1c, text="4. Spectrogram:").pack(side="left")
+        ttk.Label(row1c, textvariable=self.spec_params_var, foreground="#666").pack(
+            side="left", padx=(4, 16))
+        ttk.Label(row1c, text=f"(edit in {CONFIG_PATH.name} - not GUI-managed)",
+                  foreground="#999").pack(side="left")
 
         row2 = ttk.Frame(stages)
         row2.pack(fill="x", pady=(8, 0))
@@ -810,9 +885,51 @@ class PipelineGUI(tk.Tk):
         ttk.Checkbutton(row2, text="continue on error",
                         variable=self.continue_var).pack(side="right")
 
+
+        # -- Queue -----------------------------------------------------------
+        # Runs multiple animal-days unattended, one after another, using
+        # whatever stage/option selection is set above for every one of them.
+        queue = ttk.LabelFrame(self, text="Queue - run multiple days unattended",
+                               padding=(8, 6))
+        queue.grid(row=3, column=0, sticky="ew", padx=10, pady=4)
+        queue.columnconfigure(0, weight=1)
+
+        self.queue_tree = ttk.Treeview(
+            queue, columns=("animal", "date", "status"), show="headings",
+            height=4, selectmode="extended")
+        for col, label, width in (("animal", "Animal", 90), ("date", "Date", 90),
+                                  ("status", "Status", 140)):
+            self.queue_tree.heading(col, text=label)
+            self.queue_tree.column(col, width=width, anchor="w", stretch=(col == "status"))
+        self.queue_tree.grid(row=0, column=0, sticky="ew")
+        queue_scroll = ttk.Scrollbar(queue, orient="vertical", command=self.queue_tree.yview)
+        queue_scroll.grid(row=0, column=1, sticky="ns")
+        self.queue_tree.configure(yscrollcommand=queue_scroll.set)
+        for tag, color in (("done", "#1a7f37"), ("failed", "#c00000"),
+                           ("running", "#0066cc"), ("skipped", "#888"),
+                           ("pending", "#333333")):
+            self.queue_tree.tag_configure(tag, foreground=color)
+
+        queue_buttons = ttk.Frame(queue)
+        queue_buttons.grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        ttk.Button(queue_buttons, text="Add current day",
+                   command=self.queue_add_current).pack(side="left")
+        ttk.Button(queue_buttons, text="Add all registered for animal",
+                   command=self.queue_add_all_for_animal).pack(side="left", padx=(6, 0))
+        ttk.Button(queue_buttons, text="Remove selected",
+                   command=self.queue_remove_selected).pack(side="left", padx=(6, 0))
+        ttk.Button(queue_buttons, text="Clear", command=self.queue_clear).pack(
+            side="left", padx=(6, 0))
+        self.run_queue_button = ttk.Button(queue_buttons, text="Run queue",
+                                           command=self.start_queue)
+        self.run_queue_button.pack(side="left", padx=(16, 0))
+        ttk.Label(queue_buttons, text="(uses the stages/options above for every "
+                                      "queued day; Stop below also stops the queue)",
+                  foreground="#666").pack(side="left", padx=(8, 0))
+
         # -- Run bar + log -------------------------------------------------
         bar = ttk.Frame(self, padding=(10, 4))
-        bar.grid(row=3, column=0, sticky="ew")
+        bar.grid(row=4, column=0, sticky="ew")
         self.run_button = ttk.Button(bar, text="Run pipeline", command=self.start_pipeline)
         self.run_button.pack(side="left")
         self.stop_button = ttk.Button(bar, text="Stop", command=self.stop_pipeline,
@@ -825,7 +942,7 @@ class PipelineGUI(tk.Tk):
         ttk.Label(bar, textvariable=self.status_var).pack(side="right")
 
         log = ttk.LabelFrame(self, text="Log", padding=(8, 6))
-        log.grid(row=4, column=0, sticky="nsew", padx=10, pady=(4, 8))
+        log.grid(row=5, column=0, sticky="nsew", padx=10, pady=(4, 8))
         log.columnconfigure(0, weight=1)
         log.rowconfigure(0, weight=1)
         self.log_text = tk.Text(log, wrap="none", font=("Consolas", 9),
@@ -843,6 +960,32 @@ class PipelineGUI(tk.Tk):
         self.log_text.tag_configure("bad", foreground="#f48771")
         self.log_text.tag_configure("ok", foreground="#89d185")
 
+    def _lfp_params_text(self):
+        """One-line summary of preproc_params (stage 3), read straight from config."""
+        p = self.preproc_params
+        if not p:
+            return "(preproc_params not found in config)"
+        ref = f"{p.get('reference', '?')}/{p.get('operator', '?')}"
+        return (f"target_fs={p.get('target_fs', '?')} Hz   "
+               f"band={p.get('lfp_min', '?')}-{p.get('lfp_max', '?')} Hz   "
+               f"ref={ref}   downsample={self.downsample_method or '?'}")
+
+    def _spec_params_text(self):
+        """One-line summary of spec_params (stage 4): window/step derived from
+        nperseg/noverlap/target_fs, since that's what the params actually mean."""
+        s = self.spec_params
+        if not s:
+            return "(spec_params not found in config)"
+        fs = self.preproc_params.get("target_fs")
+        nperseg, noverlap = s.get("nperseg"), s.get("noverlap")
+        if fs and nperseg is not None and noverlap is not None:
+            window = f"{nperseg / fs:.3g}s window / {(nperseg - noverlap) / fs:.3g}s step"
+        else:
+            window = f"nperseg={nperseg} noverlap={noverlap}"
+        return (f"{window}   "
+               f"log {s.get('log_fmin', '?')}-{s.get('log_fmax', '?')} Hz "
+               f"({s.get('n_log_bins', '?')} bins)   mode={s.get('mode', '?')}")
+
     def _set_all_stages(self, value):
         for var in self.stage_vars.values():
             var.set(value)
@@ -851,6 +994,51 @@ class PipelineGUI(tk.Tk):
         path = filedialog.askopenfilename(title="Select python executable")
         if path:
             self.interpreter_var.set(path)
+
+    def _validate_interpreter(self, candidates):
+        """Startup check: the restored/default interpreter can be a stale bad
+        choice (saved by _save_settings from a previous run picked in error -
+        e.g. an env with no matplotlib), and it would otherwise keep coming
+        back as the default on every launch until manually changed. Runs off
+        the UI thread since it spawns a subprocess per candidate; if the
+        current one can't import what the pipeline needs, silently tries the
+        other discovered envs and switches to the first one that works.
+        """
+        current = self.interpreter_var.get().strip()
+
+        def worker():
+            problem = check_interpreter_packages(current, ALL_STAGE_PACKAGES)
+            if problem is None:
+                return
+            # Same preference order as default_interpreter() (ms10 first),
+            # not find_interpreters()'s raw alphabetical order - otherwise
+            # this could "fix" a bad choice by landing on e.g. kilosort
+            # instead of the env this pipeline is actually meant to run on.
+            ordered = sorted(
+                (c for c in candidates if c != current),
+                key=lambda c: (PREFERRED_ENVS.index(Path(c).parent.name)
+                               if Path(c).parent.name in PREFERRED_ENVS
+                               else len(PREFERRED_ENVS)))
+            for candidate in ordered:
+                if check_interpreter_packages(candidate, ALL_STAGE_PACKAGES) is None:
+                    self._post(lambda c=candidate: self._switch_interpreter(current, problem, c))
+                    return
+            self._post(lambda: self.log(
+                f"Warning: the selected interpreter can't run this pipeline "
+                f"({current}: {problem}) and no working alternative was found "
+                f"among the discovered conda envs either - pick one manually "
+                f"(Browse...) before running.\n", "bad"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _switch_interpreter(self, old, problem, new):
+        # Only switch if the user hasn't already picked something themselves
+        # in the meantime (the check above runs in the background).
+        if self.interpreter_var.get().strip() != old:
+            return
+        self.interpreter_var.set(new)
+        self.log(f"Switched interpreter: {old} can't run this pipeline "
+                 f"({problem}) - using {new} instead.\n", "banner")
 
     # -- NWB folder --------------------------------------------------------
 
@@ -1014,6 +1202,13 @@ class PipelineGUI(tk.Tk):
         date = self.date_var.get().strip()
         self.animal_combo["values"] = registered_animals()
         self.date_combo["values"] = self._dates_for_animal(animal)
+
+        cfg = read_config_values()
+        self.preproc_params = cfg.get("preproc_params") or {}
+        self.spec_params = cfg.get("spec_params") or {}
+        self.downsample_method = cfg.get("DOWNSAMPLE_METHOD", "")
+        self.lfp_params_var.set(self._lfp_params_text())
+        self.spec_params_var.set(self._spec_params_text())
         if not animal or not date:
             self._set_pre_text([("Enter or pick an animal and a recording date.\n",
                                  "warn")])
@@ -1029,14 +1224,19 @@ class PipelineGUI(tk.Tk):
         self.status_var.set("Preflight scanning...")
         velocity_source = self.velocity_source_var.get()
 
+        self._preflight_seq += 1
+        seq = self._preflight_seq
+
         def runner():
             result = self._safe(
                 lambda: preflight(animal, date, shanks, dio_channel, velocity_source))
-            self._post(lambda: self._preflight_done(result))
+            self._post(lambda: self._preflight_done(result, seq))
 
         threading.Thread(target=runner, daemon=True).start()
 
-    def _preflight_done(self, info):
+    def _preflight_done(self, info, seq):
+        if seq != self._preflight_seq:
+            return  # superseded by a newer run_preflight() call - discard
         if isinstance(info, Exception):
             self._set_pre_text([(f"Preflight failed: {info}\n", "bad")])
             self.status_var.set("Preflight failed.")
@@ -1055,6 +1255,15 @@ class PipelineGUI(tk.Tk):
         progress (or a browsed folder not yet saved) must survive a re-scan.
         """
         if not info["registered"]:
+            # Clear rather than leave a stale day's path on screen - and,
+            # just as importantly, keep the visible fields and _registry_paths
+            # in sync (both blank). Leaving the fields untouched here while
+            # resetting _registry_paths alone used to desync the two, which
+            # then permanently blocked the *next* registered day's fields from
+            # ever following the registry again (neither branch of the check
+            # below could match) - the "gets stuck" bug this fixes.
+            self.rec_folder_var.set("")
+            self.nwb_prefix_var.set("")
             self._registry_paths = ("", "")
             return
         entry = info["entry"]
@@ -1255,6 +1464,8 @@ class PipelineGUI(tk.Tk):
         plan = []
         for key in selected:
             argv = [python, STAGE_SCRIPTS[key]]
+            if self.recompute_var.get():
+                argv.append("--overwrite")
             if key == "sync":
                 argv += ["--dio-channel", str(dio_channel)]
                 if self.force_sync_var.get():
@@ -1263,8 +1474,6 @@ class PipelineGUI(tk.Tk):
                 # Passed explicitly so the run matches the GUI even when
                 # "write config before running" is off.
                 argv += ["--source", self.velocity_source_var.get()]
-                if self.velocity_overwrite_var.get():
-                    argv.append("--overwrite")
             elif key == "plots":
                 # shanks come from the config write; only the per-figure options
                 # live in the GUI.
@@ -1304,6 +1513,17 @@ class PipelineGUI(tk.Tk):
             messagebox.showerror("Cannot run", str(exc))
             return
 
+        python = self.interpreter_var.get().strip()
+        needed = sorted({pkg for key, _ in plan for pkg in STAGE_PACKAGES.get(key, ())})
+        problem = check_interpreter_packages(python, needed)
+        if problem:
+            messagebox.showerror(
+                "Interpreter can't run these stages",
+                f"{python}\n\ncan't import what the selected stages need:\n\n"
+                f"{problem}\n\nPick a different interpreter (ms10 has the full "
+                f"set this pipeline needs) before running.")
+            return
+
         if (self.info is not None and self.info.get("registered")
                 and self.info["date"] == self.date_var.get().strip()
                 and self.info["animal"] == self.animal_var.get().strip()):
@@ -1323,6 +1543,7 @@ class PipelineGUI(tk.Tk):
         self._stop = False
         self._running = True
         self.run_button.configure(state="disabled")
+        self.run_queue_button.configure(state="disabled")
         self.stop_button.configure(state="normal")
         for key, _, _ in STAGES:
             self._set_stage_status(key, "pending" if self.stage_vars[key].get() else "skip")
@@ -1330,7 +1551,15 @@ class PipelineGUI(tk.Tk):
         opts = {"continue_on_error": self.continue_var.get()}
         threading.Thread(target=self._run_plan, args=(plan, opts), daemon=True).start()
 
-    def _run_plan(self, plan, opts):
+    def _run_stage_plan(self, plan, opts):
+        """Run each (stage_key, argv) in `plan` sequentially. Returns
+        (failures, elapsed_seconds).
+
+        The shared engine behind both a single day's run (_run_plan) and each
+        day of a queued run (_run_next_queue_day) - everything here is plain
+        Python plus subprocess calls, with all Tk access routed through
+        _post(), so it's safe to call from a background thread either way.
+        """
         started = time.time()
         failures = []
         for index, (key, argv) in enumerate(plan, start=1):
@@ -1366,21 +1595,33 @@ class PipelineGUI(tk.Tk):
                     break
 
         total = time.time() - started
+        return failures, total
+
+    def _run_plan(self, plan, opts):
+        failures, total = self._run_stage_plan(plan, opts)
         self._post(lambda: self._pipeline_finished(failures, total))
 
     def _run_process(self, stage, argv):
         try:
+            # Binary stdout, decoded by hand below (newline="") instead of
+            # text=True: text mode's universal-newline translation collapses
+            # a bare \r (a live-updating progress bar, e.g. plot_sleep_spectrograms
+            # .py's tqdm bar) to the same "\n" a real completed line ends with,
+            # so log() below could no longer tell "overwrite the last line"
+            # apart from "append a new one". newline="" keeps each line's
+            # actual terminator (\r, \r\n, or \n) so that distinction survives.
             self._proc = subprocess.Popen(
                 argv, cwd=str(SLEEP_DIR), env=self._subprocess_env(stage),
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                stdin=subprocess.DEVNULL, text=True, encoding="utf-8",
-                errors="replace", bufsize=1,
+                stdin=subprocess.DEVNULL, bufsize=0,
             )
         except OSError as exc:
             self._post(lambda: self.log(f"Could not start process: {exc}\n", "bad"))
             return -1
 
-        for line in self._proc.stdout:
+        text_stream = io.TextIOWrapper(self._proc.stdout, encoding="utf-8",
+                                       errors="replace", newline="")
+        for line in text_stream:
             self._log_queue.put((line, None))
         self._proc.wait()
         code = self._proc.returncode
@@ -1390,6 +1631,7 @@ class PipelineGUI(tk.Tk):
     def _pipeline_finished(self, failures, total):
         self._running = False
         self.run_button.configure(state="normal")
+        self.run_queue_button.configure(state="normal")
         self.stop_button.configure(state="disabled")
         if self._stop:
             self.status_var.set(f"Stopped after {total:.0f}s.")
@@ -1418,6 +1660,171 @@ class PipelineGUI(tk.Tk):
         except OSError as exc:
             self.log(f"Could not terminate: {exc}\n", "bad")
 
+    # -- queue ---------------------------------------------------------
+
+    def _queue_animal_dates(self):
+        """{(animal, date)} already in the queue, to skip when adding more."""
+        return {tuple(self.queue_tree.item(i, "values")[:2])
+                for i in self.queue_tree.get_children()}
+
+    def queue_add_current(self):
+        animal = self.animal_var.get().strip()
+        date = self.date_var.get().strip()
+        if not animal or not date:
+            messagebox.showerror("Queue", "Enter the animal and date first.")
+            return
+        if (animal, date) in self._queue_animal_dates():
+            return
+        self.queue_tree.insert("", "end", values=(animal, date, "pending"),
+                               tags=("pending",))
+
+    def queue_add_all_for_animal(self):
+        animal = self.animal_var.get().strip()
+        if not animal:
+            messagebox.showerror("Queue", "Enter the animal first.")
+            return
+        existing = self._queue_animal_dates()
+        added = 0
+        for day_animal, date, _ in registered_days():
+            if day_animal != animal or (animal, date) in existing:
+                continue
+            self.queue_tree.insert("", "end", values=(animal, date, "pending"),
+                                   tags=("pending",))
+            existing.add((animal, date))
+            added += 1
+        if not added:
+            self.status_var.set(f"No new registered days to add for {animal}.")
+
+    def queue_remove_selected(self):
+        for item_id in self.queue_tree.selection():
+            self.queue_tree.delete(item_id)
+
+    def queue_clear(self):
+        self.queue_tree.delete(*self.queue_tree.get_children())
+
+    def _set_queue_row_status(self, index, status):
+        children = self.queue_tree.get_children()
+        if index >= len(children):
+            return
+        item_id = children[index]
+        animal, date, _ = self.queue_tree.item(item_id, "values")
+        self.queue_tree.item(item_id, values=(animal, date, status), tags=(status,))
+
+    def start_queue(self):
+        if self._running:
+            return
+        children = self.queue_tree.get_children()
+        if not children:
+            messagebox.showerror("Queue", "Add at least one day to the queue first.")
+            return
+
+        python = self.interpreter_var.get().strip()
+        if not python or not Path(python).exists():
+            messagebox.showerror("Cannot run", f"Python interpreter not found: {python!r}")
+            return
+        selected_stages = [k for k, _, _ in STAGES if self.stage_vars[k].get()]
+        if not selected_stages:
+            messagebox.showerror("Cannot run", "No stages selected.")
+            return
+        needed = sorted({pkg for k in selected_stages for pkg in STAGE_PACKAGES.get(k, ())})
+        problem = check_interpreter_packages(python, needed)
+        if problem:
+            messagebox.showerror(
+                "Interpreter can't run these stages",
+                f"{python}\n\ncan't import what the selected stages need:\n\n"
+                f"{problem}\n\nPick a different interpreter (ms10 has the full "
+                f"set this pipeline needs) before running.")
+            return
+
+        self._save_settings()
+        self._stop = False
+        self._running = True
+        self.run_button.configure(state="disabled")
+        self.run_queue_button.configure(state="disabled")
+        self.stop_button.configure(state="normal")
+        for item_id in children:
+            animal, date, _ = self.queue_tree.item(item_id, "values")
+            self.queue_tree.item(item_id, values=(animal, date, "pending"), tags=("pending",))
+        self._queue_index = 0
+        self._queue_fail_count = 0
+        self._run_next_queue_day()
+
+    def _run_next_queue_day(self):
+        children = self.queue_tree.get_children()
+        if self._stop or self._queue_index >= len(children):
+            self._queue_finished()
+            return
+
+        animal, date, _ = self.queue_tree.item(children[self._queue_index], "values")
+        self._set_queue_row_status(self._queue_index, "running")
+        # Drives the same Animal/Date fields (and everything downstream of
+        # them - preflight, path fields) the top of the GUI uses, so the
+        # queue is really just "click through these days" automated.
+        self.animal_var.set(animal)
+        self.date_var.set(date)
+
+        if find_day_entry(load_registry(), animal, date) is None:
+            self.log(f"\nQueue: '{animal} {date}' is not registered - skipping.\n", "bad")
+            self._set_queue_row_status(self._queue_index, "not registered")
+            self._advance_queue()
+            return
+
+        if self.write_config_var.get() and not self.write_config():
+            self._set_queue_row_status(self._queue_index, "failed")
+            self._advance_queue()
+            return
+
+        try:
+            plan = self.build_plan()
+        except ValueError as exc:
+            self.log(f"\nQueue: '{animal} {date}': {exc}\n", "bad")
+            self._set_queue_row_status(self._queue_index, "failed")
+            self._advance_queue()
+            return
+
+        n = len(children)
+        self.log(f"\n{'#' * 72}\nQUEUE DAY {self._queue_index + 1}/{n}: {animal} {date}\n"
+                 f"{'#' * 72}\n", "banner")
+        self.status_var.set(f"Queue {self._queue_index + 1}/{n}: {animal} {date} running...")
+        for key, _, _ in STAGES:
+            self._set_stage_status(key, "pending" if self.stage_vars[key].get() else "skip")
+
+        opts = {"continue_on_error": self.continue_var.get()}
+
+        def worker():
+            failures, total = self._run_stage_plan(plan, opts)
+            self._post(lambda: self._queue_day_finished(failures, total))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _advance_queue(self):
+        self._queue_index += 1
+        self.after(10, self._run_next_queue_day)
+
+    def _queue_day_finished(self, failures, total):
+        if failures:
+            self._queue_fail_count += 1
+        self._set_queue_row_status(self._queue_index, "failed" if failures else "done")
+        self.log(f"\nQueue day finished in {total:.1f}s "
+                 f"({'OK' if not failures else f'{len(failures)} stage(s) failed'}).\n",
+                 "bad" if failures else "ok")
+        self._advance_queue()
+
+    def _queue_finished(self):
+        self._running = False
+        self.run_button.configure(state="normal")
+        self.run_queue_button.configure(state="normal")
+        self.stop_button.configure(state="disabled")
+        n = len(self.queue_tree.get_children())
+        if self._stop:
+            self.status_var.set(f"Queue stopped after {self._queue_index}/{n} day(s).")
+        else:
+            self.status_var.set(
+                f"Queue finished: {n - self._queue_fail_count}/{n} day(s) succeeded.")
+        self.log(f"\n{'=' * 72}\n{self.status_var.get()}\n{'=' * 72}\n",
+                 "bad" if self._queue_fail_count else "ok")
+        self.run_preflight()
+
     def _set_stage_status(self, key, state):
         text, color = {
             "pending": ("-", "#888"),
@@ -1436,6 +1843,20 @@ class PipelineGUI(tk.Tk):
 
     def log(self, text, tag=None):
         self.log_text.configure(state="normal")
+        if text.endswith("\r"):
+            # A live-updating progress line (tqdm et al, see _run_process) -
+            # overwrite the previous redraw instead of appending a new one,
+            # matching how a real terminal renders \r. The line is left open
+            # (no \n inserted) until either the next redraw replaces it again
+            # or something else's leading/embedded \n closes it off.
+            self.log_text.delete("end-1c linestart", "end-1c")
+            text = text[:-1]
+        else:
+            # A genuine line, kept as \r\n by _run_process's newline="" (needed
+            # to tell it apart from the case above) - normalize back to a bare
+            # \n so it stores/renders/copies cleanly, same as text=True used to
+            # give us automatically before that changed.
+            text = text.replace("\r\n", "\n")
         self.log_text.insert("end", text, tag or "")
         # Keep the widget bounded; these stages print a lot.
         if int(self.log_text.index("end-1c").split(".")[0]) > 6000:

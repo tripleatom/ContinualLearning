@@ -85,7 +85,18 @@ def find_merged_pkls(
     session_cols: list[str],
     excluded_sessions: set[str],
 ) -> dict[str, Path]:
-    """Newest *_grating_data_merged.pkl for each non-excluded session."""
+    """Newest *_grating_data_merged.pkl for each non-excluded session.
+
+    Curated (non-"_raw") pkls are always preferred over "_raw" pkls (exported
+    when no curated_analyzer existed for that session, see GratingExport.py);
+    "_raw" is only used if the session has no curated pkl at all. Within a tier,
+    a merged pkl is preferred over a per-task one, and ties broken by mtime.
+    """
+    def _tier(p: Path) -> tuple[bool, bool]:
+        is_raw = p.stem.endswith("_raw")
+        is_merged = p.stem.removesuffix("_raw").endswith("_grating_data_merged")
+        return (is_raw, not is_merged)  # sorts non-raw-merged first, raw-per-task last
+
     pkls: dict[str, Path] = {}
     for session in session_cols:
         if session in excluded_sessions:
@@ -93,11 +104,11 @@ def find_merged_pkls(
         analysis_dir = base_dir / session / "passive_embedding_analysis"
         if not analysis_dir.exists():
             continue
-        candidates = sorted(analysis_dir.glob("*_grating_data_merged.pkl"))
-        if not candidates:
-            candidates = sorted(analysis_dir.glob("*_grating_data*.pkl"))
-        if not candidates:
+        all_candidates = sorted(analysis_dir.glob("*_grating_data*.pkl"))
+        if not all_candidates:
             continue
+        best_tier = min(_tier(p) for p in all_candidates)
+        candidates = [p for p in all_candidates if _tier(p) == best_tier]
         pkls[session] = max(candidates, key=lambda p: p.stat().st_mtime)
     return pkls
 

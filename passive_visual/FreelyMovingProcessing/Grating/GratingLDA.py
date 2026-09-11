@@ -19,6 +19,8 @@ from grating_utils import (
     plot_trial_distribution,
     plot_summary_text,
     resolve_data_path,
+    format_grating_value,
+    format_grating_values,
 )
 
 
@@ -42,7 +44,7 @@ def perform_lda_analysis(firing_rates, orientation_labels, n_components=None):
     n_features = firing_rates.shape[1]
 
     print(f"\nLDA Analysis:")
-    print(f"  Orientations: {n_orientations} ({unique_orientations}°)")
+    print(f"  Orientations: {n_orientations} ({format_grating_values(unique_orientations)}°)")
     print(f"  Features (units): {n_features}")
     print(f"  Trials: {len(orientation_labels)}")
 
@@ -173,7 +175,7 @@ def _plot_3d_scatter(fig, data, labels, orientations, colors, n_comp, label_suff
         for i, ori in enumerate(orientations):
             mask = labels == ori
             ax.scatter(data[mask, 0], data[mask, 1], data[mask, 2],
-                       c=[colors[i]], label=f'{ori}{label_suffix}', alpha=0.85, s=70,
+                       c=[colors[i]], label=f'{format_grating_value(ori)}{label_suffix}', alpha=0.85, s=70,
                        edgecolors='none')
         ax.set_xlabel('LD1', fontsize=20, fontweight='bold', labelpad=10)
         ax.set_ylabel('LD2', fontsize=20, fontweight='bold', labelpad=10)
@@ -203,7 +205,7 @@ def _plot_2d_scatter(fig, data, labels, orientations, colors, n_comp, label_suff
         for i, ori in enumerate(orientations):
             mask = labels == ori
             ax.scatter(data[mask, 0], data[mask, 1],
-                       c=[colors[i]], label=f'{ori}{label_suffix}',
+                       c=[colors[i]], label=f'{format_grating_value(ori)}{label_suffix}',
                        alpha=0.85, s=70, edgecolors='none')
         ax.set_xlabel('LD1', fontsize=22, fontweight='bold')
         ax.set_ylabel('LD2', fontsize=22, fontweight='bold')
@@ -213,7 +215,7 @@ def _plot_2d_scatter(fig, data, labels, orientations, colors, n_comp, label_suff
             mask = labels == ori
             y_jitter = np.random.normal(0, 0.1, np.sum(mask))
             ax.scatter(data[mask, 0], y_jitter,
-                       c=[colors[i]], label=f'{ori}{label_suffix}',
+                       c=[colors[i]], label=f'{format_grating_value(ori)}{label_suffix}',
                        alpha=0.85, s=70, edgecolors='none')
         ax.set_xlabel('LD1', fontsize=22, fontweight='bold')
         ax.set_ylabel('Random jitter', fontsize=22, fontweight='bold')
@@ -244,7 +246,7 @@ def _plot_lda_coefficients(fig, results, unit_ids, orientations, label_suffix='�
         ax.set_ylabel('Discriminant', fontsize=22, fontweight='bold')
         ax.set_title('LDA Coefficients', fontsize=24, fontweight='bold', pad=12)
         ax.set_yticks(range(len(orientations)))
-        ax.set_yticklabels([f'{ori}{label_suffix}' for ori in orientations],
+        ax.set_yticklabels([f'{format_grating_value(ori)}{label_suffix}' for ori in orientations],
                            fontsize=18)
 
         if len(unit_ids) <= 20:
@@ -321,7 +323,7 @@ def run_analysis(data_path, time_window=(0.07, 0.16), save_plots=True, output_pa
             fr_sf = firing_rates[sf_mask]
             labels_sf = orientation_labels[sf_mask]
             sf_tag = f'_sf{sf}'
-            sf_display = f'SF={sf} cpd'
+            sf_display = f'SF={format_grating_value(sf)} cpd'
 
         print(f"\n{'='*60}")
         print(f"Analyzing {sf_display}  ({len(labels_sf)} trials)")
@@ -374,11 +376,12 @@ def run_analysis(data_path, time_window=(0.07, 0.16), save_plots=True, output_pa
             unique_sf_ori = sorted(set(sf_ori.tolist()))
 
             if len(unique_sf_ori) < 2:
-                print(f"  Orientation {ori}°: only one SF present, skipping.")
+                print(f"  Orientation {format_grating_value(ori)}°: only one SF present, skipping.")
                 continue
 
             print(f"\n{'='*60}")
-            print(f"SF decoding — orientation={ori}°  ({len(sf_ori)} trials, SFs={unique_sf_ori})")
+            print(f"SF decoding — orientation={format_grating_value(ori)}°  "
+                  f"({len(sf_ori)} trials, SFs={format_grating_values(unique_sf_ori)})")
             print(f"{'='*60}")
 
             trial_info_ori = {
@@ -400,7 +403,8 @@ def run_analysis(data_path, time_window=(0.07, 0.16), save_plots=True, output_pa
             fig = create_analysis_figure(lda_sf, unit_ids, trial_info_ori,
                                          save_path=fig_path,
                                          label_suffix=' cpd')
-            fig.suptitle(f"SF Decoding — Orientation={ori}°", fontsize=26, fontweight='bold', y=1.01)
+            fig.suptitle(f"SF Decoding — Orientation={format_grating_value(ori)}°",
+                         fontsize=26, fontweight='bold', y=1.01)
 
             all_results.append((lda_sf, fr_ori, sf_ori, unit_ids))
 

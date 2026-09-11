@@ -3,7 +3,7 @@
 Single source of truth imported by:
   - extract_sleep_lfp.py          (NWB -> low_freq/*_lfp_traces.npz)
   - compute_sleep_spectrograms.py (LFP traces -> *_spectrograms.npz)
-  - compute_sleep_features.py     (LFP + spectrograms -> feature pkl)
+  - compute_sleep_features.py     (spectrograms -> feature pkl)
   - plot_sleep_spectrograms.py    (feature pkl -> per-channel figures)
 
 Edit values here; the scripts pull from this module so they stay in sync.
@@ -50,7 +50,7 @@ ACTIVE_DATE = "260727"
 # Applied inside active_sleep_sessions(), so it reaches every stage at once
 # (extract / spectrograms / features / plots / sync). Kept separate from the
 # registry: the registry says what EXISTS for a day, this says what to run now.
-SESSION_FILTER = None
+SESSION_FILTER = "both"
 
 _day_cfg = load_day_config(ACTIVE_DATE, ACTIVE_ANIMAL)
 
@@ -71,7 +71,7 @@ session_name = Path(rec_folder).stem.split('.')[0]
 nwb_session_name = _day_cfg['nwb_session_name']
 
 # Shanks to process (shared by both scripts).
-shanks = [0, 1, 2, 3, 7]
+shanks = [0]
 
 # Folder holding the per-shank LFP / spectrogram .npz files.
 low_freq_folder = Path(rec_folder) / "low_freq"
@@ -153,6 +153,37 @@ VELOCITY_KEYPOINTS = ("left_midside", "right_midside",
 # confident about it.
 VELOCITY_LIKELIHOOD_THRESHOLD = 0.6
 
+# --- Jitter removal ---------------------------------------------------------
+# Tracking jitter is filtered out of POSITION, before differentiation and
+# before the speed magnitude is taken. The order is the whole point:
+# sqrt(vx^2+vy^2) rectifies zero-mean jitter into a positive speed offset, and
+# once that offset exists no amount of later averaging removes it - averaging
+# only shrinks its variance. Filtering the position first lowers the noise
+# floor instead of freezing it in.
+#
+# The front camera does not run at a fixed frame rate, so the cutoff is given
+# in Hz and applied to a uniformly resampled copy of the track (see
+# lowpass_velocity in proc_func_velocity.py). A window given in FRAMES - as the
+# old Savitzky-Golay call used - is a different cutoff on every session.
+VELOCITY_CUTOFF_HZ = 0.5    # position low-pass (~2 s). The speed is read on a
+                            # 10 s window / 1 s grid downstream, so nothing
+                            # faster than this survives anyway.
+VELOCITY_FILTER_ORDER = 2   # Butterworth order, run forward+backward
+                            # (filtfilt): zero phase, effective order 4.
+
+# Frames further than this from any confidently tracked frame stay NaN instead
+# of being interpolated. A long dropout interpolates to a straight line, which
+# reads as a low, entirely plausible speed - i.e. as "the animal was still",
+# which is exactly the mistake the NREM gate must not make.
+VELOCITY_MAX_GAP_SEC = 0.5
+
+# Camera spatial calibration: the *_PROC / *_DLC tracked coordinates are raw
+# pixels, so proc_func_velocity.py's saved 'velocity' is pixels/s ("position
+# units/s" - see its own print statement), not a physical unit. 1 px = 1 mm in
+# the tracked plane, so plot_sleep_spectrograms.py divides by this to display
+# cm/s.
+PIXELS_PER_MM = 1.0
+
 
 # =====================================================
 # POPULATION FIRING RATE  (sleep_population_rate.py -> plot_sleep_spectrograms.py)
@@ -205,7 +236,7 @@ def active_sleep_sessions(sessions=None):
 preproc_params = {
     'reference': 'global',
     'operator': 'median',
-    'target_fs': 500,      # Downsample target FS (Hz)
+    'target_fs': 1250,     # Downsample target FS (Hz); 30000/1250 = 24 (integer decimate)
     'lfp_min': 1,          # LFP band low edge (Hz; safer than 0.1 Hz)
     'lfp_max': 200,        # LFP band high edge (Hz)
 }
@@ -228,21 +259,46 @@ CHUNK_DURATION = "30s"
 # =====================================================
 # SPECTROGRAM  (compute_sleep_spectrograms.py)
 # =====================================================
-# Computed on the 500 Hz LFP. These give:
-#   • ~2 s window  • ~0.24 Hz freq resolution  • ~0.5 s time steps
+# Computed on the 1250 Hz LFP. These give:
+#   • 10 s window  • 0.1 Hz native freq resolution  • 1 s steps, so the saved
+#     spectrogram is sampled at 1 Hz.
+# Before saving, the linear FFT grid is reduced to `n_log_bins` log-spaced
+# frequencies over [log_fmin, log_fmax] (see logbin_rows in
+# compute_sleep_spectrograms.py). That log grid is what PC1, the artifact
+# detector and the plots all consume; it also keeps the npz ~60x smaller than
+# saving every 0.1 Hz row up to Nyquist would.
 spec_params = {
-    "nperseg": 1024,       # 1024 samples / 500 Hz ≈ 2.048 s
-    "noverlap": 768,       # 75% overlap = 1.5 s overlap
-    "nfft": 2048,          # gives ~0.24 Hz freq resolution
+    "nperseg": 12500,      # 12500 samples / 1250 Hz = 10 s window
+    "noverlap": 11250,     # 10 s - 1 s -> 1 s step (1 Hz spectrogram sampling)
+    "nfft": 12500,         # 0.1 Hz native freq resolution
     "scaling": "density",
     "mode": "psd",
+    # Saved frequency axis: log-spaced 1-100 Hz. Bins narrower than the native
+    # 0.1 Hz grid (the lowest few) are interpolated instead of averaged.
+    "log_fmin": 1.0,
+    "log_fmax": 100.0,
+    "n_log_bins": 100,
 }
+
+# Velocity is reduced onto this window/step, so the speed gate and the delta
+# index it is thresholded against carry the same temporal support. Derived from
+# spec_params instead of restated, so the two cannot drift apart.
+VELOCITY_WINDOW_SEC = spec_params["nperseg"] / preproc_params["target_fs"]
+VELOCITY_STEP_SEC = ((spec_params["nperseg"] - spec_params["noverlap"])
+                     / preproc_params["target_fs"])
+
+# A window holding less than this fraction of the frames it should contain is
+# NaN, not a mean over whichever few frames happened to land in it.
+VELOCITY_MIN_COVERAGE = 0.5
 
 
 # =====================================================
 # SLEEP FEATURES  (compute_sleep_features.py)
 # =====================================================
 band_params = {
+    # Band envelopes are integrated from the saved spectrogram rows, so edges
+    # below spec_params['log_fmin'] are clipped to the grid (delta's 0.5 Hz
+    # edge -> 1 Hz; the LFP is highpassed at lfp_min = 1 Hz anyway).
     'bands': {
         'delta': (0.5, 4),
         'theta': (5, 10),
@@ -251,7 +307,10 @@ band_params = {
         # (num_low, num_high, den_low, den_high)
         'theta_ratio': (5, 10, 2, 15),
     },
-    'smoothing_window': 10,  # seconds for band power smoothing
+    # Only used by plot_sleep_spectrograms.py's on-the-fly 4-25 Hz trace; the
+    # pipeline band envelopes get their ~10 s smoothing from the spectrogram
+    # window itself.
+    'smoothing_window': 10,
 }
 
 
@@ -289,14 +348,15 @@ plot_params = {
     'vmin_extension': 0.0,
     'vmax_extension': 0.0,
 
-    # Frequency display range for spectrogram
-    'freq_min': 0.5,
+    # Frequency display range for spectrogram (the saved log grid spans
+    # spec_params log_fmin-log_fmax, so there is nothing below 1 Hz to show)
+    'freq_min': 1,
     'freq_max': 100,
 
     # Which trace panels to draw below the spectrogram, top-to-bottom. Options:
     #   'pc1', 'theta_ratio', 'delta', 'sigma', 'gamma'
     # (velocity is appended separately when available.)
-    'trace_panels': ['delta', '4_25', 'gamma'],
+    'trace_panels': ['pc1', 'theta_ratio', 'delta', '4_25', 'gamma'],
 
     # Y-axis limits for normalized band power plots (in standard deviations)
     'band_ylim': (-4, 4),
@@ -351,7 +411,7 @@ artifact_params = {
 # NREM SCORING AND CONSOLIDATED-WINDOW SELECTION  (score_nrem_epochs.py)
 # =====================================================
 # Finds the period(s) where the animal is "fully asleep" (consolidated NREM),
-# from the 500 Hz band-powers pkl. NREM = sustained high slow-wave activity
+# from the band-powers pkl. NREM = sustained high slow-wave activity
 # (PC1 of the spectrogram, oriented by delta) with low movement (broadband
 # power proxy). Output feeds the UP/DOWN stage.
 sleep_detect_params = {

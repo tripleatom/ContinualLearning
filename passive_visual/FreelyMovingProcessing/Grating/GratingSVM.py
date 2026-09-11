@@ -21,6 +21,8 @@ from grating_utils import (
     plot_trial_distribution,
     plot_summary_text,
     resolve_data_path,
+    format_grating_value,
+    format_grating_values,
 )
 
 
@@ -51,7 +53,7 @@ def perform_svm_analysis(firing_rates, orientation_labels, kernel='rbf', C=1.0, 
 
     print(f"\nSVM Analysis:")
     print(f"  Kernel: {kernel} | C: {C} | gamma: {gamma}")
-    print(f"  Orientations: {n_orientations} ({unique_orientations}°)")
+    print(f"  Orientations: {n_orientations} ({format_grating_values(unique_orientations)}°)")
     print(f"  Features (units): {n_features}")
     print(f"  Trials: {len(orientation_labels)}")
 
@@ -160,7 +162,7 @@ def create_analysis_figure(results, unit_ids, trial_info, save_path=None,
     handles = [
         plt.Line2D([0], [0], marker='o', linestyle='', color=colors[i],
                    markerfacecolor=colors[i], markeredgecolor='none',
-                   markersize=10, label=f'{ori}{label_suffix}')
+                   markersize=10, label=f'{format_grating_value(ori)}{label_suffix}')
         for i, ori in enumerate(unique_ori)
     ]
     fig.legend(handles=handles, loc='upper center', ncol=min(len(handles), 8),
@@ -189,7 +191,7 @@ def _plot_pca_3d(fig, results, labels, orientations, colors, label_suffix='°'):
         for i, ori in enumerate(orientations):
             mask = labels == ori
             ax.scatter(pca_proj[mask, 0], pca_proj[mask, 1], pca_proj[mask, 2],
-                       c=[colors[i]], label=f'{ori}{label_suffix}',
+                       c=[colors[i]], label=f'{format_grating_value(ori)}{label_suffix}',
                        alpha=0.85, s=70, edgecolors='none')
         ax.set_xlabel(f'PC1 ({pca_var[0]:.1%})', fontsize=20,
                       fontweight='bold', labelpad=10)
@@ -223,7 +225,7 @@ def _plot_pca_2d(fig, results, labels, orientations, colors, label_suffix='°'):
         for i, ori in enumerate(orientations):
             mask = labels == ori
             ax.scatter(pca_proj[mask, 0], pca_proj[mask, 1],
-                       c=[colors[i]], label=f'{ori}{label_suffix}',
+                       c=[colors[i]], label=f'{format_grating_value(ori)}{label_suffix}',
                        alpha=0.85, s=70, edgecolors='none')
         ax.set_xlabel(f'PC1 ({pca_var[0]:.1%})', fontsize=22, fontweight='bold')
         ax.set_ylabel(f'PC2 ({pca_var[1]:.1%})', fontsize=22, fontweight='bold')
@@ -233,7 +235,7 @@ def _plot_pca_2d(fig, results, labels, orientations, colors, label_suffix='°'):
         for i, ori in enumerate(orientations):
             mask = labels == ori
             ax.scatter(pca_proj[mask, 0], y_jitter[mask],
-                       c=[colors[i]], label=f'{ori}{label_suffix}',
+                       c=[colors[i]], label=f'{format_grating_value(ori)}{label_suffix}',
                        alpha=0.85, s=70, edgecolors='none')
         ax.set_xlabel(f'PC1 ({pca_var[0]:.1%})', fontsize=22, fontweight='bold')
         ax.set_ylabel('Random jitter', fontsize=22, fontweight='bold')
@@ -265,7 +267,7 @@ def _plot_svm_weights(fig, results, unit_ids, orientations, label_suffix='°'):
         ax.set_title('SVM Weights (linear kernel)', fontsize=24,
                      fontweight='bold', pad=12)
         ax.set_yticks(range(len(orientations)))
-        ax.set_yticklabels([f'{ori}{label_suffix}' for ori in orientations],
+        ax.set_yticklabels([f'{format_grating_value(ori)}{label_suffix}' for ori in orientations],
                            fontsize=18)
 
         if len(unit_ids) <= 20:
@@ -370,7 +372,7 @@ def run_analysis(data_path, time_window=(0.07, 0.16), save_plots=True,
             fr_sf = firing_rates[sf_mask]
             labels_sf = orientation_labels[sf_mask]
             sf_tag = f'_sf{sf}'
-            sf_display = f'SF={sf} cpd'
+            sf_display = f'SF={format_grating_value(sf)} cpd'
 
         print(f"\n{'='*60}")
         print(f"Analyzing {sf_display}  ({len(labels_sf)} trials)")
@@ -426,11 +428,12 @@ def run_analysis(data_path, time_window=(0.07, 0.16), save_plots=True,
             unique_sf_ori = sorted(set(sf_ori.tolist()))
 
             if len(unique_sf_ori) < 2:
-                print(f"  Orientation {ori}°: only one SF present, skipping.")
+                print(f"  Orientation {format_grating_value(ori)}°: only one SF present, skipping.")
                 continue
 
             print(f"\n{'='*60}")
-            print(f"SF decoding - orientation={ori}°  ({len(sf_ori)} trials, SFs={unique_sf_ori})")
+            print(f"SF decoding - orientation={format_grating_value(ori)}°  "
+                  f"({len(sf_ori)} trials, SFs={format_grating_values(unique_sf_ori)})")
             print(f"{'='*60}")
 
             trial_info_ori = {
@@ -454,7 +457,7 @@ def run_analysis(data_path, time_window=(0.07, 0.16), save_plots=True,
                                          save_path=fig_path,
                                          label_suffix=' cpd',
                                          is_orientation=False)
-            fig.suptitle(f"SF SVM Decoding - Orientation={ori}° (kernel={kernel})",
+            fig.suptitle(f"SF SVM Decoding - Orientation={format_grating_value(ori)}° (kernel={kernel})",
                          fontsize=14, y=1.01)
 
             all_results.append((svm_sf, fr_ori, sf_ori, unit_ids))

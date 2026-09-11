@@ -1,12 +1,22 @@
 """
-Collect videos into session folders  --  GUI
-============================================
+Collect videos and behavior logs into session folders  --  GUI
+================================================================
 
-A window around collect_videos.py: pick the destination animal folders (as many
-as you like, chosen fresh each time), preview exactly what would move, then move
-it. All naming rules, the ``video`` subfolder creation and the safe
-copy-verify-delete transfer live in collect_videos.py -- this is only the front
-end, so the GUI and the command line can never drift apart.
+A window around collect_session_data.py: pick the destination animal folders (as
+many as you like, chosen fresh each time), preview exactly what would move, then
+move it. All naming rules, the ``video`` subfolder creation and the safe
+copy-verify-delete transfer live in collect_session_data.py -- this is only the
+front end, so the GUI and the command line can never drift apart.
+
+Four independent sources feed each session folder, shown as three columns:
+    Video    -- camera captures; land in ``<session>/video/``.
+    Passive  -- the drifting-grating disk sessions: the Unity engine log
+                folder; lands straight in ``<session>/``. No task or reward
+                is involved.
+    Task     -- two SphereTask behavior-summary folders, one per task
+                variant (grating task, contrast task); both land straight in
+                ``<session>/``.
+Any folder can be left blank to skip that source.
 
 Typical use:
     1. "Add folder..." and pick  \\\\10.129.151.88\\...\\experiment_data\\CnL46
@@ -20,24 +30,49 @@ the dashes are there to tell you what is going across, not to hold anything back
 
 Requires only the Python standard library (tkinter).  Run:
 
-    python collect_videos_gui.py
+    python collect_session_data_gui.py
 """
 
 from __future__ import annotations
 
 import json
 import queue
+import sys
 import threading
 from pathlib import Path
 
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from collect_videos import (COMPANION_KINDS, DEFAULT_VIDEO_ROOT, VIDEO_SUBDIR,
+if __package__ in (None, ""):
+    # Running as a plain script (e.g. `python collect_session_data_gui.py`) rather
+    # than `python -m data_collection.collect_session_data_gui` -- put the project
+    # root on sys.path so the package-style import below can still find data_collection.
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from data_collection.collect_session_data import (COMPANION_KINDS, DEFAULT_CONTRAST_TASK_ROOT,
+                            DEFAULT_GRATING_TASK_ROOT, DEFAULT_UNITY_ROOT,
+                            DEFAULT_VIDEO_ROOT, VIDEO_SUBDIR,
                             AnimalPlan, plan_animal, preview_lines, run_plan,
                             session_date)
 
-SETTINGS_FILE = Path(__file__).with_name("collect_videos_gui_settings.json")
+SETTINGS_FILE = Path(__file__).with_name("collect_session_data_gui_settings.json")
+
+# Source fields, grouped into the three GUI columns. Each entry is
+# (key, entry label, default root); `key` doubles as the plan_animal() kwarg
+# name (<key>_root) and the settings-file key (<key>_root).
+SOURCE_COLUMNS: list[tuple[str, list[tuple[str, str, Path]]]] = [
+    ("Video", [
+        ("video", "Video folder:", DEFAULT_VIDEO_ROOT),
+    ]),
+    ("Passive (drifting grating)", [
+        ("unity", "Unity log folder:", DEFAULT_UNITY_ROOT),
+    ]),
+    ("Task", [
+        ("grating_task", "Grating task folder:", DEFAULT_GRATING_TASK_ROOT),
+        ("contrast_task", "Contrast task folder:", DEFAULT_CONTRAST_TASK_ROOT),
+    ]),
+]
 
 
 # ---------------------------------------------------------------------------
@@ -101,13 +136,15 @@ class MoveWorker(threading.Thread):
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Collect videos into session folders")
-        self.geometry("900x660")
+        self.title("Collect videos and behavior logs into session folders")
+        self.geometry("1100x740")
 
         self.q: queue.Queue = queue.Queue()
         self.worker: MoveWorker | None = None
         self.plans: list[AnimalPlan] = []
         self.last_browse = ""
+        self.source_vars: dict[str, tk.StringVar] = {}
+        self.source_labels: dict[str, str] = {}
 
         self._build_ui()
         self._load_settings()
@@ -145,12 +182,24 @@ class App(tk.Tk):
             fill="x", pady=1)
         ttk.Button(btns, text="Clear", command=self._clear_list).pack(fill="x", pady=1)
 
-        # Video root
-        ttk.Label(frm, text="Video folder (source):").grid(row=1, column=0, sticky="w", **pad)
-        self.video_var = tk.StringVar(value=str(DEFAULT_VIDEO_ROOT))
-        ttk.Entry(frm, textvariable=self.video_var).grid(row=1, column=1, sticky="ew", **pad)
-        ttk.Button(frm, text="Browse...", command=self._browse_video).grid(
-            row=1, column=2, sticky="ew", **pad)
+        # Sources: three columns -- Video | Passive | Task
+        src = ttk.Frame(frm)
+        src.grid(row=1, column=0, columnspan=3, sticky="ew", **pad)
+        for col_i, (title, fields) in enumerate(SOURCE_COLUMNS):
+            src.columnconfigure(col_i, weight=1)
+            box = ttk.LabelFrame(src, text=title, padding=6)
+            box.grid(row=0, column=col_i, sticky="new", padx=4)
+            for key, label, default in fields:
+                self.source_labels[key] = label
+                var = tk.StringVar(value=str(default))
+                self.source_vars[key] = var
+                ttk.Label(box, text=label).pack(anchor="w")
+                field_row = ttk.Frame(box)
+                field_row.pack(fill="x", pady=(0, 6))
+                ttk.Entry(field_row, textvariable=var).pack(side="left", fill="x", expand=True)
+                ttk.Button(field_row, text="...", width=3,
+                          command=lambda k=key: self._browse_source(k)).pack(
+                    side="left", padx=(3, 0))
 
         # Options
         opt = ttk.Frame(frm)
@@ -158,8 +207,9 @@ class App(tk.Tk):
         self.overwrite_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(opt, text="Overwrite destination files that differ in size",
                         variable=self.overwrite_var).pack(side="left")
-        ttk.Label(opt, text=f"   Files move into  <session>\\{VIDEO_SUBDIR}\\  "
-                            f"and are deleted from the video folder.",
+        ttk.Label(opt, text=f"   Video files move into  <session>\\{VIDEO_SUBDIR}\\ ;  "
+                            f"passive/task files move into  <session>\\  itself. "
+                            f"Leave any folder blank to skip that source.",
                   foreground="#555").pack(side="left")
 
         # Actions
@@ -253,11 +303,13 @@ class App(tk.Tk):
         self.move_btn.configure(state="disabled")
         self.status_var.set("Destinations changed - click Preview.")
 
-    def _browse_video(self):
-        d = filedialog.askdirectory(title="Select the folder the videos are recorded into",
-                                    initialdir=self.video_var.get() or None)
+    def _browse_source(self, key: str):
+        var = self.source_vars[key]
+        d = filedialog.askdirectory(
+            title=f"Select the {self.source_labels[key].rstrip(':')} folder",
+            initialdir=var.get() or None)
         if d:
-            self.video_var.set(d)
+            var.set(d)
             self._invalidate()
 
     # -- Log ----------------------------------------------------------------
@@ -275,6 +327,14 @@ class App(tk.Tk):
 
     # -- Actions ------------------------------------------------------------
 
+    def _source_root(self, key: str) -> Path | None:
+        """Blank field -> source disabled (None); otherwise the typed path."""
+        text = self.source_vars[key].get().strip().strip('"')
+        return Path(text) if text else None
+
+    def _all_roots(self) -> dict[str, Path | None]:
+        return {key: self._source_root(key) for key in self.source_vars}
+
     def _build_plans(self) -> bool:
         """Scan every destination. Returns True if anything is there to move."""
         dest_roots = self._dest_roots()
@@ -282,13 +342,19 @@ class App(tk.Tk):
             messagebox.showerror("No destinations",
                                  "Add at least one animal folder first.")
             return False
-        video_root = Path(self.video_var.get().strip().strip('"'))
-        if not video_root.is_dir():
-            messagebox.showerror("Video folder not found",
-                                 f"This folder does not exist:\n{video_root}")
+        roots = self._all_roots()
+        if not any(roots.values()):
+            messagebox.showerror("No sources", "Set at least one source folder.")
             return False
+        for key, root in roots.items():
+            if root is not None and not root.is_dir():
+                messagebox.showerror(f"{self.source_labels[key].rstrip(':')} not found",
+                                     f"This folder does not exist:\n{root}")
+                return False
 
-        self.plans = [plan_animal(root, video_root) for root in dest_roots]
+        self.plans = [plan_animal(root, roots["video"], roots["unity"], roots["grating_task"],
+                                  roots["contrast_task"])
+                     for root in dest_roots]
         return any(p.n_files for p in self.plans)
 
     def _preview(self):
@@ -300,8 +366,9 @@ class App(tk.Tk):
             self.status_var.set("Nothing to scan.")
             return
 
-        video_root = self.video_var.get().strip().strip('"')
-        self._log(f"Source: {video_root}")
+        for key, root in self._all_roots().items():
+            if root:
+                self._log(f"{self.source_labels[key].rstrip(':')} source: {root}")
         self._log(f"Columns after each recording are [{' '.join(COMPANION_KINDS)}]; "
                   f"a dashed entry means that companion was never made.")
         self._log("")
@@ -328,16 +395,17 @@ class App(tk.Tk):
 
     def _move(self):
         if not self.plans and not self._build_plans():
-            messagebox.showinfo("Nothing to move", "No matching videos were found.")
+            messagebox.showinfo("Nothing to move", "No matching files were found.")
             return
 
         n_files = sum(p.n_files for p in self.plans)
         n_bytes = sum(p.n_bytes for p in self.plans)
+        sources = [str(r) for r in self._all_roots().values() if r]
         if not messagebox.askyesno(
                 "Confirm move",
                 f"Move {n_files} file(s) ({n_bytes / 1e9:.2f} GB) into the session "
                 f"folders?\n\nThey will be DELETED from\n"
-                f"{self.video_var.get()}\nonce each copy is verified."):
+                f"{chr(10).join(sources)}\nonce each copy is verified."):
             return
 
         self._clear_log()
@@ -397,19 +465,22 @@ class App(tk.Tk):
             data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return
-        self.video_var.set(data.get("video_root", str(DEFAULT_VIDEO_ROOT)))
+        for key, var in self.source_vars.items():
+            saved = data.get(f"{key}_root")
+            if saved:
+                var.set(saved)
         self.overwrite_var.set(bool(data.get("overwrite", False)))
         self.last_browse = data.get("last_browse", "")
         for d in data.get("dest_roots", []):
             self.dest_list.insert("end", d)
 
     def _save_settings(self):
-        data = {
-            "video_root": self.video_var.get(),
+        data = {f"{key}_root": var.get() for key, var in self.source_vars.items()}
+        data.update({
             "overwrite": self.overwrite_var.get(),
             "last_browse": self.last_browse,
             "dest_roots": [str(p) for p in self._dest_roots()],
-        }
+        })
         try:
             SETTINGS_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
         except OSError:

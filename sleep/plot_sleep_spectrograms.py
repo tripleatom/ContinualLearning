@@ -6,16 +6,24 @@ import numpy as np
 import matplotlib.pyplot as plt
 import pickle
 from scipy.ndimage import binary_dilation
+from tqdm import tqdm
+
+# Only our own per-channel tqdm.update() calls should trigger a redraw. stdout
+# is often a pipe (sleep_pipeline_gui.py's log pane), not a real terminal, so
+# tqdm's usual \r-overwrite becomes one new log line per redraw - the
+# background monitor thread's idle-refresh would print extra lines with no
+# actual progress to show for it.
+tqdm.monitor_interval = 0
 
 from sleep_pipeline_config import rec_folder, session_name, shanks, plot_params
 from sleep_pipeline_config import band_params, artifact_params
 from sleep_pipeline_config import original_fs as fs
 from sleep_pipeline_config import resolve_existing_file, resolve_output_folder, mirror_on_backup_server
 from sleep_pipeline_config import sleep_sessions, active_sleep_sessions, video_folder
-from sleep_pipeline_config import VELOCITY_SOURCE
-from sleep_pipeline_config import SORTOUT_ROOTS, population_rate_params
-from proc_func_velocity import velocity_output_name
-from sleep_population_rate import population_rate
+from sleep_pipeline_config import VELOCITY_SOURCE, PIXELS_PER_MM
+from sleep_pipeline_config import VELOCITY_WINDOW_SEC, VELOCITY_MIN_COVERAGE
+from proc_func_velocity import aggregate_speed, velocity_output_name
+from band_powers_io import band_time, band_fs, load_spectrograms
 
 
 # Y-axis labels for the optional trace panels below the spectrogram.
@@ -125,6 +133,10 @@ def parse_args():
     parser.add_argument("--channels", nargs="+", type=int, default=None)
     parser.add_argument("--max-channels", type=int, default=None)
     parser.add_argument("--output-suffix", default="")
+    parser.add_argument(
+        "--overwrite", action="store_true",
+        help="Recompute even when a channel's figure + trace pkl already exist "
+             "(default: existing outputs are kept and the channel is skipped).")
     return parser.parse_args()
 
 
@@ -212,8 +224,13 @@ for session_key, session_cfg in sessions_to_run.items():
       with open(velocity_file, 'rb') as f:
           velocity_data = pickle.load(f)
       velocity_time_raw = velocity_data['time_stamp']
-      velocity_raw = velocity_data['velocity']
-      print(f"  Loaded velocity data: {velocity_file.name} ({len(velocity_raw)} samples)")
+      # proc_func_velocity.py saves raw pixels/s ("position units/s" - see its
+      # own print statement); PIXELS_PER_MM converts to physical cm/s so this
+      # script's plot label, export, and the artifact_params velocity gate all
+      # mean what they already claim to.
+      velocity_raw = velocity_data['velocity'] / PIXELS_PER_MM / 10.0
+      print(f"  Loaded velocity data: {velocity_file.name} ({len(velocity_raw)} samples, "
+           f"converted px/s -> cm/s at {PIXELS_PER_MM} px/mm)")
   else:
       velocity_time_raw = None
       velocity_raw = None
@@ -260,6 +277,25 @@ for session_key, session_cfg in sessions_to_run.items():
       print(f"    Velocity samples: {len(velocity_synced)}")
       print(f"    Velocity time range: {velocity_time_synced[0]:.2f} - {velocity_time_synced[-1]:.2f} s")
 
+      # Native temporal resolution = the front camera's frame interval - not a
+      # fixed constant in code, read off the synced timestamps.
+      vel_dt = float(np.median(np.diff(velocity_time_synced)))
+      print(f"    Velocity native resolution: {vel_dt * 1000:.1f} ms ({1 / vel_dt:.1f} fps)")
+
+      # Averaged over the SAME window the spectrogram above it uses (10 s), so
+      # the panel carries the same temporal support as the traces it sits next
+      # to rather than merely looking as smooth as them - the old 1 s boxcar
+      # matched the spectrogram's step, not its window. Evaluated at the native
+      # frame times so the x-axis compression below is untouched.
+      # velocity_synced itself stays unaggregated: it drives the optional
+      # artifact velocity gate and the 'realtime' export.
+      velocity_smoothed = aggregate_speed(
+          velocity_time_synced, velocity_synced, velocity_time_synced,
+          VELOCITY_WINDOW_SEC, min_coverage=VELOCITY_MIN_COVERAGE)['mean']
+      print(f"    Velocity smoothing: {VELOCITY_WINDOW_SEC:g} s window "
+            f"(spectrogram window), {np.sum(~np.isfinite(velocity_smoothed)):,} "
+            f"samples below {VELOCITY_MIN_COVERAGE:.0%} coverage")
+
       plot_velocity = True
   else:
       plot_velocity = False
@@ -299,18 +335,24 @@ for session_key, session_cfg in sessions_to_run.items():
 
       shank_data = all_data['shanks_data'][shank_id]
 
-      # Extract all needed data
-      lfp_time = shank_data['lfp_time']
+      # Extract all needed data. `lfp_time` is the grid the band powers and
+      # PC1 are stored on: the spectrogram grid for a compact file, the 500 Hz
+      # LFP grid for one written before that change. band_time() returns
+      # whichever applies, and everything below is written against it rather
+      # than against a rate, so both load identically. The spectrogram comes
+      # from its own npz - the pickle no longer carries a copy.
+      lfp_time = band_time(shank_data)
       pc1_spectrogram = shank_data['pc1_spectrogram']
       channel_ids = shank_data['channel_ids']
       times = shank_data['spectrogram_times']
       freqs = shank_data['spectrogram_freqs']
-      spectrograms = shank_data['spectrograms']  # (n_channels, n_freqs, n_times)
+      spectrograms = load_spectrograms(shank_data, band_powers_file, shank_id)
       sampling_rate = shank_data['sampling_rate']
 
       print(f"\nLoaded data for Shank {shank_id}:")
       print(f"  Spectrograms shape: {spectrograms.shape}")
-      print(f"  Sampling rate: {sampling_rate} Hz")
+      print(f"  LFP sampling rate: {sampling_rate} Hz")
+      print(f"  Band powers / PC1 stored at: {band_fs(shank_data):.3f} Hz")
       print(f"  Total duration: {lfp_time[-1]:.1f} s")
       print(f"  Number of channels: {len(channel_ids)}")
 
@@ -340,31 +382,6 @@ for session_key, session_cfg in sessions_to_run.items():
 
           # === COLOR SCALE WILL BE DETERMINED PER CHANNEL AFTER Z-SCORING ===
 
-      # === POPULATION FIRING RATE (this shank) ===
-      # Loaded once per shank, not per channel: every channel of a shank shares
-      # the same sorting, and reading the spike trains is the slow part.
-      pop_time = pop_rate = None
-      pop_info = {}
-      if population_rate_params.get('enabled', False):
-          pop_time, pop_rate, pop_info = population_rate(
-              session_name,
-              shank_id,
-              session_cfg['start_sample'],
-              session_cfg['end_sample'],
-              fs,
-              SORTOUT_ROOTS,
-              bin_size_sec=population_rate_params['bin_size_sec'],
-              smooth_sigma_bins=population_rate_params['smooth_sigma_bins'],
-          )
-          if pop_rate is None:
-              print(f"  Population rate unavailable: {pop_info.get('status')}")
-          else:
-              print(f"  Population rate: {pop_info['n_units']} units, "
-                    f"{pop_info['n_spikes_in_window']:,} spikes in window, "
-                    f"mean {pop_info['mean_rate']:.1f} spikes/s "
-                    f"[{pop_info['source']}]")
-      plot_pop_rate = pop_rate is not None
-
       # === PLOTTING ===
       total_duration = lfp_time_cropped[-1] - lfp_time_cropped[0]
       print(f"\nProcessing {len(channel_ids)} channels, full recording ({total_duration:.1f}s each)...")
@@ -378,8 +395,7 @@ for session_key, session_cfg in sessions_to_run.items():
       trace_panels = list(plot_params.get('trace_panels',
                                           ['pc1', 'theta_ratio', 'delta',
                                            'sigma', 'gamma']))
-      n_trace = (len(trace_panels) + (1 if plot_velocity else 0)
-                 + (1 if plot_pop_rate else 0))
+      n_trace = len(trace_panels) + (1 if plot_velocity else 0)
       n_subplots = 1 + n_trace
       height_ratios = [2] + [1] * n_trace
 
@@ -396,10 +412,28 @@ for session_key, session_cfg in sessions_to_run.items():
           print("  No channels selected for this shank, skipping...")
           continue
 
-      # Loop through selected channels
-      for n_selected, ch_idx in enumerate(channel_indices, start=1):
+      # Loop through selected channels. Per-channel detail (artifacts, color
+      # scale, concatenation) goes on the bar's postfix instead of separate
+      # print lines - with dozens of channels per shank this loop is what was
+      # flooding the log, not the once-per-shank/session banners above.
+      channel_bar = tqdm(channel_indices, desc=f"{session_key} sh{shank_id}", unit="ch")
+      for ch_idx in channel_bar:
           ch_id = channel_ids[ch_idx]
-          print(f"\n=== Processing Channel {ch_id} ({n_selected}/{len(channel_indices)} selected) ===")
+
+          # Computed early (needs only session/shank/channel identifiers, all
+          # known already) so an already-done channel can skip straight past
+          # every computation below instead of redoing it just to overwrite
+          # the same file.
+          output_file = output_folder / (
+              f'{session_label}_sh{shank_id}_ch{ch_id:03d}_full_recording'
+              f'{args.output_suffix}.png')
+          trace_pkl = output_folder / (
+              f'{session_label}_sh{shank_id}_ch{ch_id:03d}_trace_data'
+              f'{args.output_suffix}.pkl')
+          if not args.overwrite and output_file.exists() and trace_pkl.exists():
+              channel_bar.set_postfix_str(f"ch{ch_id} already exists - skipped",
+                                          refresh=False)
+              continue
 
           # Get data for this channel (already cropped)
           channel_spectrogram = spectrograms_cropped[ch_idx, :, :]
@@ -423,8 +457,6 @@ for session_key, session_cfg in sessions_to_run.items():
                   art_mask_lfp |= vel_on_lfp > artifact_params['velocity_threshold']
               artifact_spans = mask_to_spans(times_cropped, art_mask)
               frac = 100.0 * np.mean(art_mask)
-              print(f"  Artifacts: {len(artifact_spans)} spans, "
-                    f"{frac:.1f}% of bins flagged (n_mad={artifact_params['n_mad']})")
           else:
               art_mask = np.zeros(len(times_cropped), bool)
               art_mask_lfp = np.zeros(len(lfp_time_cropped), bool)
@@ -454,10 +486,6 @@ for session_key, session_cfg in sessions_to_run.items():
           if remove_mode == 'blank':
               channel_spectrogram_zscored[:, art_mask] = np.nan
 
-          # Print z-scored data range (over the kept, non-artifact bins)
-          print(f"  Z-scored spectrogram range: [{np.nanmin(channel_spectrogram_zscored):.3f}, {np.nanmax(channel_spectrogram_zscored):.3f}]")
-
-
           # Determine color scale from the kept (non-artifact) bins only.
           zscored_values = channel_spectrogram_zscored[:, good_cols]
           zscored_values = zscored_values[np.isfinite(zscored_values)]
@@ -486,7 +514,12 @@ for session_key, session_cfg in sessions_to_run.items():
               vmin = plot_params['vmin_manual']
               vmax = plot_params['vmax_manual']
 
-          print(f"  Color scale: vmin={vmin:.2f}, vmax={vmax:.2f}")
+          # refresh=False: leave the redraw to the bar's own per-channel advance
+          # rather than forcing an extra one now - each real terminal line (or,
+          # piped through sleep_pipeline_gui.py, log line) then carries the
+          # completed channel's full postfix instead of two partial ones.
+          channel_bar.set_postfix_str(f"ch{ch_id} art={frac:.0f}% "
+                                      f"vmin/vmax={vmin:.1f}/{vmax:.1f}", refresh=False)
 
           # Load band powers for this channel from the nested dictionary
           bands_data_full = {
@@ -503,7 +536,9 @@ for session_key, session_cfg in sessions_to_run.items():
 
           # Custom 4-25 Hz band, integrated from the displayed spectrogram (the
           # pipeline bands come from LFP bandpass; this one is added on the fly,
-          # smoothed with the same window, then put on the LFP time base).
+          # smoothed with the same window, then put on the same time base as
+          # the other traces - a no-op for a compact file, where the pipeline
+          # bands already sit on this very grid).
           if '4_25' in trace_panels:
               fsel = (freqs >= 4) & (freqs <= 25)
               bp = channel_spectrogram[fsel, :].mean(axis=0)        # linear power
@@ -530,16 +565,9 @@ for session_key, session_cfg in sessions_to_run.items():
                                       art_mask.astype(float)) > 0.5
                   vel_sel = ~vel_art
                   vel_x = compress(velocity_time_synced[vel_sel])
-              if plot_pop_rate:
-                  # Same excision as every other panel, so the rate stays
-                  # aligned with the spectrogram across the stitched timeline.
-                  pop_art = np.interp(pop_time, times_cropped,
-                                      art_mask.astype(float)) > 0.5
-                  pop_sel = (~pop_art) & (pop_time >= t_start) & (pop_time <= t_end)
-                  pop_x = compress(pop_time[pop_sel])
               removed_s = (t_end - t_start) - total_c
-              print(f"  Concatenated: removed {removed_s:.0f}s of artifacts, "
-                    f"{len(seams_c)} seams, kept timeline {total_c:.0f}s")
+              channel_bar.set_postfix_str(channel_bar.postfix + f" removed={removed_s:.0f}s",
+                                          refresh=False)
           else:
               seams_c = np.array([])
               spec_x = times_cropped
@@ -550,12 +578,6 @@ for session_key, session_cfg in sessions_to_run.items():
               if plot_velocity:
                   vel_sel = np.ones(len(velocity_time_synced), bool)
                   vel_x = velocity_time_synced
-              if plot_pop_rate:
-                  pop_sel = (pop_time >= t_start) & (pop_time <= t_end)
-                  pop_x = pop_time[pop_sel]
-
-          # Create figure
-          print(f"  Creating full recording plot...")
 
           # Create figure with subplots
           fig = plt.figure(figsize=plot_params['figsize'], constrained_layout=True)
@@ -609,7 +631,7 @@ for session_key, session_cfg in sessions_to_run.items():
               norm = znorm_masked(raw, art_mask_lfp)
               ax = fig.add_subplot(gs[subplot_idx], sharex=ax1)
               subplot_idx += 1
-              ax.plot(band_x, norm[band_sel], 'k-', linewidth=0.5)
+              ax.plot(band_x, norm[band_sel], 'k-', linewidth=1.2)
               ax.set_ylabel(TRACE_META.get(key, key), fontsize=13)
               ax.set_xlim([x_lo, x_hi])
               ax.set_ylim(plot_params['band_ylim'])
@@ -621,32 +643,12 @@ for session_key, session_cfg in sessions_to_run.items():
               trace_axes.append(ax)
               trace_export[key] = norm[band_sel]
 
-          # Population firing rate (this shank's sorting, if available).
-          # Left in spikes/s rather than z-scored: the absolute rate is the
-          # interpretable quantity, and DOWN states read as drops toward zero.
-          ax_pop = None
-          if plot_pop_rate:
-              ax_pop = fig.add_subplot(gs[subplot_idx], sharex=ax1)
-              subplot_idx += 1
-              ax_pop.plot(pop_x, pop_rate[pop_sel], '-', color='tab:red', linewidth=0.5)
-              ax_pop.fill_between(pop_x, 0, pop_rate[pop_sel],
-                                  color='tab:red', alpha=0.25, linewidth=0)
-              ax_pop.set_ylabel(
-                  f"Population rate\n(spikes/s, {pop_info['n_units']} units)", fontsize=13)
-              ax_pop.set_xlim([x_lo, x_hi])
-              ax_pop.set_ylim(bottom=0)
-              ax_pop.set_xticklabels([])
-              for spine in ax_pop.spines.values():
-                  spine.set_visible(False)
-              ax_pop.tick_params(left=True, bottom=False, labelsize=10)
-              trace_axes.append(ax_pop)
-
           # Velocity (if available)
           ax_vel = None
           if plot_velocity:
               ax_vel = fig.add_subplot(gs[subplot_idx], sharex=ax1)
               subplot_idx += 1
-              ax_vel.plot(vel_x, velocity_synced[vel_sel], 'b-', linewidth=0.5)
+              ax_vel.plot(vel_x, velocity_smoothed[vel_sel], 'k-', linewidth=1.2)
               ax_vel.set_ylabel(
                   'Velocity\n(cm/s, body centroid)' if VELOCITY_SOURCE == 'dlc_body'
                   else 'Velocity\n(cm/s, head centre)', fontsize=13)
@@ -700,8 +702,8 @@ for session_key, session_cfg in sessions_to_run.items():
                       ha='center', va='top', fontsize=14, fontweight='bold',
                       clip_on=False)  # Important: don't clip the text
 
-          # Save figure (session_label keeps pre/post outputs from colliding)
-          output_file = output_folder / f'{session_label}_sh{shank_id}_ch{ch_id:03d}_full_recording{args.output_suffix}.png'
+          # Save figure (session_label keeps pre/post outputs from colliding;
+          # output_file itself was already computed at the top of this loop)
 
           # Reproducibility stamp embedded in the figure
           stamp = (
@@ -713,11 +715,7 @@ for session_key, session_cfg in sessions_to_run.items():
               f"vel_thr={artifact_params['velocity_threshold']}] -> "
               f"{len(artifact_spans)} spans, {frac:.1f}% bins flagged  |  "
               f"remove_mode={remove_mode}  |  "
-              f"velocity_source={VELOCITY_SOURCE if plot_velocity else 'none'}  |  "
-              + (f"pop_rate[{pop_info['n_units']} units, bin="
-                 f"{pop_info['bin_size_sec']}s, sigma={pop_info['smooth_sigma_bins']} bins, "
-                 f"{pop_info['source']}, src={pop_info['sorting_folder']}]"
-                 if plot_pop_rate else "pop_rate=none")
+              f"velocity_source={VELOCITY_SOURCE if plot_velocity else 'none'}"
           )
           fig.text(0.005, 0.001, stamp, fontsize=6, color='0.4',
                    ha='left', va='bottom')
@@ -753,13 +751,8 @@ for session_key, session_cfg in sessions_to_run.items():
           }
           if plot_velocity:
               export['velocity'] = {
-                  'time_s': vel_x, 'value_cm_s': velocity_synced[vel_sel],
+                  'time_s': vel_x, 'value_cm_s': velocity_smoothed[vel_sel],
                   'source': VELOCITY_SOURCE, 'file': str(velocity_file),
-              }
-          if plot_pop_rate:
-              export['population_rate'] = {
-                  'time_s': pop_x, 'rate_spikes_per_s': pop_rate[pop_sel],
-                  'info': pop_info,
               }
 
           # Real-time (full timeline, BEFORE artifact removal/concatenation):
@@ -778,19 +771,10 @@ for session_key, session_cfg in sessions_to_run.items():
           if plot_velocity:
               export['realtime']['velocity_time_s'] = velocity_time_synced
               export['realtime']['velocity_cm_s'] = velocity_synced
-          if plot_pop_rate:
-              export['realtime']['population_rate_time_s'] = pop_time
-              export['realtime']['population_rate_spikes_per_s'] = pop_rate
 
-          trace_pkl = output_folder / (
-              f'{session_label}_sh{shank_id}_ch{ch_id:03d}_trace_data'
-              f'{args.output_suffix}.pkl')
           try:
               with open(trace_pkl, 'wb') as f:
                   pickle.dump(export, f)
-              print(f"  Exported trace data: {trace_pkl.name}")
-
-              print(f"  Saving to: {output_file.name}")
               plt.savefig(output_file, dpi=plot_params['dpi'], bbox_inches='tight')
           except OSError as e:
               if e.errno != errno.ENOSPC:
@@ -802,17 +786,14 @@ for session_key, session_cfg in sessions_to_run.items():
               output_folder = backup_folder
               trace_pkl = output_folder / trace_pkl.name
               output_file = output_folder / output_file.name
-              print(f"Out of space while saving - switching to backup server: {output_folder}")
+              channel_bar.write(f"Out of space while saving - switching to "
+                                f"backup server: {output_folder}")
               with open(trace_pkl, 'wb') as f:
                   pickle.dump(export, f)
-              print(f"  Exported trace data: {trace_pkl.name}")
-              print(f"  Saving to: {output_file.name}")
               plt.savefig(output_file, dpi=plot_params['dpi'], bbox_inches='tight')
           plt.close()
           session_files_created += 1
           total_files_created += 1
-
-          print(f"  Completed Shank {shank_id}, Channel {ch_id}")
 
   print(f"\n{'='*60}")
   print(f"SLEEP SESSION {session_key} PLOTTING COMPLETE")
