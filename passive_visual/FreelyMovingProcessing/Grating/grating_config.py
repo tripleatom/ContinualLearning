@@ -3,7 +3,7 @@ from pathlib import Path
 
 ANIMAL_ID = "CnL46"       # used for experiment data paths and CSV log
 SORTOUT_ANIMAL_ID = "CnL46"  # used for sortout folder (may differ from ANIMAL_ID)
-EXPERIMENT_DATE = "260729"
+EXPERIMENT_DATE = "260728"
 
 # DIO timestamp frequency in Hz, shared by all sessions of each animal.
 # Animals without an entry retain the historical 30 kHz default.

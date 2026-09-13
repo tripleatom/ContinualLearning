@@ -42,7 +42,7 @@ from sleep_day_registry import entry_animal, load_day_config
 # docstring. The registry is keyed by BOTH, so the same date can exist for
 # several animals without them overwriting each other.
 ACTIVE_ANIMAL = "CnL46"
-ACTIVE_DATE = "260727"
+ACTIVE_DATE = "260729"
 
 # Optional per-run restriction on which sleep session(s) the stages process:
 #   None (or "both") -> every active session for ACTIVE_DATE
@@ -71,7 +71,7 @@ session_name = Path(rec_folder).stem.split('.')[0]
 nwb_session_name = _day_cfg['nwb_session_name']
 
 # Shanks to process (shared by both scripts).
-shanks = [0]
+shanks = list(range(8))
 
 # Folder holding the per-shank LFP / spectrogram .npz files.
 low_freq_folder = Path(rec_folder) / "low_freq"
@@ -252,7 +252,7 @@ DOWNSAMPLE_METHOD = "decimate"   # "decimate" or "resample"
 # Parallelization (the heavy step is reading 30 kHz + filtering).
 # n_jobs=-1 uses all cores; lower it if the network share is the bottleneck.
 # chunk_duration controls the work unit handed to each worker.
-N_JOBS = -1
+N_JOBS = 1
 CHUNK_DURATION = "30s"
 
 
@@ -416,7 +416,13 @@ artifact_params = {
 # power proxy). Output feeds the UP/DOWN stage.
 sleep_detect_params = {
     # Which shanks to aggregate for the sleep index (None = use `shanks`).
-    'shanks': None,
+    # CnL46 260729: shanks 4 and 7 have almost no spectral-tilt signal (mostly
+    # excluded/noisy channels per detect_off_states.py's own bad-channel count),
+    # and including them in the average washes out the group z-score enough
+    # that NO consolidated NREM window survives at all -- averaging in a dead
+    # channel does not add information, it dilutes what the good channels see.
+    # Restricting to the six shanks that actually carry a usable signal.
+    'shanks': [0, 1, 2, 3, 5, 6],
     # Epoch length (s) for scoring; signals are averaged within each epoch.
     'epoch_sec': 4.0,
     # NREM is declared where the spectral-tilt index  z(log delta) - z(log gamma)

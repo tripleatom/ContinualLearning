@@ -3,6 +3,17 @@ Plot Orientation Tuning Curves for All Neurons
 
 This script loads neural data and generates individual tuning curve plots
 for each unit, saved to a dedicated folder.
+
+Alongside the curve itself every unit is characterized by:
+  * visual responsiveness   — R_evoked - R_baseline (baseline = pre-onset ITI),
+                              paired Wilcoxon test overall and per orientation
+  * split-half reliability  — median correlation between tuning curves built
+                              from two random halves of the trials
+  * bootstrap of the curve  — trials resampled within orientation, giving
+                              R(theta) +/- 95% CI and CIs on OSI / preferred ori
+
+All of these are printed on each unit's tuning-curve figure and written to
+tuning_statistics.csv.
 """
 import numpy as np
 import pandas as pd
@@ -42,13 +53,446 @@ def _load_pickle(filepath):
 
 
 # =============================================================================
+# RESPONSIVENESS / RELIABILITY CHARACTERIZATION
+# =============================================================================
+#
+# Three complementary characterizations are computed per unit:
+#
+#   1. Visual responsiveness — R_evoked - R_baseline, where R_baseline comes
+#      from the pre-onset part of the inter-trial interval (paired with each
+#      trial).  Tested with a paired Wilcoxon signed-rank test, over all trials
+#      pooled and separately per orientation (Holm-Bonferroni corrected).
+#   2. Split-half tuning-curve reliability — trials of each orientation are
+#      randomly split in two, a tuning curve is built from each half, and the
+#      two curves are correlated; repeated many times, reported as the median r.
+#      Significance comes from an orientation-label shuffle null.
+#   3. Bootstrap of the whole tuning curve — trials are resampled with
+#      replacement within each orientation, giving R(theta) +/- 95% CI at every
+#      orientation plus CIs on OSI and preferred orientation.
+#
+# All three read the same per-trial firing rates used for the tuning curve, so
+# the numbers printed on the figure always describe the curve that is drawn.
+
+DEFAULT_BASELINE_WINDOW = (-0.2, 0.0)   # ITI tail preceding stimulus onset
+N_SPLITS = 1000       # split-half repetitions
+N_BOOT = 1000         # bootstrap resamples
+N_SHUFFLES = 1000     # orientation-label shuffles for the null distributions
+ALPHA = 0.05
+
+
+def _rate_in_window(spike_times, window):
+    """Firing rate (Hz) of one trial inside [start, end)."""
+    start, end = window
+    spike_times = np.asarray(spike_times, dtype=float)
+    return float(np.sum((spike_times >= start) & (spike_times < end)) / (end - start))
+
+
+def _rowwise_pearson(A, B):
+    """Pearson r between matching rows of two (n, k) arrays -> (n,) array."""
+    A = A - A.mean(axis=1, keepdims=True)
+    B = B - B.mean(axis=1, keepdims=True)
+    num = np.sum(A * B, axis=1)
+    den = np.sqrt(np.sum(A ** 2, axis=1) * np.sum(B ** 2, axis=1))
+    out = np.full(num.shape, np.nan)
+    ok = den > 0
+    out[ok] = num[ok] / den[ok]
+    return out
+
+
+def _osi_from_curves(curves, orientations):
+    """Vector-sum OSI and preferred orientation for each row of (n, n_ori) curves."""
+    theta = 2 * np.deg2rad(np.asarray(orientations, dtype=float))
+    z = np.asarray(curves, dtype=float) @ np.exp(1j * theta)
+    total = np.asarray(curves, dtype=float).sum(axis=1)
+    osi = np.abs(z) / (total + 1e-12)
+    pref = np.rad2deg((np.angle(z) / 2.0) % np.pi)
+    return osi, pref
+
+
+def _holm_bonferroni(pvals):
+    """Holm-Bonferroni step-down adjusted p-values (NaNs passed through)."""
+    p = np.asarray(pvals, dtype=float)
+    adj = np.full(p.shape, np.nan)
+    finite = np.flatnonzero(np.isfinite(p))
+    if finite.size == 0:
+        return adj
+    m = finite.size
+    order = finite[np.argsort(p[finite])]
+    running = 0.0
+    for rank, idx in enumerate(order):
+        running = max(running, (m - rank) * p[idx])
+        adj[idx] = min(running, 1.0)
+    return adj
+
+
+def _wilcoxon_p(diff):
+    """Two-sided paired Wilcoxon signed-rank p for a difference vector."""
+    diff = np.asarray(diff, dtype=float)
+    diff = diff[np.isfinite(diff)]
+    if diff.size < 5 or np.all(diff == 0):
+        return np.nan
+    try:
+        return float(stats.wilcoxon(diff, zero_method='wilcox',
+                                    alternative='two-sided').pvalue)
+    except ValueError:
+        return np.nan
+
+
+def _circular_axial_stats(pref_deg, reference_deg):
+    """
+    Spread of a bootstrap distribution of preferred orientations (axial, period 180 deg).
+
+    Returns (circular_sd_deg, ci_low_deg, ci_high_deg); the CI is a percentile
+    interval on the deviation from `reference_deg`, wrapped to +/-90 deg and
+    added back, so it stays interpretable even near the 0/180 deg wrap.
+    """
+    pref = np.asarray(pref_deg, dtype=float)
+    pref = pref[np.isfinite(pref)]
+    if pref.size < 2:
+        return np.nan, np.nan, np.nan
+
+    ang = 2 * np.deg2rad(pref)
+    resultant = np.abs(np.mean(np.exp(1j * ang)))
+    circ_sd = np.rad2deg(np.sqrt(-2.0 * np.log(max(resultant, 1e-12)))) / 2.0
+
+    dev = (pref - reference_deg + 90.0) % 180.0 - 90.0
+    lo, hi = np.percentile(dev, [2.5, 97.5])
+    return (float(circ_sd),
+            float((reference_deg + lo) % 180.0),
+            float((reference_deg + hi) % 180.0))
+
+
+def compute_visual_responsiveness(evoked_by_ori, baseline_by_ori, orientations,
+                                  alpha=ALPHA):
+    """
+    Test whether a unit responds to the gratings at all.
+
+    Per trial the evoked rate (analysis window) is paired with that same trial's
+    baseline rate (pre-onset ITI window).  A paired Wilcoxon signed-rank test is
+    run on the pooled trials and on each orientation separately; the
+    per-orientation p-values are Holm-Bonferroni corrected across orientations.
+    A Kruskal-Wallis test across orientations additionally asks whether the
+    evoked rate depends on orientation at all.
+
+    Args:
+        evoked_by_ori:   dict orientation -> list/array of per-trial evoked rates (Hz)
+        baseline_by_ori: dict orientation -> per-trial baseline rates (Hz), trial-matched
+        orientations:    ordered list of orientations
+        alpha:           significance level
+
+    Returns:
+        dict of responsiveness statistics (see keys below).
+    """
+    ev_all, bl_all = [], []
+    per_ori_delta, per_ori_p, per_ori_n = [], [], []
+
+    for ori in orientations:
+        ev = np.asarray(evoked_by_ori.get(ori, []), dtype=float)
+        bl = np.asarray(baseline_by_ori.get(ori, []), dtype=float)
+        n = min(ev.size, bl.size)
+        ev, bl = ev[:n], bl[:n]
+        ev_all.append(ev)
+        bl_all.append(bl)
+        per_ori_n.append(int(n))
+        per_ori_delta.append(float(np.mean(ev - bl)) if n else np.nan)
+        per_ori_p.append(_wilcoxon_p(ev - bl) if n else np.nan)
+
+    ev_all = np.concatenate(ev_all) if ev_all else np.array([])
+    bl_all = np.concatenate(bl_all) if bl_all else np.array([])
+    diff = ev_all - bl_all
+
+    p_overall = _wilcoxon_p(diff)
+    delta = float(np.mean(diff)) if diff.size else np.nan
+    sd = float(np.std(diff, ddof=1)) if diff.size > 1 else np.nan
+    cohens_dz = delta / sd if (sd and np.isfinite(sd) and sd > 0) else np.nan
+
+    per_ori_p = np.asarray(per_ori_p, dtype=float)
+    per_ori_p_holm = _holm_bonferroni(per_ori_p)
+    per_ori_delta = np.asarray(per_ori_delta, dtype=float)
+
+    # Strongest response: the orientation with the largest evoked-baseline change.
+    if np.any(np.isfinite(per_ori_delta)):
+        best_idx = int(np.nanargmax(np.abs(per_ori_delta)))
+        best_ori = float(orientations[best_idx])
+        best_delta = float(per_ori_delta[best_idx])
+        best_p_holm = float(per_ori_p_holm[best_idx])
+    else:
+        best_idx, best_ori, best_delta, best_p_holm = -1, np.nan, np.nan, np.nan
+
+    sig_mask = np.isfinite(per_ori_p_holm) & (per_ori_p_holm < alpha)
+    n_sig_ori = int(np.sum(sig_mask))
+
+    # Orientation-dependence of the evoked rate (ignores baseline).
+    groups = [np.asarray(evoked_by_ori.get(ori, []), dtype=float) for ori in orientations]
+    groups = [g for g in groups if g.size > 1 and np.ptp(g) > 0]
+    if len(groups) > 1:
+        try:
+            p_kruskal = float(stats.kruskal(*groups).pvalue)
+        except ValueError:
+            p_kruskal = np.nan
+    else:
+        p_kruskal = np.nan
+
+    baseline_rate = float(np.mean(bl_all)) if bl_all.size else np.nan
+    evoked_rate = float(np.mean(ev_all)) if ev_all.size else np.nan
+    resp_index = ((evoked_rate - baseline_rate) / (evoked_rate + baseline_rate + 1e-12)
+                  if np.isfinite(evoked_rate) else np.nan)
+
+    # A unit counts as visually responsive if the evoked rate differs from the
+    # ITI baseline in either direction — suppression is a response too.
+    responsive = bool(
+        (np.isfinite(p_overall) and p_overall < alpha)
+        or n_sig_ori > 0
+    )
+    if not responsive or not np.isfinite(delta):
+        sign = 'none'
+    else:
+        sign = 'enhanced' if delta > 0 else 'suppressed'
+
+    return {
+        'baseline_rate_hz': baseline_rate,
+        'evoked_rate_hz': evoked_rate,
+        'delta_rate_hz': delta,
+        'response_index': float(resp_index),
+        'cohens_dz': float(cohens_dz) if np.isfinite(cohens_dz) else np.nan,
+        'p_wilcoxon': p_overall,
+        'p_kruskal_orientation': p_kruskal,
+        'per_ori_delta_hz': per_ori_delta.tolist(),
+        'per_ori_p': per_ori_p.tolist(),
+        'per_ori_p_holm': per_ori_p_holm.tolist(),
+        'per_ori_n_trials': per_ori_n,
+        'sig_orientations': [float(orientations[i]) for i in np.flatnonzero(sig_mask)],
+        'n_sig_orientations': n_sig_ori,
+        'best_orientation_deg': best_ori,
+        'best_delta_hz': best_delta,
+        'best_p_holm': best_p_holm,
+        'responsive': responsive,
+        'response_sign': sign,
+        'alpha': alpha,
+        'n_trials': int(diff.size),
+    }
+
+
+def compute_tuning_reliability(trial_rates, orientations, n_splits=N_SPLITS,
+                               n_shuffles=N_SHUFFLES, rng=None, alpha=ALPHA):
+    """
+    Split-half reliability of the tuning curve, with an orientation-shuffle null.
+
+    For each of `n_splits` repetitions the trials of every orientation are split
+    into two random halves; the two resulting tuning curves R_A and R_B are
+    correlated (Pearson), and the median r over repetitions is reported.  The
+    null is built by shuffling orientation labels across trials and repeating a
+    single split per shuffle, which also yields a null distribution of OSI.
+
+    Returns dict with median/CI of r, the Spearman-Brown corrected value
+    (2r/(1+r), the reliability expected for the full trial count), the permutation
+    p-values for reliability and for OSI, and the null OSI distribution summary.
+    """
+    rng = np.random.default_rng() if rng is None else rng
+
+    rates_by_ori = [np.asarray(trial_rates.get(ori, []), dtype=float)
+                    for ori in orientations]
+    counts = np.array([r.size for r in rates_by_ori])
+    usable = counts >= 2
+
+    result = {
+        'n_splits': int(n_splits),
+        'n_shuffles': int(n_shuffles),
+        'median_r': np.nan,
+        'r_ci_low': np.nan,
+        'r_ci_high': np.nan,
+        'r_spearman_brown': np.nan,
+        'p_perm_reliability': np.nan,
+        'p_perm_osi': np.nan,
+        'null_r_median': np.nan,
+        'null_osi_mean': np.nan,
+        'null_osi_p95': np.nan,
+        'reliable': False,
+        'alpha': alpha,
+    }
+
+    if usable.sum() < 3:
+        # Fewer than three orientations with >= 2 trials: a correlation across
+        # orientations is not meaningful.
+        return result
+
+    ori_used = [orientations[i] for i in np.flatnonzero(usable)]
+    rates_used = [rates_by_ori[i] for i in np.flatnonzero(usable)]
+    n_ori = len(ori_used)
+
+    # ---- observed split-half distribution ----
+    A = np.empty((n_splits, n_ori))
+    B = np.empty((n_splits, n_ori))
+    for k, rates in enumerate(rates_used):
+        n = rates.size
+        half = n // 2
+        order = np.argsort(rng.random((n_splits, n)), axis=1)
+        drawn = rates[order]
+        A[:, k] = drawn[:, :half].mean(axis=1)
+        B[:, k] = drawn[:, half:2 * half].mean(axis=1)
+
+    r_split = _rowwise_pearson(A, B)
+    r_split = r_split[np.isfinite(r_split)]
+    if r_split.size == 0:
+        return result
+
+    median_r = float(np.median(r_split))
+    ci_low, ci_high = (float(v) for v in np.percentile(r_split, [2.5, 97.5]))
+    # Spearman-Brown: each half holds half the trials, so the split-half r
+    # underestimates the reliability of the curve built from all trials.
+    sb = 2 * median_r / (1 + median_r) if median_r > -1 else np.nan
+
+    # ---- orientation-label shuffle null (reliability and OSI together) ----
+    all_rates = np.concatenate(rates_used)
+    n_total = all_rates.size
+    bounds = np.concatenate([[0], np.cumsum([r.size for r in rates_used])])
+
+    shuffled = all_rates[np.argsort(rng.random((n_shuffles, n_total)), axis=1)]
+    A0 = np.empty((n_shuffles, n_ori))
+    B0 = np.empty((n_shuffles, n_ori))
+    curve0 = np.empty((n_shuffles, n_ori))
+    for k in range(n_ori):
+        block = shuffled[:, bounds[k]:bounds[k + 1]]
+        half = block.shape[1] // 2
+        A0[:, k] = block[:, :half].mean(axis=1)
+        B0[:, k] = block[:, half:2 * half].mean(axis=1)
+        curve0[:, k] = block.mean(axis=1)
+
+    null_r = _rowwise_pearson(A0, B0)
+    null_r = null_r[np.isfinite(null_r)]
+    null_osi, _ = _osi_from_curves(curve0, ori_used)
+
+    observed_curve = np.array([r.mean() for r in rates_used])[None, :]
+    observed_osi = float(_osi_from_curves(observed_curve, ori_used)[0][0])
+
+    # +1 corrections keep the permutation p-value strictly positive.
+    p_rel = ((np.sum(null_r >= median_r) + 1) / (null_r.size + 1)
+             if null_r.size else np.nan)
+    p_osi = (np.sum(null_osi >= observed_osi) + 1) / (null_osi.size + 1)
+
+    result.update({
+        'median_r': median_r,
+        'r_ci_low': ci_low,
+        'r_ci_high': ci_high,
+        'r_spearman_brown': float(sb),
+        'p_perm_reliability': float(p_rel),
+        'p_perm_osi': float(p_osi),
+        'null_r_median': float(np.median(null_r)) if null_r.size else np.nan,
+        'null_osi_mean': float(np.mean(null_osi)),
+        'null_osi_p95': float(np.percentile(null_osi, 95)),
+        'reliable': bool(np.isfinite(p_rel) and p_rel < alpha and median_r > 0),
+        'n_orientations_used': n_ori,
+    })
+    return result
+
+
+def bootstrap_tuning_curve(trial_rates, orientations, n_boot=N_BOOT, ci=95,
+                           rng=None):
+    """
+    Bootstrap the whole tuning curve by resampling trials within each orientation.
+
+    Each of `n_boot` iterations resamples the trials of every orientation with
+    replacement and recomputes the curve, giving R(theta) +/- CI at every
+    orientation together with bootstrap CIs on OSI, preferred orientation and
+    modulation index.
+
+    Returns dict with per-orientation mean/CI arrays and parameter CIs.
+    """
+    rng = np.random.default_rng() if rng is None else rng
+    lo_q, hi_q = (100 - ci) / 2, 100 - (100 - ci) / 2
+
+    rates_by_ori = [np.asarray(trial_rates.get(ori, []), dtype=float)
+                    for ori in orientations]
+    n_ori = len(orientations)
+
+    if any(r.size == 0 for r in rates_by_ori):
+        nan_curve = [np.nan] * n_ori
+        return {
+            'n_boot': int(n_boot), 'ci': ci,
+            'mean_curve': nan_curve, 'ci_low': nan_curve, 'ci_high': nan_curve,
+            'osi_mean': np.nan, 'osi_ci_low': np.nan, 'osi_ci_high': np.nan,
+            'pref_ori_circ_sd_deg': np.nan, 'pref_ori_ci_low_deg': np.nan,
+            'pref_ori_ci_high_deg': np.nan, 'modulation_ci_low': np.nan,
+            'modulation_ci_high': np.nan,
+        }
+
+    boot = np.empty((n_boot, n_ori))
+    for k, rates in enumerate(rates_by_ori):
+        idx = rng.integers(0, rates.size, size=(n_boot, rates.size))
+        boot[:, k] = rates[idx].mean(axis=1)
+
+    boot_osi, boot_pref = _osi_from_curves(boot, orientations)
+    boot_max = boot.max(axis=1)
+    boot_min = boot.min(axis=1)
+    boot_mod = (boot_max - boot_min) / (boot_max + boot_min + 1e-12)
+
+    observed_curve = np.array([r.mean() for r in rates_by_ori])[None, :]
+    observed_pref = float(_osi_from_curves(observed_curve, orientations)[1][0])
+    pref_sd, pref_lo, pref_hi = _circular_axial_stats(boot_pref, observed_pref)
+
+    return {
+        'n_boot': int(n_boot),
+        'ci': ci,
+        'mean_curve': boot.mean(axis=0).tolist(),
+        'ci_low': np.percentile(boot, lo_q, axis=0).tolist(),
+        'ci_high': np.percentile(boot, hi_q, axis=0).tolist(),
+        'osi_mean': float(boot_osi.mean()),
+        'osi_ci_low': float(np.percentile(boot_osi, lo_q)),
+        'osi_ci_high': float(np.percentile(boot_osi, hi_q)),
+        'pref_ori_circ_sd_deg': pref_sd,
+        'pref_ori_ci_low_deg': pref_lo,
+        'pref_ori_ci_high_deg': pref_hi,
+        'modulation_ci_low': float(np.percentile(boot_mod, lo_q)),
+        'modulation_ci_high': float(np.percentile(boot_mod, hi_q)),
+    }
+
+
+def characterize_unit(trial_rates, trial_baseline_rates, orientations,
+                      n_splits=N_SPLITS, n_boot=N_BOOT, n_shuffles=N_SHUFFLES,
+                      rng=None, alpha=ALPHA):
+    """Run all three characterizations for one unit and return them in a dict."""
+    rng = np.random.default_rng() if rng is None else rng
+    return {
+        'responsiveness': compute_visual_responsiveness(
+            trial_rates, trial_baseline_rates, orientations, alpha=alpha),
+        'reliability': compute_tuning_reliability(
+            trial_rates, orientations, n_splits=n_splits,
+            n_shuffles=n_shuffles, rng=rng, alpha=alpha),
+        'bootstrap': bootstrap_tuning_curve(
+            trial_rates, orientations, n_boot=n_boot, rng=rng),
+    }
+
+
+def _fmt_p(p):
+    """Compact p-value string for figure annotations."""
+    if p is None or not np.isfinite(p):
+        return 'n/a'
+    if p < 1e-4:
+        return '<1e-4'
+    return f'{p:.4f}' if p < 0.01 else f'{p:.3f}'
+
+
+# =============================================================================
 # TUNING CURVE CALCULATION
 # =============================================================================
 
-def calculate_tuning_curves(neural_data, time_window=(0.07, 0.16)):
+def calculate_tuning_curves(neural_data, time_window=(0.07, 0.16),
+                            baseline_window=DEFAULT_BASELINE_WINDOW,
+                            characterize=True, n_splits=N_SPLITS,
+                            n_boot=N_BOOT, n_shuffles=N_SHUFFLES, seed=0):
     """
     Calculate tuning curves for all units.
-    
+
+    Args:
+        neural_data: dict as produced by GratingExport (spike_data / trial_info)
+        time_window: (start, end) s re. onset — the evoked analysis window
+        baseline_window: (start, end) s re. onset for the trial-matched baseline.
+            Defaults to the pre-onset ITI tail (-0.2, 0) s.
+        characterize: run responsiveness / split-half / bootstrap statistics
+        n_splits, n_boot, n_shuffles: repetitions for the split-half, bootstrap
+            and label-shuffle null respectively
+        seed: base seed — each unit gets its own reproducible generator
+
     Returns:
         Dictionary containing:
         - unit_tuning_data: dict with unit_id as key, tuning data as value
@@ -66,14 +510,20 @@ def calculate_tuning_curves(neural_data, time_window=(0.07, 0.16)):
     print(f"  Units: {len(unit_ids)}")
     print(f"  Orientations: {format_grating_values(unique_orientations)}")
     print(f"  Time window: {window_start:.3f}-{window_end:.3f}s ({window_duration:.3f}s)")
-    
+    if characterize:
+        print(f"  Baseline window: {baseline_window[0]:.3f}-{baseline_window[1]:.3f}s "
+              f"(ITI, trial-matched)")
+        print(f"  Statistics: {n_splits} split-halves, {n_boot} bootstraps, "
+              f"{n_shuffles} label shuffles")
+
     unit_tuning_data = {}
-    
-    for unit_id in unit_ids:
+
+    for unit_index, unit_id in enumerate(unit_ids):
         # Collect firing rates per trial
         unit_trials = neural_data['spike_data'][unit_id]
         trial_rates = {ori: [] for ori in unique_orientations}
-        
+        trial_baseline_rates = {ori: [] for ori in unique_orientations}
+
         for trial_data in unit_trials:
             orientation = trial_data['orientation']
             if orientation in unique_orientations:
@@ -82,6 +532,8 @@ def calculate_tuning_curves(neural_data, time_window=(0.07, 0.16)):
                                          (spike_times < window_end))
                 firing_rate = spikes_in_window / window_duration
                 trial_rates[orientation].append(firing_rate)
+                trial_baseline_rates[orientation].append(
+                    _rate_in_window(spike_times, baseline_window))
         
         # Calculate statistics per orientation
         mean_rates = []
@@ -145,6 +597,9 @@ def calculate_tuning_curves(neural_data, time_window=(0.07, 0.16)):
             'std_rates': std_rates,
             'trial_counts': trial_counts,
             'trial_rates': trial_rates,
+            'trial_baseline_rates': trial_baseline_rates,
+            'baseline_window': tuple(baseline_window),
+            'time_window': tuple(time_window),
             'osi': osi,
             'preferred_orientation_deg': preferred_ori_deg,
             'modulation_index': modulation_index,
@@ -154,9 +609,22 @@ def calculate_tuning_curves(neural_data, time_window=(0.07, 0.16)):
             'psth_per_ori': psth_per_ori,
             'psth_t': psth_t.tolist(),
         }
-    
+
+        # Responsiveness, split-half reliability and bootstrap CIs — each unit
+        # gets its own generator so results do not depend on unit ordering.
+        if characterize:
+            unit_tuning_data[unit_id].update(characterize_unit(
+                trial_rates, trial_baseline_rates, unique_orientations,
+                n_splits=n_splits, n_boot=n_boot, n_shuffles=n_shuffles,
+                rng=np.random.default_rng(seed + unit_index),
+            ))
+
+    if characterize and unit_tuning_data:
+        _print_characterization_summary(unit_tuning_data)
+
     experiment_info = {
         'time_window': time_window,
+        'baseline_window': tuple(baseline_window),
         'experiment_parameters': neural_data.get('experiment_parameters', {}),
         'n_units': len(unit_ids)
     }
@@ -168,19 +636,125 @@ def calculate_tuning_curves(neural_data, time_window=(0.07, 0.16)):
     }
 
 
+def _print_characterization_summary(unit_tuning_data):
+    """Population-level recap of responsiveness and reliability."""
+    n = len(unit_tuning_data)
+    resp = [d['responsiveness'] for d in unit_tuning_data.values() if 'responsiveness' in d]
+    rel = [d['reliability'] for d in unit_tuning_data.values() if 'reliability' in d]
+    if not resp:
+        return
+    n_resp = sum(r['responsive'] for r in resp)
+    n_rel = sum(r['reliable'] for r in rel)
+    median_r = np.nanmedian([r['median_r'] for r in rel]) if rel else np.nan
+    print(f"\n  Visually responsive: {n_resp}/{n} units "
+          f"({100 * n_resp / max(n, 1):.1f}%)")
+    print(f"  Reliably tuned:      {n_rel}/{n} units "
+          f"({100 * n_rel / max(n, 1):.1f}%)")
+    print(f"  Median split-half r across units: {median_r:.3f}")
+
+
 # =============================================================================
 # PLOTTING FUNCTIONS
 # =============================================================================
+
+def format_characterization_text(tuning_data, time_window=None):
+    """
+    Render the responsiveness / split-half / bootstrap statistics of one unit as
+    a monospace block for the figure's text panel. Returns '' if the unit was
+    analysed without characterization.
+    """
+    resp = tuning_data.get('responsiveness')
+    rel = tuning_data.get('reliability')
+    boot = tuning_data.get('bootstrap')
+    if not resp and not rel and not boot:
+        return ''
+
+    bw = tuning_data.get('baseline_window', DEFAULT_BASELINE_WINDOW)
+    tw = time_window or tuning_data.get('time_window', (np.nan, np.nan))
+    orientations = tuning_data['orientations']
+    lines = []
+
+    if resp:
+        n_ori = len(resp.get('per_ori_p_holm', []))
+        sig_oris = resp.get('sig_orientations', [])
+        sig_txt = ', '.join(format_grating_value(o) + '°' for o in sig_oris[:3])
+        if len(sig_oris) > 3:
+            sig_txt += ', …'
+        lines += [
+            '1. VISUAL RESPONSIVENESS',
+            f"  baseline (ITI) [{bw[0]:.2f},{bw[1]:.2f}]s: {resp['baseline_rate_hz']:.2f} Hz",
+            f"  evoked  [{tw[0]:.2f},{tw[1]:.2f}]s: {resp['evoked_rate_hz']:.2f} Hz",
+            f"  Δ rate:   {resp['delta_rate_hz']:+.2f} Hz   "
+            f"RI={resp['response_index']:+.3f}",
+            f"  Wilcoxon paired: p={_fmt_p(resp['p_wilcoxon'])} "
+            f"(n={resp['n_trials']}, dz={resp['cohens_dz']:+.2f})",
+            f"  sig. oris (Holm): {resp['n_sig_orientations']}/{n_ori}",
+        ]
+        if sig_txt:
+            lines += [f"    [{sig_txt}]"]
+        lines += [
+            f"  best ori {resp['best_orientation_deg']:.0f}°: "
+            f"Δ={resp['best_delta_hz']:+.2f} Hz p={_fmt_p(resp['best_p_holm'])}",
+            f"  Kruskal-Wallis (ori): p={_fmt_p(resp['p_kruskal_orientation'])}",
+            f"  → {'RESPONSIVE' if resp['responsive'] else 'NOT responsive'}"
+            + (f" ({resp['response_sign']})" if resp['responsive'] else '')
+            + f"  α={resp['alpha']:g}",
+            '',
+        ]
+
+    if rel:
+        lines += ['2. SPLIT-HALF RELIABILITY']
+        if np.isfinite(rel['median_r']):
+            lines += [
+                f"  median r ({rel['n_splits']} splits): {rel['median_r']:+.3f}",
+                f"  95% range: [{rel['r_ci_low']:+.3f}, {rel['r_ci_high']:+.3f}]",
+                f"  Spearman-Brown: {rel['r_spearman_brown']:+.3f}",
+                f"  shuffle null r: {rel['null_r_median']:+.3f}  "
+                f"p={_fmt_p(rel['p_perm_reliability'])}",
+                f"  → {'RELIABLE' if rel['reliable'] else 'NOT reliable'} tuning",
+            ]
+        else:
+            lines += ['  n/a (too few trials per orientation)']
+        lines += ['']
+
+    if boot:
+        lines += ['3. BOOTSTRAP TUNING CURVE']
+        if np.isfinite(boot.get('osi_mean', np.nan)):
+            # Per-orientation R(θ) ± CI is drawn as the shaded band on the
+            # tuning curve itself; only the summary parameters are printed here.
+            lines += [
+                f"  ({boot['n_boot']} resamples, {boot['ci']:.0f}% CI)",
+                f"  OSI: {tuning_data['osi']:.3f} "
+                f"[{boot['osi_ci_low']:.3f}, {boot['osi_ci_high']:.3f}]",
+                f"  pref ori: {tuning_data['preferred_orientation_deg']:.1f}° "
+                f"± {boot['pref_ori_circ_sd_deg']:.1f}° (circ SD)",
+                f"      CI [{boot['pref_ori_ci_low_deg']:.1f}°, "
+                f"{boot['pref_ori_ci_high_deg']:.1f}°]"
+                + (' (wraps 180°)'
+                   if boot['pref_ori_ci_low_deg'] > boot['pref_ori_ci_high_deg']
+                   else ''),
+                f"  mod. index: {tuning_data['modulation_index']:.3f} "
+                f"[{boot['modulation_ci_low']:.3f}, {boot['modulation_ci_high']:.3f}]",
+            ]
+            if rel and np.isfinite(rel.get('p_perm_osi', np.nan)):
+                lines += [f"  OSI vs null ({rel['null_osi_mean']:.3f}): "
+                          f"p={_fmt_p(rel['p_perm_osi'])}"]
+        else:
+            lines += ['  n/a (no trials)']
+
+    return '\n'.join(lines)
+
 
 def plot_single_tuning_curve(unit_id, tuning_data, unit_info=None,
                              time_window=(0.07, 0.16), save_path=None):
     """
     Create a comprehensive tuning curve plot for a single unit.
 
-    Layout (3 rows × 4 columns):
-      Col 0-1: Cartesian tuning curve (rows 0-2)
-      Col 2:   Polar plot (row 0), Boxplot (row 1), Tuning statistics (row 2)
-      Col 3:   Waveform (row 0), ACG (row 1), Unit info (row 2)
+    Layout (2 rows × 4 columns):
+      Col 0: Cartesian tuning curve (row 0), PSTH (row 1)
+      Col 1: Polar plot (row 0), autocorrelogram (row 1)
+      Col 2: Waveform (row 0), tuning statistics + unit info (row 1)
+      Col 3: Responsiveness / split-half reliability / bootstrap stats (both rows)
 
     Args:
         unit_info: dict from neural_data['unit_info'] — may contain
@@ -191,8 +765,9 @@ def plot_single_tuning_curve(unit_id, tuning_data, unit_info=None,
     if unit_info is None:
         unit_info = {}
 
-    fig = plt.figure(figsize=(24, 13))
-    gs = GridSpec(2, 3, figure=fig, hspace=0.45, wspace=0.30)
+    fig = plt.figure(figsize=(30, 13))
+    gs = GridSpec(2, 4, figure=fig, hspace=0.55, wspace=0.30,
+                  left=0.05, right=0.98, top=0.84, bottom=0.07)
 
     orientations = tuning_data['orientations']
     mean_rates = np.array(tuning_data['mean_rates'])
@@ -206,14 +781,40 @@ def plot_single_tuning_curve(unit_id, tuning_data, unit_info=None,
     loc_str = f"  [{loc[0]:.0f}, {loc[1]:.0f}] µm" if loc else ""
     quality = unit_info.get('quality', '')
     header = f"{unit_id}  |  {shank_str}  {ch_str}{loc_str}  {quality}"
-    fig.suptitle(header, fontsize=26, fontweight='bold', y=0.995)
+
+    # Verdict banner: visually responsive? reliably tuned?
+    resp_hdr = tuning_data.get('responsiveness', {})
+    rel_hdr = tuning_data.get('reliability', {})
+    if resp_hdr:
+        verdict = ('RESPONSIVE' if resp_hdr.get('responsive') else 'not responsive')
+        if resp_hdr.get('response_sign') in ('enhanced', 'suppressed'):
+            verdict += f" [{resp_hdr['response_sign']}]"
+        verdict += f" (Δ={resp_hdr.get('delta_rate_hz', np.nan):+.2f} Hz, "
+        verdict += f"p={_fmt_p(resp_hdr.get('p_wilcoxon'))})"
+        if rel_hdr and np.isfinite(rel_hdr.get('median_r', np.nan)):
+            verdict += (f"   |   {'RELIABLE' if rel_hdr.get('reliable') else 'unreliable'} tuning "
+                        f"(split-half r={rel_hdr['median_r']:.2f}, "
+                        f"p={_fmt_p(rel_hdr.get('p_perm_reliability'))})")
+        header = f"{header}\n{verdict}"
+    fig.suptitle(header, fontsize=24, fontweight='bold', y=0.985)
 
     # ------------------------------------------------------------------ #
     # 1. Cartesian tuning curve  (row 0, col 0)
     # ------------------------------------------------------------------ #
     ax1 = fig.add_subplot(gs[0, 0])
+
+    # Bootstrap CI band (trials resampled within each orientation)
+    boot = tuning_data.get('bootstrap', {})
+    ci_low = np.asarray(boot.get('ci_low', []), dtype=float)
+    ci_high = np.asarray(boot.get('ci_high', []), dtype=float)
+    has_ci = ci_low.size == len(orientations) and np.all(np.isfinite(ci_low))
+    if has_ci:
+        ax1.fill_between(orientations, ci_low, ci_high, color='#2E86AB',
+                         alpha=0.18, zorder=1,
+                         label=f"bootstrap {boot.get('ci', 95):.0f}% CI")
+
     ax1.plot(orientations, mean_rates, '-', color='#2E86AB',
-             linewidth=6.5, zorder=2)
+             linewidth=6.5, zorder=2, label='mean ± SEM')
     ax1.errorbar(orientations, mean_rates, yerr=sem_rates,
                  fmt='none', ecolor='#A23B72', capsize=14, capthick=4.0,
                  elinewidth=4.0, zorder=4)
@@ -225,6 +826,35 @@ def plot_single_tuning_curve(unit_id, tuning_data, unit_info=None,
              '*', color='red', markersize=34,
              markeredgecolor='white', markeredgewidth=1.5,
              zorder=6)
+
+    # ITI baseline and per-orientation significance (Holm-corrected Wilcoxon)
+    resp = tuning_data.get('responsiveness', {})
+    baseline_hz = resp.get('baseline_rate_hz', np.nan)
+    if np.isfinite(baseline_hz):
+        bw = tuning_data.get('baseline_window', DEFAULT_BASELINE_WINDOW)
+        ax1.axhline(baseline_hz, color='dimgray', linestyle='--', linewidth=3.0,
+                    zorder=1,
+                    label=f'ITI baseline ({bw[0]:.2f}–{bw[1]:.2f}s)')
+
+    upper = np.maximum(mean_rates + sem_rates, ci_high) if has_ci else mean_rates + sem_rates
+    p_holm = np.asarray(resp.get('per_ori_p_holm', []), dtype=float)
+    if p_holm.size == len(orientations):
+        span = float(np.nanmax(upper)) - min(0.0, float(np.nanmin(mean_rates)))
+        offset = 0.05 * (span if span > 0 else 1.0)
+        alpha_lvl = resp.get('alpha', ALPHA)
+        for k, pv in enumerate(p_holm):
+            if not np.isfinite(pv) or pv >= alpha_lvl:
+                continue
+            marker = '***' if pv < 0.001 else ('**' if pv < 0.01 else '*')
+            ax1.text(orientations[k], upper[k] + offset, marker,
+                     ha='center', va='bottom', fontsize=22, fontweight='bold',
+                     color='#C0392B', zorder=7)
+        ax1.margins(y=0.14)
+
+    if has_ci or np.isfinite(baseline_hz):
+        ax1.legend(fontsize=13, loc='best', frameon=True, framealpha=0.85,
+                   edgecolor='none', handlelength=1.4, borderpad=0.3)
+
     ax1.set_xlabel('Orientation (degrees)', fontsize=22, fontweight='bold',
                    labelpad=10)
     ax1.set_ylabel('Firing Rate (Hz)', fontsize=22, fontweight='bold')
@@ -346,7 +976,7 @@ def plot_single_tuning_curve(unit_id, tuning_data, unit_info=None,
         f"Mod. Index: {tuning_data['modulation_index']:.3f}\n"
         f"Max FR:     {tuning_data['max_rate']:.2f} Hz\n"
         f"Min FR:     {tuning_data['min_rate']:.2f} Hz\n"
-        f"Baseline:   {tuning_data['baseline_rate']:.2f} Hz\n"
+        f"Mean FR:    {tuning_data['baseline_rate']:.2f} Hz\n"
         f"Trials:     {sum(tuning_data['trial_counts'])} "
         f"({min(tuning_data['trial_counts'])}"
         f"–{max(tuning_data['trial_counts'])}/ori)\n"
@@ -359,10 +989,27 @@ def plot_single_tuning_curve(unit_id, tuning_data, unit_info=None,
         f"N spikes: {unit_info.get('n_spikes_total', 'N/A')}"
     )
     ax8.text(0.02, 0.98, stats_text, transform=ax8.transAxes,
-             fontsize=16, verticalalignment='top', fontfamily='monospace',
+             fontsize=17, verticalalignment='top', fontfamily='monospace',
              fontweight='bold',
              bbox=dict(boxstyle='round,pad=0.6', facecolor='lightyellow',
                        alpha=0.5))
+
+    # ------------------------------------------------------------------ #
+    # 9. Responsiveness / reliability / bootstrap  (col 3, both rows)
+    # ------------------------------------------------------------------ #
+    ax9 = fig.add_subplot(gs[:, 3])
+    ax9.axis('off')
+    char_text = format_characterization_text(tuning_data, time_window=time_window)
+    if char_text:
+        ax9.text(0.0, 1.0, char_text, transform=ax9.transAxes,
+                 fontsize=15, verticalalignment='top', fontfamily='monospace',
+                 fontweight='bold', linespacing=1.45,
+                 bbox=dict(boxstyle='round,pad=0.8', facecolor='#D6EAF8',
+                           alpha=0.55))
+    else:
+        ax9.text(0.5, 0.5, 'no characterization statistics',
+                 ha='center', va='center', transform=ax9.transAxes,
+                 color='gray', fontsize=18)
 
     if save_path:
         save_path = Path(save_path)
@@ -418,18 +1065,37 @@ def plot_all_tuning_curves_summary(tuning_results, save_path=None, max_per_page=
             tuning_data = unit_tuning_data[unit_id]
             mean_rates = tuning_data['mean_rates']
             sem_rates = tuning_data['sem_rates']
+            boot = tuning_data.get('bootstrap', {})
+            resp = tuning_data.get('responsiveness', {})
+            rel = tuning_data.get('reliability', {})
 
             ax.errorbar(unique_orientations, mean_rates, yerr=sem_rates,
                         marker='o', markersize=10, linewidth=3.0, capsize=6,
                         capthick=2.5, elinewidth=2.0, color='#2E86AB',
                         ecolor='#A23B72')
-            ax.fill_between(unique_orientations,
-                            np.array(mean_rates) - np.array(sem_rates),
-                            np.array(mean_rates) + np.array(sem_rates),
-                            alpha=0.2, color='#2E86AB')
+            ci_low = np.asarray(boot.get('ci_low', []), dtype=float)
+            ci_high = np.asarray(boot.get('ci_high', []), dtype=float)
+            if ci_low.size == len(unique_orientations) and np.all(np.isfinite(ci_low)):
+                ax.fill_between(unique_orientations, ci_low, ci_high,
+                                alpha=0.2, color='#2E86AB')
+            else:
+                ax.fill_between(unique_orientations,
+                                np.array(mean_rates) - np.array(sem_rates),
+                                np.array(mean_rates) + np.array(sem_rates),
+                                alpha=0.2, color='#2E86AB')
+            if np.isfinite(resp.get('baseline_rate_hz', np.nan)):
+                ax.axhline(resp['baseline_rate_hz'], color='dimgray',
+                           linestyle='--', linewidth=1.8)
 
-            ax.set_title(f'{unit_id}\nOSI: {tuning_data["osi"]:.2f}',
-                         fontsize=18, fontweight='bold')
+            title = f'{unit_id}\nOSI: {tuning_data["osi"]:.2f}'
+            if resp:
+                title += (f' | Δ={resp["delta_rate_hz"]:+.1f}Hz '
+                          f'p={_fmt_p(resp["p_wilcoxon"])}')
+                if np.isfinite(rel.get('median_r', np.nan)):
+                    title += f'\nsplit-half r={rel["median_r"]:.2f}'
+                    title += f' ({"resp" if resp["responsive"] else "n.s."}'
+                    title += f'/{"rel" if rel["reliable"] else "unrel"})'
+            ax.set_title(title, fontsize=15, fontweight='bold')
             ax.set_xlabel('Orientation (°)', fontsize=16, fontweight='bold')
             ax.set_ylabel('Rate (Hz)', fontsize=16, fontweight='bold')
             ax.grid(True, alpha=0.3, linewidth=1.2)
@@ -467,7 +1133,10 @@ def plot_all_tuning_curves_summary(tuning_results, save_path=None, max_per_page=
 # =============================================================================
 
 def generate_tuning_curves(data_path, time_window=(0.07, 0.16),
-                          output_folder=None, create_summary=True, plot_osi=True):
+                          output_folder=None, create_summary=True, plot_osi=True,
+                          baseline_window=DEFAULT_BASELINE_WINDOW,
+                          characterize=True, n_splits=N_SPLITS, n_boot=N_BOOT,
+                          n_shuffles=N_SHUFFLES):
     """
     Complete pipeline: load data, calculate tuning curves, save all plots.
 
@@ -478,6 +1147,9 @@ def generate_tuning_curves(data_path, time_window=(0.07, 0.16),
         create_summary: Whether to create summary plots with all units
         plot_osi: Whether to also plot the OSI distribution from the tuning
                   statistics CSV this run produces (default True)
+        baseline_window: (start, end) s re. onset for the trial-matched ITI baseline
+        characterize: run responsiveness / split-half / bootstrap statistics
+        n_splits, n_boot, n_shuffles: repetition counts for those statistics
 
     Returns:
         Dictionary with tuning results
@@ -486,8 +1158,11 @@ def generate_tuning_curves(data_path, time_window=(0.07, 0.16),
     data = load_neural_data(data_path)
     all_unit_info = data.get('unit_info', {})
 
-    # Calculate tuning curves
-    tuning_results = calculate_tuning_curves(data, time_window=time_window)
+    # Calculate tuning curves (+ responsiveness / reliability / bootstrap)
+    tuning_results = calculate_tuning_curves(
+        data, time_window=time_window, baseline_window=baseline_window,
+        characterize=characterize, n_splits=n_splits, n_boot=n_boot,
+        n_shuffles=n_shuffles)
     unit_tuning_data = tuning_results['unit_tuning_data']
 
     # Set up output folder
@@ -588,7 +1263,10 @@ def _find_unit_id(all_unit_info, unit_tuning_data, shank, unit_num):
 
 
 def plot_selected_unit(data_path, shank, unit_num, time_window=(0.05, 1.0),
-                       save_path=None, show=True):
+                       save_path=None, show=True,
+                       baseline_window=DEFAULT_BASELINE_WINDOW,
+                       characterize=True, n_splits=N_SPLITS, n_boot=N_BOOT,
+                       n_shuffles=N_SHUFFLES):
     """
     Plot the tuning curve for one selected unit, addressed by shank# and unit#.
 
@@ -607,7 +1285,10 @@ def plot_selected_unit(data_path, shank, unit_num, time_window=(0.05, 1.0),
     data = load_neural_data(data_path)
     all_unit_info = data.get('unit_info', {})
 
-    tuning_results = calculate_tuning_curves(data, time_window=time_window)
+    tuning_results = calculate_tuning_curves(
+        data, time_window=time_window, baseline_window=baseline_window,
+        characterize=characterize, n_splits=n_splits, n_boot=n_boot,
+        n_shuffles=n_shuffles)
     unit_tuning_data = tuning_results['unit_tuning_data']
 
     matched = _find_unit_id(all_unit_info, unit_tuning_data, shank, unit_num)
@@ -645,16 +1326,37 @@ def save_tuning_statistics(unit_tuning_data, save_path):
     with open(save_path, 'w', newline='') as f:
         writer = csv.writer(f)
         
-        # Header
+        # Header — tuning metrics, then responsiveness / reliability / bootstrap
         writer.writerow([
             'unit_id', 'osi', 'preferred_orientation_deg', 'modulation_index',
             'max_rate_hz', 'min_rate_hz', 'baseline_rate_hz', 'range_hz',
-            'total_trials'
+            'total_trials',
+            # responsiveness (evoked vs trial-matched ITI baseline)
+            'iti_baseline_hz', 'evoked_hz', 'delta_rate_hz', 'response_index',
+            'p_wilcoxon', 'cohens_dz', 'n_sig_orientations', 'best_ori_deg',
+            'best_ori_delta_hz', 'best_ori_p_holm', 'p_kruskal_orientation',
+            'responsive', 'response_sign',
+            # split-half reliability
+            'split_half_r_median', 'split_half_r_ci_low', 'split_half_r_ci_high',
+            'split_half_r_spearman_brown', 'p_perm_reliability', 'reliable',
+            # bootstrap
+            'osi_ci_low', 'osi_ci_high', 'pref_ori_circ_sd_deg',
+            'pref_ori_ci_low_deg', 'pref_ori_ci_high_deg',
+            'modulation_ci_low', 'modulation_ci_high', 'p_perm_osi',
         ])
-        
+
+        def num(value, fmt='.4f'):
+            """Format a possibly-missing/NaN statistic for the CSV."""
+            if value is None or (isinstance(value, float) and not np.isfinite(value)):
+                return ''
+            return format(value, fmt) if isinstance(value, float) else value
+
         # Data rows
         for unit_id in sorted(unit_tuning_data.keys()):
             data = unit_tuning_data[unit_id]
+            resp = data.get('responsiveness', {})
+            rel = data.get('reliability', {})
+            boot = data.get('bootstrap', {})
             writer.writerow([
                 unit_id,
                 f"{data['osi']:.4f}",
@@ -664,9 +1366,36 @@ def save_tuning_statistics(unit_tuning_data, save_path):
                 f"{data['min_rate']:.2f}",
                 f"{data['baseline_rate']:.2f}",
                 f"{data['max_rate'] - data['min_rate']:.2f}",
-                sum(data['trial_counts'])
+                sum(data['trial_counts']),
+                num(resp.get('baseline_rate_hz'), '.3f'),
+                num(resp.get('evoked_rate_hz'), '.3f'),
+                num(resp.get('delta_rate_hz'), '.3f'),
+                num(resp.get('response_index'), '.4f'),
+                num(resp.get('p_wilcoxon'), '.3e'),
+                num(resp.get('cohens_dz'), '.3f'),
+                resp.get('n_sig_orientations', ''),
+                num(resp.get('best_orientation_deg'), '.2f'),
+                num(resp.get('best_delta_hz'), '.3f'),
+                num(resp.get('best_p_holm'), '.3e'),
+                num(resp.get('p_kruskal_orientation'), '.3e'),
+                int(resp['responsive']) if 'responsive' in resp else '',
+                resp.get('response_sign', ''),
+                num(rel.get('median_r')),
+                num(rel.get('r_ci_low')),
+                num(rel.get('r_ci_high')),
+                num(rel.get('r_spearman_brown')),
+                num(rel.get('p_perm_reliability'), '.3e'),
+                int(rel['reliable']) if 'reliable' in rel else '',
+                num(boot.get('osi_ci_low')),
+                num(boot.get('osi_ci_high')),
+                num(boot.get('pref_ori_circ_sd_deg'), '.2f'),
+                num(boot.get('pref_ori_ci_low_deg'), '.2f'),
+                num(boot.get('pref_ori_ci_high_deg'), '.2f'),
+                num(boot.get('modulation_ci_low')),
+                num(boot.get('modulation_ci_high')),
+                num(rel.get('p_perm_osi'), '.3e'),
             ])
-    
+
     print(f"✓ Saved tuning statistics to: {save_path}")
 
 
@@ -838,6 +1567,18 @@ if __name__ == "__main__":
     parser.add_argument("--t1", type=float, default=1.0, help="Window end (s)")
     parser.add_argument("--no-summary", action="store_true",
                         help="Skip summary grid in batch mode")
+    parser.add_argument("--b0", type=float, default=DEFAULT_BASELINE_WINDOW[0],
+                        help="Baseline (ITI) window start (s, re. onset)")
+    parser.add_argument("--b1", type=float, default=DEFAULT_BASELINE_WINDOW[1],
+                        help="Baseline (ITI) window end (s, re. onset)")
+    parser.add_argument("--n-splits", type=int, default=N_SPLITS,
+                        help="Split-half repetitions")
+    parser.add_argument("--n-boot", type=int, default=N_BOOT,
+                        help="Bootstrap resamples of the tuning curve")
+    parser.add_argument("--n-shuffles", type=int, default=N_SHUFFLES,
+                        help="Orientation-label shuffles for the null distributions")
+    parser.add_argument("--no-stats", action="store_true",
+                        help="Skip responsiveness / reliability / bootstrap statistics")
     args = parser.parse_args()
 
     DATA_PATH = args.data
@@ -845,6 +1586,14 @@ if __name__ == "__main__":
         DATA_PATH = resolve_data_path()
 
     time_window = (args.t0, args.t1)
+    baseline_window = (args.b0, args.b1)
+    stats_kwargs = dict(
+        baseline_window=baseline_window,
+        characterize=not args.no_stats,
+        n_splits=args.n_splits,
+        n_boot=args.n_boot,
+        n_shuffles=args.n_shuffles,
+    )
 
     try:
         if args.shank is not None and args.unit is not None:
@@ -856,6 +1605,7 @@ if __name__ == "__main__":
                 time_window=time_window,
                 save_path=args.out,
                 show=(args.out is None),
+                **stats_kwargs,
             )
             print("\n✓ Selected-unit plot complete.")
         else:
@@ -865,6 +1615,7 @@ if __name__ == "__main__":
                 time_window=time_window,
                 output_folder=args.out,
                 create_summary=not args.no_summary,
+                **stats_kwargs,
             )
             print("\n" + "="*60)
             print("Tuning curve analysis complete!")

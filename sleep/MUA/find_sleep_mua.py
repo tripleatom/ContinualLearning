@@ -37,6 +37,7 @@ import argparse
 import errno
 import json
 import pickle
+import platform
 import re
 import sys
 import time
@@ -62,11 +63,17 @@ from mua_detect import (  # noqa: E402
 # =====================================================
 # SESSION / PATHS
 # =====================================================
-SESSION_FOLDER = Path(
-    r'\\10.129.151.88\xieluanlabs2\xl_cl\experiment_data\CnL46\260727\CnL46_20260727'
-)
+# A bare Windows UNC literal (\\10.129...) does not resolve on macOS -- pathlib
+# treats backslashes as ordinary filename characters on POSIX, so .exists()
+# would silently read False everywhere. Branch on platform like
+# grating_config.py / sleep_pipeline_config.py do, rather than hand-editing the
+# separator per OS every time this constant changes.
+_SESSION_FOLDER_WINDOWS = r'\\10.129.151.88\xieluanlabs2\xl_cl\experiment_data\CnL46\260729\CnL46_20260729'
+_SESSION_FOLDER_DARWIN = '/Volumes/xieluanlabs2/xl_cl/experiment_data/CnL46/260729/CnL46_20260729'
+SESSION_FOLDER = Path(_SESSION_FOLDER_DARWIN if platform.system() == 'Darwin'
+                      else _SESSION_FOLDER_WINDOWS)
 # Base name of the per-shank NWBs: "<NWB_BASE>sh<N>.nwb"
-NWB_BASE = 'CnL46_20260727'
+NWB_BASE = 'CnL46_20260729'
 SHANKS = [0, 1, 2, 3, 4, 5, 6, 7]
 
 # Epochs to analyze, mapped to the output suffix used elsewhere in the sleep
@@ -80,7 +87,8 @@ OUTPUT_SUBFOLDER = 'MUA'
 #: Root of the sorting output tree. Per-shank folders sit at
 #: <SORTOUT_ROOT>/<animal>/<NWB_BASE>/shank<N>, matching MsSorting.py's own
 #: layout, and each holds the ``_artifact_cache/`` that run wrote.
-SORTOUT_ROOT = Path(r'\\10.129.151.88\xieluanlabs2\xl_cl\sortout')
+SORTOUT_ROOT = Path('/Volumes/xieluanlabs2/xl_cl/sortout' if platform.system() == 'Darwin'
+                    else r'\\10.129.151.88\xieluanlabs2\xl_cl\sortout')
 
 # Reuse the sorting run's artifact timestamps instead of detecting per epoch.
 # That cache is keyed on the whole-day frame count, so the repair is applied to
