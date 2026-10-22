@@ -21,7 +21,7 @@ window for e.g. "presleep" is exact, not inferred.
 
 Output matches extract_sleep_session_spikes.py's schema exactly (metadata/window/
 spike_data with 'spike_times_sec' per unit), so every downstream consumer
-(UPState.py, tc_coupling.py, apply_merged_decoder_to_sleep.py) works unchanged.
+(tuning_coupling/tc_upstates.py, apply_merged_decoder_to_sleep.py) works unchanged.
 
 Usage
 -----

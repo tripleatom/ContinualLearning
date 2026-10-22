@@ -351,8 +351,8 @@ def extract_grating_neural_data_for_embedding(
         'unit_info': {}
     }
 
-    window_pre = 0.2   # seconds before stimulus onset
-    window_post = 2.0  # seconds after stimulus onset
+    window_pre = ITI_duration   # seconds before stimulus onset
+    window_post = 2.0           # seconds after stimulus onset
     unit_counter = 0
     shanks_processed = []
 

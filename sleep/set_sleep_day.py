@@ -23,7 +23,7 @@ conversion_list.txt beside the NWBs. As soon as rec_folder names a folder that
 has one, it's parsed and the cumulative offsets of whichever .rec file names
 contain "presleep"/"postsleep" are offered as start_sample/end_sample
 candidates for that session - "Fill from conversion list" copies them in.
-Mirrors MUA/find_sleep_mua.py's epoch_windows, which derives the same sleep
+Mirrors mua_onoff/find_sleep_mua.py's epoch_windows, which derives the same sleep
 epoch's sample bounds from the same file for a different downstream use.
 
 "Auto-fill from disk" goes further and guesses every path for the animal/date
@@ -63,7 +63,7 @@ SESSION_LABELS = {"pre": "pre-task sleep session", "post": "post-task sleep sess
 LOCAL_FAST_DISK = Path("G:/")
 
 # conversion_list.txt lines look like "   1. CnL46_presleep_20260728_141233.rec:
-# 123627847 timestamps" (MUA/find_sleep_mua.py's _CONV_LINE). Newer exports (once
+# 123627847 timestamps" (mua_onoff/find_sleep_mua.py's _CONV_LINE). Newer exports (once
 # rec2nwb started reporting gap-interpolation) instead say "153711550 samples
 # [nwb 124181211-277892760] (153711403 recorded + 147 filled over 147 gap(s))" -
 # the count is still first, so both are matched; the trailing detail is ignored

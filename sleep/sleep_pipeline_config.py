@@ -36,7 +36,7 @@ from server_fallback import (
 from sleep_day_registry import entry_animal, load_day_config
 
 # =====================================================
-# SESSION / PATHS  (shared)
+# SESSION / PATHS  (shared) 
 # =====================================================
 # Which registered animal-day to run. Edit these per session; see module
 # docstring. The registry is keyed by BOTH, so the same date can exist for
@@ -408,12 +408,12 @@ artifact_params = {
 
 
 # =====================================================
-# NREM SCORING AND CONSOLIDATED-WINDOW SELECTION  (score_nrem_epochs.py)
+# FOUR-STATE SCORING AND CONSOLIDATED-NREM SELECTION  (score_sleep_states.py)
 # =====================================================
-# Finds the period(s) where the animal is "fully asleep" (consolidated NREM),
-# from the band-powers pkl. NREM = sustained high slow-wave activity
-# (PC1 of the spectrogram, oriented by delta) with low movement (broadband
-# power proxy). Output feeds the UP/DOWN stage.
+# Scores NREM/REM/WAKE/QUIET from the band-powers pkl. NREM evidence is the
+# per-channel robust z(log delta) - z(log gamma): channels vote within shanks,
+# then shanks vote at probe level. Velocity separates WAKE from stationary
+# non-NREM and theta separates REM from QUIET. Output feeds MUA ON/OFF scoring.
 sleep_detect_params = {
     # Which shanks to aggregate for the sleep index (None = use `shanks`).
     # CnL46 260729: shanks 4 and 7 have almost no spectral-tilt signal (mostly
@@ -423,21 +423,14 @@ sleep_detect_params = {
     # channel does not add information, it dilutes what the good channels see.
     # Restricting to the six shanks that actually carry a usable signal.
     'shanks': [0, 1, 2, 3, 5, 6],
-    # Epoch length (s) for scoring; signals are averaged within each epoch.
-    'epoch_sec': 4.0,
-    # NREM is declared where the spectral-tilt index  z(log delta) - z(log gamma)
-    # exceeds this (SD units; higher = more selective). The tilt index already
-    # suppresses movement, so the gamma gate below is optional.
+    # NREM channel threshold in robust-z units (higher = more selective).
     'nrem_sw_z_thresh': 1.0,
-    # Optional extra gate: reject epochs whose gamma (z) exceeds this. Set to
-    # None to rely on the tilt index alone (recommended starting point).
-    'move_z_thresh': None,
-    # Smooth the per-epoch scores with this many epochs (boxcar) before
-    # thresholding, to avoid flicker.
-    'smooth_epochs': 3,
     # Bridge NREM gaps shorter than this (s) and drop NREM bouts shorter than
     # `min_bout_sec`.
     'merge_gap_sec': 20.0,
+    # REVIEW FLAG: 60 s is an analysis heuristic, not a biological requirement.
+    # The scorer always prints sensitivity at 0, 30, and 60 s; reconsider this
+    # value if valid short NREM bouts matter for the analysis.
     'min_bout_sec': 60.0,
     # A bout must be at least this long (s) to count as "consolidated / fully
     # asleep" (the window handed to the UP/DOWN stage).

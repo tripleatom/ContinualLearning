@@ -8,7 +8,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from spikeinterface import load_sorting_analyzer
 from trodes_io import DIO
-from readDIO_grating import get_trial_params
+from DiscriminationTask.grating.readDIO_task import get_trial_params
 
 
 def compare_dio_json_timing(trial_start, trial_end, trial_params, fs, tol=0.05):

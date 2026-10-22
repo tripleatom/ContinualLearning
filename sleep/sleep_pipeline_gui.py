@@ -3,12 +3,12 @@ Tkinter control panel for the sleep LFP / spectrogram pipeline.
 
 Drives the sequence normally run by hand for each recording day:
 
-    1. video_ephys_sync.py           video PROC square wave vs .rec DIO -> sync_times_{pre,post}.pkl
-    2. proc_func_velocity.py         tracking PROC -> *_velocity_advanced.pkl
-    3. extract_sleep_lfp.py          NWB -> low_freq/*_lfp_traces.npz
-    4. compute_sleep_spectrograms.py LFP traces -> *_spectrograms.npz
-    5. compute_sleep_features.py     spectrograms -> *_all_shanks_band_powers.pkl
-    6. plot_sleep_spectrograms.py    band powers -> per-channel figures + trace pkl
+    1. sync/video_ephys_sync.py           video PROC square wave vs .rec DIO -> sync_times_{pre,post}.pkl
+    2. sync/proc_func_velocity.py         tracking PROC -> *_velocity_advanced.pkl
+    3. lfp/extract_sleep_lfp.py          NWB -> low_freq/*_lfp_traces.npz
+    4. lfp/compute_sleep_spectrograms.py LFP traces -> *_spectrograms.npz
+    5. lfp/compute_sleep_features.py     spectrograms -> *_all_shanks_band_powers.pkl
+    6. lfp/plot_sleep_spectrograms.py    band powers -> per-channel figures + trace pkl
 
 The GUI picks the animal and recording day (a pair registered in
 sleep_day_configs.json), writes ACTIVE_ANIMAL / ACTIVE_DATE / SESSION_FILTER /
@@ -517,12 +517,12 @@ def preflight(animal, date, shanks, dio_channel, velocity_source="proc_center"):
 
 # key, label, script
 STAGES = [
-    ("sync", "1. Video/DIO sync", "video_ephys_sync.py"),
-    ("velocity", "2. Velocity", "proc_func_velocity.py"),
-    ("lfp", "3. Extract LFP", "extract_sleep_lfp.py"),
-    ("spectrograms", "4. Spectrograms", "compute_sleep_spectrograms.py"),
-    ("features", "5. Band powers", "compute_sleep_features.py"),
-    ("plots", "6. Plot spectrograms", "plot_sleep_spectrograms.py"),
+    ("sync", "1. Video/DIO sync", "sync/video_ephys_sync.py"),
+    ("velocity", "2. Velocity", "sync/proc_func_velocity.py"),
+    ("lfp", "3. Extract LFP", "lfp/extract_sleep_lfp.py"),
+    ("spectrograms", "4. Spectrograms", "lfp/compute_sleep_spectrograms.py"),
+    ("features", "5. Band powers", "lfp/compute_sleep_features.py"),
+    ("plots", "6. Plot spectrograms", "lfp/plot_sleep_spectrograms.py"),
 ]
 STAGE_LABELS = {key: label for key, label, _ in STAGES}
 STAGE_SCRIPTS = {key: script for key, _, script in STAGES}

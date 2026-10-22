@@ -73,7 +73,10 @@ def _load_pickle(filepath):
 # All three read the same per-trial firing rates used for the tuning curve, so
 # the numbers printed on the figure always describe the curve that is drawn.
 
-DEFAULT_BASELINE_WINDOW = (-0.2, 0.0)   # ITI tail preceding stimulus onset
+DEFAULT_BASELINE_WINDOW = (-0.2, 0.0)   # fallback only; the baseline normally
+                                        # spans the whole ITI held in the pkl
+DEFAULT_SPATIAL_FREQ = 0.08   # c/deg; orientation tuning is built from this SF alone
+SF_TUNING_ORIENTATION = 0.0   # orientation the SF tuning curve is measured at
 N_SPLITS = 1000       # split-half repetitions
 N_BOOT = 1000         # bootstrap resamples
 N_SHUFFLES = 1000     # orientation-label shuffles for the null distributions
@@ -476,8 +479,44 @@ def _fmt_p(p):
 # TUNING CURVE CALCULATION
 # =============================================================================
 
+def _available_spatial_freqs(neural_data):
+    """Sorted unique spatial frequencies present in the exported trials."""
+    unit_ids = list(neural_data['spike_data'].keys())
+    if not unit_ids:
+        return []
+    sfs = {round(float(t['spatial_freq']), 2)
+           for t in neural_data['spike_data'][unit_ids[0]]
+           if t.get('spatial_freq') is not None}
+    return sorted(sfs)
+
+
+def _resolve_spatial_freq(requested, available):
+    """
+    Which spatial frequency the orientation tuning curve is built from.
+    Returns None to pool every SF — either asked for explicitly, or because the
+    session carries no SF labels at all.
+    """
+    if requested is None or not available:
+        return None
+    for sf in available:
+        if np.isclose(sf, requested, atol=1e-3):
+            return sf
+    print(f"  WARNING: spatial frequency {requested:g} c/deg is not in this session "
+          f"({format_grating_values(available)}) — pooling all SFs instead.")
+    return None
+
+
+def _trial_matches_sf(trial_data, sf):
+    """True if this trial was shown at spatial frequency `sf` (None = accept all)."""
+    if sf is None:
+        return True
+    trial_sf = trial_data.get('spatial_freq')
+    return trial_sf is not None and np.isclose(float(trial_sf), sf, atol=1e-3)
+
+
 def calculate_tuning_curves(neural_data, time_window=(0.07, 0.16),
-                            baseline_window=DEFAULT_BASELINE_WINDOW,
+                            baseline_window=None,
+                            spatial_freq=DEFAULT_SPATIAL_FREQ,
                             characterize=True, n_splits=N_SPLITS,
                             n_boot=N_BOOT, n_shuffles=N_SHUFFLES, seed=0):
     """
@@ -487,7 +526,12 @@ def calculate_tuning_curves(neural_data, time_window=(0.07, 0.16),
         neural_data: dict as produced by GratingExport (spike_data / trial_info)
         time_window: (start, end) s re. onset — the evoked analysis window
         baseline_window: (start, end) s re. onset for the trial-matched baseline.
-            Defaults to the pre-onset ITI tail (-0.2, 0) s.
+            None (default) spans the whole ITI, clipped to the pkl's window_pre
+            so the baseline is never averaged over bins that hold no data.
+        spatial_freq: build the orientation tuning curve from this SF alone
+            (c/deg).  None pools every SF, which mixes SF-tuned responses at the
+            same orientation.  The SF tuning curve is always computed over all
+            SFs regardless of this setting.
         characterize: run responsiveness / split-half / bootstrap statistics
         n_splits, n_boot, n_shuffles: repetitions for the split-half, bootstrap
             and label-shuffle null respectively
@@ -501,14 +545,36 @@ def calculate_tuning_curves(neural_data, time_window=(0.07, 0.16),
     """
     window_start, window_end = time_window
     window_duration = window_end - window_start
-    
+
+    exp_params = neural_data.get('experiment_parameters', {})
+    stimulus_duration = float(exp_params.get('stimulus_duration', 1.5))
+    iti_duration = float(exp_params.get('iti_duration', 0.2))
+    window_pre = float(neural_data.get('extraction_params', {}).get('window_pre', 0.2))
+
+    if baseline_window is None:
+        # Whole ITI — but never earlier than the export actually extracted, since
+        # bins with no data would silently deflate the baseline rate.
+        baseline_window = (-min(iti_duration, window_pre), 0.0)
+
     unit_ids = list(neural_data['spike_data'].keys())
     orientations = neural_data['trial_info']['orientations']
     unique_orientations = sorted(neural_data['trial_info']['unique_orientations'])
-    
+
+    available_sfs = _available_spatial_freqs(neural_data)
+    sf_used = _resolve_spatial_freq(spatial_freq, available_sfs)
+    # Orientation the SF tuning curve is read out at — exact 0 when present.
+    sf_tuning_ori = (min(unique_orientations,
+                         key=lambda o: abs(o - SF_TUNING_ORIENTATION))
+                     if unique_orientations else None)
+
     print(f"\nCalculating tuning curves:")
     print(f"  Units: {len(unit_ids)}")
     print(f"  Orientations: {format_grating_values(unique_orientations)}")
+    if available_sfs:
+        print(f"  Spatial frequencies: {format_grating_values(available_sfs)}")
+        print(f"  Orientation tuning from SF: "
+              f"{'all (pooled)' if sf_used is None else format_grating_value(sf_used)}")
+        print(f"  SF tuning at orientation: {format_grating_value(sf_tuning_ori)}°")
     print(f"  Time window: {window_start:.3f}-{window_end:.3f}s ({window_duration:.3f}s)")
     if characterize:
         print(f"  Baseline window: {baseline_window[0]:.3f}-{baseline_window[1]:.3f}s "
@@ -526,9 +592,9 @@ def calculate_tuning_curves(neural_data, time_window=(0.07, 0.16),
 
         for trial_data in unit_trials:
             orientation = trial_data['orientation']
-            if orientation in unique_orientations:
+            if orientation in unique_orientations and _trial_matches_sf(trial_data, sf_used):
                 spike_times = np.array(trial_data['spike_times'])
-                spikes_in_window = np.sum((spike_times >= window_start) & 
+                spikes_in_window = np.sum((spike_times >= window_start) &
                                          (spike_times < window_end))
                 firing_rate = spikes_in_window / window_duration
                 trial_rates[orientation].append(firing_rate)
@@ -572,16 +638,17 @@ def calculate_tuning_curves(neural_data, time_window=(0.07, 0.16),
         # Baseline firing rate (mean across all orientations)
         baseline_rate = np.mean(mean_rates_arr)
         
-        # PSTH: 20 ms bins, -0.2 to 1.5 s relative to stimulus onset
+        # PSTH: 20 ms bins, [-ITI, trial_length + ITI] relative to stimulus onset
         psth_bin_s = 0.02
-        psth_edges = np.arange(-0.2, 1.5 + psth_bin_s, psth_bin_s)
+        psth_edges = np.arange(-iti_duration, stimulus_duration + iti_duration + psth_bin_s,
+                                psth_bin_s)
         psth_t = (psth_edges[:-1] + psth_edges[1:]) / 2
         psth_per_ori = {}
         for ori in unique_orientations:
             spikes_all = []
             n_ori_trials = 0
             for trial_data in unit_trials:
-                if trial_data['orientation'] == ori:
+                if trial_data['orientation'] == ori and _trial_matches_sf(trial_data, sf_used):
                     spikes_all.append(np.array(trial_data['spike_times']))
                     n_ori_trials += 1
             if n_ori_trials > 0 and spikes_all:
@@ -589,6 +656,19 @@ def calculate_tuning_curves(neural_data, time_window=(0.07, 0.16),
                 psth_per_ori[ori] = (counts / (n_ori_trials * psth_bin_s)).tolist()
             else:
                 psth_per_ori[ori] = [0.0] * len(psth_t)
+
+        # SF tuning curve: rate vs spatial frequency at a single orientation.
+        # Always spans every SF, independent of the SF the ori curve is built from.
+        sf_mean_rates, sf_sem_rates, sf_trial_counts = [], [], []
+        for sf in available_sfs:
+            rates = [
+                _rate_in_window(np.array(t['spike_times']), time_window)
+                for t in unit_trials
+                if t['orientation'] == sf_tuning_ori and _trial_matches_sf(t, sf)
+            ]
+            sf_mean_rates.append(float(np.mean(rates)) if rates else 0.0)
+            sf_sem_rates.append(float(stats.sem(rates)) if len(rates) > 1 else 0.0)
+            sf_trial_counts.append(len(rates))
 
         unit_tuning_data[unit_id] = {
             'orientations': unique_orientations,
@@ -608,6 +688,17 @@ def calculate_tuning_curves(neural_data, time_window=(0.07, 0.16),
             'baseline_rate': baseline_rate,
             'psth_per_ori': psth_per_ori,
             'psth_t': psth_t.tolist(),
+            'stimulus_duration': stimulus_duration,
+            'iti_duration': iti_duration,
+            'spatial_freq_used': sf_used,
+            'available_spatial_freqs': available_sfs,
+            'sf_tuning': {
+                'spatial_freqs': available_sfs,
+                'orientation_deg': sf_tuning_ori,
+                'mean_rates': sf_mean_rates,
+                'sem_rates': sf_sem_rates,
+                'trial_counts': sf_trial_counts,
+            },
         }
 
         # Responsiveness, split-half reliability and bootstrap CIs — each unit
@@ -626,6 +717,9 @@ def calculate_tuning_curves(neural_data, time_window=(0.07, 0.16),
         'time_window': time_window,
         'baseline_window': tuple(baseline_window),
         'experiment_parameters': neural_data.get('experiment_parameters', {}),
+        'spatial_freq_used': sf_used,
+        'available_spatial_freqs': available_sfs,
+        'sf_tuning_orientation_deg': sf_tuning_ori,
         'n_units': len(unit_ids)
     }
     
@@ -750,11 +844,12 @@ def plot_single_tuning_curve(unit_id, tuning_data, unit_info=None,
     """
     Create a comprehensive tuning curve plot for a single unit.
 
-    Layout (2 rows × 4 columns):
+    Layout (2 rows × 5 columns):
       Col 0: Cartesian tuning curve (row 0), PSTH (row 1)
       Col 1: Polar plot (row 0), autocorrelogram (row 1)
       Col 2: Waveform (row 0), tuning statistics + unit info (row 1)
-      Col 3: Responsiveness / split-half reliability / bootstrap stats (both rows)
+      Col 3: SF tuning curve at a fixed orientation (row 0)
+      Col 4: Responsiveness / split-half reliability / bootstrap stats (both rows)
 
     Args:
         unit_info: dict from neural_data['unit_info'] — may contain
@@ -765,9 +860,9 @@ def plot_single_tuning_curve(unit_id, tuning_data, unit_info=None,
     if unit_info is None:
         unit_info = {}
 
-    fig = plt.figure(figsize=(30, 13))
-    gs = GridSpec(2, 4, figure=fig, hspace=0.55, wspace=0.30,
-                  left=0.05, right=0.98, top=0.84, bottom=0.07)
+    fig = plt.figure(figsize=(37, 13))
+    gs = GridSpec(2, 5, figure=fig, hspace=0.55, wspace=0.30,
+                  left=0.04, right=0.985, top=0.84, bottom=0.07)
 
     orientations = tuning_data['orientations']
     mean_rates = np.array(tuning_data['mean_rates'])
@@ -904,6 +999,9 @@ def plot_single_tuning_curve(unit_id, tuning_data, unit_info=None,
     ax3.axvline(0, color='black', linewidth=3.0, linestyle='--', label='onset')
     ax3.axvspan(time_window[0], time_window[1], alpha=0.15, color='gray',
                 label='analysis\nwindow')
+    iti_duration = tuning_data.get('iti_duration', 0.2)
+    stimulus_duration = tuning_data.get('stimulus_duration', psth_t[-1] - iti_duration)
+    ax3.set_xlim(-iti_duration, stimulus_duration + iti_duration)
     ax3.set_xlabel('Time re. onset (s)', fontsize=22, fontweight='bold')
     ax3.set_ylabel('Firing Rate (Hz)', fontsize=22, fontweight='bold')
     ax3.set_title('PSTH', fontsize=24, fontweight='bold', pad=12)
@@ -963,6 +1061,44 @@ def plot_single_tuning_curve(unit_id, tuning_data, unit_info=None,
     ax7.tick_params(labelsize=22, width=2.8, length=10)
 
     # ------------------------------------------------------------------ #
+    # 7b. SF tuning curve at a fixed orientation  (row 0, col 3)
+    # ------------------------------------------------------------------ #
+    ax4 = fig.add_subplot(gs[0, 3])
+    sf_tuning = tuning_data.get('sf_tuning') or {}
+    sfs = sf_tuning.get('spatial_freqs') or []
+    ori_at = sf_tuning.get('orientation_deg', 0.0)
+    if len(sfs) > 1:
+        sf_means = np.array(sf_tuning['mean_rates'])
+        sf_sems = np.array(sf_tuning['sem_rates'])
+        x = np.arange(len(sfs))
+        ax4.errorbar(x, sf_means, yerr=sf_sems, marker='o', markersize=13,
+                     linewidth=3.5, capsize=7, capthick=2.8,
+                     color='#C1553B', ecolor='#C1553B', markerfacecolor='white',
+                     markeredgewidth=3.0)
+        ax4.set_xticks(x)
+        ax4.set_xticklabels([format_grating_value(sf) for sf in sfs])
+        ax4.set_xlim(-0.35, len(sfs) - 0.65)
+        ax4.set_xlabel('Spatial frequency (c/deg)', fontsize=22, fontweight='bold')
+        ax4.set_ylabel('Firing Rate (Hz)', fontsize=22, fontweight='bold')
+        peak_sf = sfs[int(np.argmax(sf_means))]
+        ax4.set_title(f'SF tuning @ {format_grating_value(ori_at)}°'
+                      f'  (peak {format_grating_value(peak_sf)})',
+                      fontsize=24, fontweight='bold', pad=12)
+        ax4.grid(True, alpha=0.3, linewidth=1.2)
+    else:
+        only = format_grating_value(sfs[0]) if sfs else 'none'
+        ax4.text(0.5, 0.5, f'single SF ({only})\nno SF tuning', ha='center',
+                 va='center', transform=ax4.transAxes, color='gray', fontsize=20)
+        ax4.set_title('SF tuning', fontsize=24, fontweight='bold', pad=12)
+        ax4.set_xticks([])
+        ax4.set_yticks([])
+    ax4.spines['top'].set_visible(False)
+    ax4.spines['right'].set_visible(False)
+    for spine in ('left', 'bottom'):
+        ax4.spines[spine].set_linewidth(2.5)
+    ax4.tick_params(labelsize=22, width=2.8, length=10)
+
+    # ------------------------------------------------------------------ #
     # 8. Combined stats + unit info  (row 1, col 2)
     # ------------------------------------------------------------------ #
     ax8 = fig.add_subplot(gs[1, 2])
@@ -980,6 +1116,7 @@ def plot_single_tuning_curve(unit_id, tuning_data, unit_info=None,
         f"Trials:     {sum(tuning_data['trial_counts'])} "
         f"({min(tuning_data['trial_counts'])}"
         f"–{max(tuning_data['trial_counts'])}/ori)\n"
+        f"SF used:    {'all (pooled)' if tuning_data.get('spatial_freq_used') is None else format_grating_value(tuning_data['spatial_freq_used']) + ' c/deg'}\n"
         f"\n"
         f"UNIT INFO\n"
         f"Shank:    {unit_info.get('shank', 'N/A')}\n"
@@ -997,7 +1134,7 @@ def plot_single_tuning_curve(unit_id, tuning_data, unit_info=None,
     # ------------------------------------------------------------------ #
     # 9. Responsiveness / reliability / bootstrap  (col 3, both rows)
     # ------------------------------------------------------------------ #
-    ax9 = fig.add_subplot(gs[:, 3])
+    ax9 = fig.add_subplot(gs[:, 4])
     ax9.axis('off')
     char_text = format_characterization_text(tuning_data, time_window=time_window)
     if char_text:
@@ -1134,7 +1271,8 @@ def plot_all_tuning_curves_summary(tuning_results, save_path=None, max_per_page=
 
 def generate_tuning_curves(data_path, time_window=(0.07, 0.16),
                           output_folder=None, create_summary=True, plot_osi=True,
-                          baseline_window=DEFAULT_BASELINE_WINDOW,
+                          baseline_window=None,
+                          spatial_freq=DEFAULT_SPATIAL_FREQ,
                           characterize=True, n_splits=N_SPLITS, n_boot=N_BOOT,
                           n_shuffles=N_SHUFFLES):
     """
@@ -1161,6 +1299,7 @@ def generate_tuning_curves(data_path, time_window=(0.07, 0.16),
     # Calculate tuning curves (+ responsiveness / reliability / bootstrap)
     tuning_results = calculate_tuning_curves(
         data, time_window=time_window, baseline_window=baseline_window,
+        spatial_freq=spatial_freq,
         characterize=characterize, n_splits=n_splits, n_boot=n_boot,
         n_shuffles=n_shuffles)
     unit_tuning_data = tuning_results['unit_tuning_data']
@@ -1264,7 +1403,8 @@ def _find_unit_id(all_unit_info, unit_tuning_data, shank, unit_num):
 
 def plot_selected_unit(data_path, shank, unit_num, time_window=(0.05, 1.0),
                        save_path=None, show=True,
-                       baseline_window=DEFAULT_BASELINE_WINDOW,
+                       baseline_window=None,
+                       spatial_freq=DEFAULT_SPATIAL_FREQ,
                        characterize=True, n_splits=N_SPLITS, n_boot=N_BOOT,
                        n_shuffles=N_SHUFFLES):
     """
@@ -1287,6 +1427,7 @@ def plot_selected_unit(data_path, shank, unit_num, time_window=(0.05, 1.0),
 
     tuning_results = calculate_tuning_curves(
         data, time_window=time_window, baseline_window=baseline_window,
+        spatial_freq=spatial_freq,
         characterize=characterize, n_splits=n_splits, n_boot=n_boot,
         n_shuffles=n_shuffles)
     unit_tuning_data = tuning_results['unit_tuning_data']
@@ -1567,10 +1708,15 @@ if __name__ == "__main__":
     parser.add_argument("--t1", type=float, default=1.0, help="Window end (s)")
     parser.add_argument("--no-summary", action="store_true",
                         help="Skip summary grid in batch mode")
-    parser.add_argument("--b0", type=float, default=DEFAULT_BASELINE_WINDOW[0],
-                        help="Baseline (ITI) window start (s, re. onset)")
-    parser.add_argument("--b1", type=float, default=DEFAULT_BASELINE_WINDOW[1],
+    parser.add_argument("--b0", type=float, default=None,
+                        help="Baseline (ITI) window start (s, re. onset). "
+                             "Default: the whole ITI available in the pkl.")
+    parser.add_argument("--b1", type=float, default=0.0,
                         help="Baseline (ITI) window end (s, re. onset)")
+    parser.add_argument("--sf", type=str, default=str(DEFAULT_SPATIAL_FREQ),
+                        help="Spatial frequency (c/deg) the orientation tuning "
+                             "curve is built from, or 'all' to pool every SF "
+                             f"(default: {DEFAULT_SPATIAL_FREQ})")
     parser.add_argument("--n-splits", type=int, default=N_SPLITS,
                         help="Split-half repetitions")
     parser.add_argument("--n-boot", type=int, default=N_BOOT,
@@ -1586,9 +1732,11 @@ if __name__ == "__main__":
         DATA_PATH = resolve_data_path()
 
     time_window = (args.t0, args.t1)
-    baseline_window = (args.b0, args.b1)
+    baseline_window = None if args.b0 is None else (args.b0, args.b1)
+    spatial_freq = None if args.sf.strip().lower() == 'all' else float(args.sf)
     stats_kwargs = dict(
         baseline_window=baseline_window,
+        spatial_freq=spatial_freq,
         characterize=not args.no_stats,
         n_splits=args.n_splits,
         n_boot=args.n_boot,

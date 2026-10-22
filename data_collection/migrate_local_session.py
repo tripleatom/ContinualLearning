@@ -39,18 +39,26 @@ A session is refused unless all of these hold:
   * every shank NWB opens, has an ``ElectricalSeries``, and its sample count
     equals the conversion list's total.
 
+``--raw`` handles a day that was never converted: there is no NWB to replace
+the traces, so *everything* moves, traces included. Each file is hashed as it is
+copied and read back from the share and hashed again; the local copy is removed
+only when the two match, since the share copy is then the only one there is.
+
 Usage
 -----
   python migrate_local_session.py D:\\cl\\ephys\\CnL45_20260816
   python migrate_local_session.py D:\\cl\\ephys\\CnL45_20260816 --apply
   python migrate_local_session.py D:\\cl\\ephys\\* --apply --i-have-backups
+  python migrate_local_session.py D:\\cl\\ephys\\CnL43\\CnL43_20260907 --raw --apply
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import shutil
+import time
 from pathlib import Path
 
 from archive_nwb_sessions import (
@@ -66,8 +74,14 @@ from archive_nwb_sessions import (
 EXPECTED_SHANKS = 8
 
 
-def describe(folder: Path, expect_shanks: int, ignore: frozenset[int]):
+def describe(folder: Path, expect_shanks: int, ignore: frozenset[int],
+             dest: Path | None = None):
     """Work out where this folder belongs and whether it may be migrated.
+
+    `dest` overrides the destination worked out from the folder name. Callers
+    that already know the session's server home -- the spike-sorting pipeline
+    resolves it with ``server_fallback.server_session_folder`` -- pass it here,
+    so an animal whose folder name and server folder differ is not misfiled.
 
     Returns (dest, traces, payload, expect_samples, problems) where `traces` are
     the raw files to delete and `payload` is every other file, each as a
@@ -78,7 +92,8 @@ def describe(folder: Path, expect_shanks: int, ignore: frozenset[int]):
     if not (len(date8) == 8 and date8.isdigit() and animal):
         return None, {}, [], 0, [f"folder name is not <animal>_<YYYYMMDD>: {folder.name}"]
 
-    dest = SHARE_ROOT / animal / date8[2:] / folder.name
+    if dest is None:
+        dest = SHARE_ROOT / animal / date8[2:] / folder.name
 
     # The list travels with everything else, so on a second pass -- traces kept
     # the first time, or an interrupted run -- it is already on the share. Look
@@ -125,9 +140,9 @@ def describe(folder: Path, expect_shanks: int, ignore: frozenset[int]):
 
 
 def migrate(folder: Path, expect_shanks: int, ignore: frozenset[int],
-            apply: bool, allow_delete: bool, log=print) -> bool:
+            apply: bool, allow_delete: bool, log=print, dest: Path | None = None) -> bool:
     dest, traces, payload, expect_samples, problems = describe(
-        folder, expect_shanks, ignore)
+        folder, expect_shanks, ignore, dest)
 
     log(f"\n{'=' * 74}\n{folder}")
     if dest:
@@ -215,6 +230,181 @@ def migrate(folder: Path, expect_shanks: int, ignore: frozenset[int],
     return True
 
 
+# ---------------------------------------------------------------------------
+# --raw: a day that was never converted moves whole, traces included
+# ---------------------------------------------------------------------------
+
+_CHUNK = 8 << 20
+
+# Drives recordings are written to, and how recently a .rec must have grown for
+# one to count as in progress.
+RECORDING_ROOTS = (Path("F:\\"), Path("G:\\"), Path(r"D:\cl\ephys"))
+RECORDING_FRESH_SEC = 180
+_SCAN_DEPTH = 4
+
+
+def _within(path: Path, root: Path) -> bool:
+    return path == root or root in path.parents
+
+
+def active_recording(roots=None, fresh: int | None = None,
+                     exclude=()) -> Path | None:
+    """A ``.rec`` written to within the last `fresh` seconds, or None.
+
+    Sustained reads or writes on the drive a recording is going to can stall it.
+    A CnL43 postsleep on 2026-09-18 ended mid-packet, 22 bytes into a 534-byte
+    packet, while 160 GB was being read off that same disk; the day had to be
+    restarted as a second epoch 16 minutes later. Bulk copies wait instead.
+
+    `exclude` drops folders from the scan. A caller writing .rec files itself --
+    staging a session onto one of these roots -- would otherwise see its own
+    fresh copy as a recording and wait for it.
+    """
+    # Read the settings at call time, not as argument defaults bound at import,
+    # so changing RECORDING_ROOTS actually takes effect.
+    roots = RECORDING_ROOTS if roots is None else roots
+    cutoff = time.time() - (RECORDING_FRESH_SEC if fresh is None else fresh)
+    skip = []
+    for item in exclude:
+        try:
+            skip.append(Path(item).resolve())
+        except OSError:
+            continue
+
+    def scan(folder: Path, depth: int):
+        if depth > _SCAN_DEPTH:
+            return None
+        try:
+            with os.scandir(folder) as entries:
+                for entry in entries:
+                    try:
+                        if entry.is_file() and entry.name.lower().endswith(".rec"):
+                            if entry.stat().st_mtime > cutoff:
+                                return Path(entry.path)
+                        elif entry.is_dir():
+                            path = Path(entry.path)
+                            if any(_within(path, s) for s in skip):
+                                continue
+                            if (found := scan(path, depth + 1)) is not None:
+                                return found
+                    except OSError:
+                        continue
+        except OSError:
+            return None
+        return None
+
+    for root in roots:
+        try:
+            resolved = root.resolve()
+        except OSError:
+            resolved = root
+        if any(_within(resolved, s) for s in skip):
+            continue
+        if (found := scan(root, 0)) is not None:
+            return found
+    return None
+
+
+def wait_while_recording(log=print, poll: int = 60, exclude=()) -> None:
+    """Block while a recording is in progress, so bulk I/O never competes with it."""
+    announced = False
+    while (rec := active_recording(exclude=exclude)) is not None:
+        if not announced:
+            log(f"      waiting: a recording is in progress ({rec.name}) -- "
+                f"not competing with it for the disk")
+            announced = True
+        time.sleep(poll)
+    if announced:
+        log("      recording finished; carrying on")
+
+
+def _hash_file(path: Path) -> str:
+    digest = hashlib.blake2b(digest_size=16)
+    with open(path, "rb") as fh:
+        while block := fh.read(_CHUNK):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _copy_hashed(src: Path, dest: Path) -> str:
+    """Copy via a .part file and return the hash of the bytes read from `src`."""
+    digest = hashlib.blake2b(digest_size=16)
+    staging = dest.with_name(dest.name + ".part")
+    try:
+        with open(src, "rb") as fi, open(staging, "wb") as fo:
+            while block := fi.read(_CHUNK):
+                digest.update(block)
+                fo.write(block)
+        os.replace(staging, dest)
+    except BaseException:
+        staging.unlink(missing_ok=True)
+        raise
+    shutil.copystat(src, dest)
+    return digest.hexdigest()
+
+
+def move_raw(folder: Path, apply: bool, log=print, dest: Path | None = None) -> bool:
+    """Move an unconverted session -- raw traces and all -- to the share.
+
+    With no NWB to stand in for the traces, the share copy becomes the only
+    copy, so a size check is not enough: each file is hashed while it is copied
+    and hashed again as read back from the share, and the local file is deleted
+    only when both hashes match. A file already on the share is re-verified the
+    same way before its local twin goes, so an interrupted run resumes safely.
+    """
+    animal, _, date8 = folder.name.rpartition("_")
+    log(f"\n{'=' * 74}\n{folder}  [raw move]")
+    if not (len(date8) == 8 and date8.isdigit() and animal):
+        log(f"  REFUSED: folder name is not <animal>_<YYYYMMDD>: {folder.name}")
+        return False
+    dest = dest or SHARE_ROOT / animal / date8[2:] / folder.name
+    files = sorted((p for p in folder.rglob("*") if p.is_file()),
+                   key=lambda p: str(p.relative_to(folder)))
+    log(f"  -> {dest}")
+    log(f"  moves  : {len(files)} file(s)  {gb(sum(p.stat().st_size for p in files))}"
+        f"  (raw traces included -- there is no NWB)")
+    if not apply:
+        for src in files:
+            log(f"      would move {src.relative_to(folder)}  ({gb(src.stat().st_size)})")
+        return True
+
+    ok = True
+    for src in files:
+        wait_while_recording(log)
+        rel = src.relative_to(folder)
+        target = dest / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        size = src.stat().st_size
+        if target.exists():
+            if target.stat().st_size != size:
+                log(f"      CONFLICT {rel}: a different file is already on the share "
+                    f"({gb(target.stat().st_size)} vs {gb(size)}) -- local copy kept")
+                ok = False
+                continue
+            src_hash, dst_hash = _hash_file(src), _hash_file(target)
+        else:
+            log(f"      copying {rel}  ({gb(size)}) ...")
+            src_hash = _copy_hashed(src, target)
+            dst_hash = _hash_file(target)          # read back what actually landed
+        if src_hash != dst_hash:
+            log(f"      MISMATCH {rel}: the share copy differs from the local file "
+                f"-- local copy kept")
+            ok = False
+            continue
+        src.unlink()
+        log(f"      moved {rel}  ({gb(size)}), content verified")
+
+    for root, _dirs, _files in os.walk(folder, topdown=False):
+        try:
+            if not os.listdir(root):
+                os.rmdir(root)
+        except OSError:
+            pass
+    if not folder.exists():
+        log(f"  removed empty {folder}")
+    return ok
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         description="Move a local session folder to the share, dropping raw .rec traces.")
@@ -226,7 +416,17 @@ def main(argv=None) -> int:
     parser.add_argument("--i-have-backups", action="store_true",
                         help="also delete the raw traces once everything else is "
                              "on the share and the NWBs re-verify there")
+    parser.add_argument("--raw", action="store_true",
+                        help="the day was never converted: move everything, raw "
+                             "traces included, verifying each file's content")
+    parser.add_argument("--dest", type=Path, default=None,
+                        help="move into this folder instead of the session's place "
+                             "on the share -- e.g. merging a session recorded across "
+                             "two disks into one folder. One source folder only.")
     args = parser.parse_args(argv)
+
+    if args.dest is not None and len(args.folders) > 1:
+        parser.error("--dest takes a single source folder")
 
     ignore = frozenset(int(s) for s in args.ignore_shanks.split(",") if s.strip())
     folders = [f for f in args.folders if f.is_dir()]
@@ -236,12 +436,15 @@ def main(argv=None) -> int:
 
     ok = True
     for folder in folders:
-        ok &= migrate(folder, args.expect_shanks, ignore,
-                      args.apply, args.i_have_backups)
+        if args.raw:
+            ok &= move_raw(folder, args.apply, dest=args.dest)
+        else:
+            ok &= migrate(folder, args.expect_shanks, ignore,
+                          args.apply, args.i_have_backups, dest=args.dest)
 
     if not args.apply:
-        print("\n(dry run -- nothing changed. Add --apply, and "
-              "--i-have-backups to also drop the traces.)")
+        print("\n(dry run -- nothing changed. Add --apply" + ("" if args.raw else
+              ", and --i-have-backups to also drop the traces") + ".)")
     return 0 if ok else 1
 
 

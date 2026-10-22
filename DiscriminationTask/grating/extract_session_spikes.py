@@ -12,7 +12,7 @@ from datetime import datetime
 from spikeinterface import load_sorting_analyzer
 from trodes_io import DIO
 from recording_preproc.preproc_func import parse_session_info
-from readDIO_grating import get_trial_params, get_session_position
+from DiscriminationTask.grating.readDIO_task import get_trial_params, get_session_position
 
 
 # --- fallback storage location when the primary server runs low on space ---

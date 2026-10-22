@@ -4,7 +4,7 @@ Per-class neural population similarity for grating data.
 For each class (orientation, optionally per spatial frequency), build a
 population-vector "template" = mean firing-rate vector across units, then
 report two class-by-class Pearson correlation matrices, mirroring the
-diagnostic used in reactivation/sleep/template_loo_correlation.py:
+diagnostic used in reactivation/sleep_apply/template_loo_correlation.py:
 
   1. sample-vs-template
        rows = true class of the trial,
