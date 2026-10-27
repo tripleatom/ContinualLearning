@@ -42,7 +42,8 @@ PBE_COLOR = "#2b83ba"
 ON_COLOR = "#2ca02c"
 # (span s, MUA image bin s or None for a raster) per zoom level
 ZOOMS = ((10.0, 0.01), (2.0, None), (0.5, None))
-# two probes on this animal: shanks 0-3 and 4-7, PBEs detected on each separately
+# two probes per animal, PBEs detected on each separately; CnL43 has no shanks 3 and 5
+PROBES_BY_ANIMAL = {"CnL43": {"P1": (0, 1, 2), "P2": (4, 6, 7)}}
 PROBES = {"P1": (0, 1, 2, 3), "P2": (4, 5, 6, 7)}
 CAT_COLORS = {"P1": "#e66101", "P2": "#5e3c99", "both": "#1b9e77"}
 CAT_LABELS = {"P1": "P1 PBE", "P2": "P2 PBE", "both": "both PBE"}
@@ -277,8 +278,9 @@ def plot_example(d, events, t_center, out_png, title):
             c = 0.5 * (tr["edges"][:-1] + tr["edges"][1:])
             sel = (c >= t0) & (c < t1)
             ax_z.plot(c[sel], tr["z"][sel], color=Z_COLORS[name], lw=1.4 if name == "all" else 1.0,
-                      label={"P1": "probe 1 (sh0-3)", "P2": "probe 2 (sh4-7)",
-                             "all": "both probes (sh0-7)"}[name])
+                      label={"P1": "probe 1 (sh" + "/".join(map(str, PROBES["P1"])) + ")",
+                             "P2": "probe 2 (sh" + "/".join(map(str, PROBES["P2"])) + ")",
+                             "all": "both probes"}[name])
         ax_z.axhline(p["onset_z"], ls="--", lw=0.6, color="0.4")
         ax_z.axhline(p["peak_z"], ls="--", lw=0.6, color="tab:red")
         if col == 0:
@@ -483,6 +485,8 @@ def main(argv=None):
     p.add_argument("--n-shuffle", type=int, default=500)
     p.add_argument("--seed", type=int, default=0)
     args = p.parse_args(argv)
+    PROBES.clear()
+    PROBES.update(PROBES_BY_ANIMAL.get(args.animal, PROBES))
 
     import matplotlib
     matplotlib.use("Agg")

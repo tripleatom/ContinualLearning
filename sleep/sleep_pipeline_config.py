@@ -41,8 +41,8 @@ from sleep_day_registry import entry_animal, load_day_config
 # Which registered animal-day to run. Edit these per session; see module
 # docstring. The registry is keyed by BOTH, so the same date can exist for
 # several animals without them overwriting each other.
-ACTIVE_ANIMAL = "CnL46"
-ACTIVE_DATE = "260729"
+ACTIVE_ANIMAL = "CnL43"
+ACTIVE_DATE = "260920"
 
 # Optional per-run restriction on which sleep session(s) the stages process:
 #   None (or "both") -> every active session for ACTIVE_DATE
@@ -71,7 +71,7 @@ session_name = Path(rec_folder).stem.split('.')[0]
 nwb_session_name = _day_cfg['nwb_session_name']
 
 # Shanks to process (shared by both scripts).
-shanks = list(range(8))
+shanks = [0, 1, 2, 4, 6, 7]
 
 # Folder holding the per-shank LFP / spectrogram .npz files.
 low_freq_folder = Path(rec_folder) / "low_freq"
