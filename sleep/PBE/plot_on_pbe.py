@@ -51,8 +51,8 @@ Z_COLORS = {"P1": "#e66101", "P2": "#5e3c99", "all": "#1b9e77"}
 
 
 # ---------------------------------------------------------------- loading
-def load_inputs(animal, day, block, lfp_shank):
-    paths = dp.block_paths(animal, day, block)
+def load_inputs(animal, day, block, lfp_shank, on_tag=dp.DEFAULT_ON_TAG):
+    paths = dp.block_paths(animal, day, block, on_tag)
     label = f"{paths['session']}_{block}"
     with (Path(paths["out_dir"]) / f"{label}_pbe_mua.pkl").open("rb") as stream:
         pbe = pickle.load(stream)
@@ -476,6 +476,8 @@ def main(argv=None):
     p.add_argument("--day", default="260731")
     p.add_argument("--block", default="post", choices=("pre", "post"))
     p.add_argument("--lfp-shank", type=int, default=5)
+    p.add_argument("--on-tag", default=dp.DEFAULT_ON_TAG,
+                   help="tag of the ON-window pkl (f75_strict_r1hz for runs made with --no-exclude-bad)")
     p.add_argument("--example-times", type=float, nargs="*", default=None,
                    help="centre times (s) for Fig 1; default = densest-PBE moment + random PBEs")
     p.add_argument("--n-random-examples", type=int, default=5,
@@ -485,13 +487,14 @@ def main(argv=None):
     p.add_argument("--n-shuffle", type=int, default=500)
     p.add_argument("--seed", type=int, default=0)
     args = p.parse_args(argv)
+    chosen = dict(PROBES_BY_ANIMAL.get(args.animal, PROBES))   # copy before clearing
     PROBES.clear()
-    PROBES.update(PROBES_BY_ANIMAL.get(args.animal, PROBES))
+    PROBES.update(chosen)
 
     import matplotlib
     matplotlib.use("Agg")
     dp.install_pickle_compat()
-    d = load_inputs(args.animal, args.day, args.block, args.lfp_shank)
+    d = load_inputs(args.animal, args.day, args.block, args.lfp_shank, args.on_tag)
     events = kept_events(d["pbe"])
     cats = probe_categories(d)
     probe_events = np.vstack([cats["P1"], cats["P2"], cats["both"]])

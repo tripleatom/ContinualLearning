@@ -109,6 +109,15 @@ def block_paths(animal, date, block, on_tag=DEFAULT_ON_TAG):
     }
 
 
+def registry_block(animal, date, block, label, fs=30000.0):
+    """SleepBlock from the registry's start/end samples (same space as the MUA epoch)."""
+    day = json.loads(REGISTRY.read_text())[f"{animal}_{date}"][block]
+    start, end = int(day["start_sample"]), int(day["end_sample"])
+    return SleepBlock(label=label, sampling_frequency_hz=fs, day_start_sample=start,
+                      day_end_sample=end, duration_sec=(end - start) / fs,
+                      source_path=str(REGISTRY))
+
+
 def load_mua_trains(path, block, shanks=None):
     """Per-channel MUA threshold crossings (find_sleep_mua.py) in block-local seconds.
 
@@ -422,22 +431,30 @@ def plot_block(path_png, label, events, trace, on_desc, funnel, spike_trains, un
 def run_block(animal, date, block, args):
     paths = block_paths(animal, date, block, args.on_tag)
     label = f"{paths['session']}_{block}"
-    missing = [k for k in ("spikes", "nrem") if not paths[k].is_file()]
+    # sorted spikes are only required for --source units; MUA can take the
+    # sleep window from the registry instead (days with no sleep_spikes pkl)
+    need = ("spikes", "nrem") if args.source == "units" else ("nrem", "mua")
+    missing = [k for k in need if not paths[k].is_file()]
     if paths["on"] is None:
         missing.append(f"on ({args.on_tag})")
     if missing:
         print(f"[{label}] SKIP - missing: {missing}")
         return None
 
-    with paths["spikes"].open("rb") as f:
-        spikes = pickle.load(f)
-    window = spikes["window"]
-    fs = float(spikes["metadata"]["sampling_frequency"])
-    block_obj = SleepBlock(label=label, sampling_frequency_hz=fs,
-                           day_start_sample=int(window["sleep_start_sample"]),
-                           day_end_sample=int(window["sleep_end_sample"]),
-                           duration_sec=float(window["window_duration_sec"]),
-                           source_path=str(paths["spikes"]))
+    if paths["spikes"].is_file():
+        with paths["spikes"].open("rb") as f:
+            spikes = pickle.load(f)
+        window = spikes["window"]
+        fs = float(spikes["metadata"]["sampling_frequency"])
+        block_obj = SleepBlock(label=label, sampling_frequency_hz=fs,
+                               day_start_sample=int(window["sleep_start_sample"]),
+                               day_end_sample=int(window["sleep_end_sample"]),
+                               duration_sec=float(window["window_duration_sec"]),
+                               source_path=str(paths["spikes"]))
+    else:
+        block_obj = registry_block(animal, date, block, label)
+        print(f"[{label}] no sleep_spikes pkl - sleep window from the registry "
+              f"({block_obj.day_start_sample}-{block_obj.day_end_sample})")
     if args.source == "units":
         raw = {uid: rec["spike_times_sec"] for uid, rec in spikes["spike_data"].items()}
         n_total = len(raw)
